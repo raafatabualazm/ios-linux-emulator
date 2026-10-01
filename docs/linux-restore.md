@@ -208,6 +208,20 @@ it does not establish that every app or hardware feature works. Normal GUI
 boot does not provide Bash. The optional AFL branch documents the lab shell
 ramdisk separately.
 
+The phone can turn its screen off while idle. F5 in the viewer presses its
+side button; if it remains dark, repeat once. For headless inspection, the QMP
+helper sends the same button and saves the current display:
+
+```sh
+python3 "$EMULATOR/scripts/linux-restore/qmp.py" "$IPHONE_DATA/qmp.sock" status
+python3 "$EMULATOR/scripts/linux-restore/qmp.py" "$IPHONE_DATA/qmp.sock" wake
+python3 "$EMULATOR/scripts/linux-restore/qmp.py" "$IPHONE_DATA/qmp.sock" screenshot \
+  --output "$IPHONE_DATA/screen.ppm"
+```
+
+Open the PPM with an image viewer after the screen wakes. To stop the emulator,
+run the helper with `quit`; the companion is a separate process.
+
 For an optional boot test that discards guest disk changes on exit, add
 `--snapshot`:
 
