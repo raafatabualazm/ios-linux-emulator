@@ -1,43 +1,51 @@
-# ChefKiss Inferno ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/ChefKissInc/Inferno/build.yaml?style=for-the-badge) ![Written by humans, not AI](https://img.shields.io/badge/written_by_humans-not_ai-blue?style=for-the-badge)
+# iOS Linux Emulator
 
-ChefKiss Inferno is derivative of the QEMU project which provides Apple ARM device guest support.
+A Linux-focused fork of [ChefKissInc/Inferno](https://github.com/ChefKissInc/Inferno),
+which extends QEMU with Apple ARM device support. This fork starts from upstream
+commit `cc4302a99167abec69b714cfd00c38caece7e7de` and publishes the changes used in
+our iPhone 11 / iOS 14 laboratory.
 
-> [!CAUTION]
-> Please consider donating/tipping to help continue the project's development,
-> keeping it free and open-source.
->
-> PayPal or credit/debit card: https://ko-fi.com/chefkiss
->
-> BTC: `bc1qgu56kptepex2csuzl5nhzc4vxuj8c6ggjzhcem`
->
-> SOL: `4PJU3iB5rimN9BNcpzduvmTnptJyedZiAd23so33SAdi`
->
-> ETH: `0x038A25849c23Bc5A736484351a8B6Ad71bC46676`
+## Start here
 
-## More info and usage
+Follow the [Linux restore and GUI guide](docs/linux-restore.md) to build both
+emulators, connect the Linux companion, restore the device, patch its APFS image
+on Linux, and boot to Hello/setup. The [APFS tool reference](scripts/linux-apfs/README.md)
+explains verification and recovery. Firmware, tickets, and device disk images
+are supplied by the user and are not distributed here.
 
-Please see [here](https://chefkiss.dev/applehax/inferno/) for more information about the project and how to use it.
+The default `linux-restore` branch contains:
 
-## Legal Disclaimers
+- A display scanout timer that lets restore progress without an attached viewer.
+- An A13 fix for interprocessor interrupts sent between CPU clusters.
+- NVMe interrupt compatibility changes present in the validated lab build.
+- Linux tools to apply same-size dyld cache changes to an offline raw APFS image,
+  with verification and recovery data.
+- Portable iPhone and companion launch commands.
 
-“ChefKiss Inferno” is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose and noninfringement.
+The optional [afl-persistent branch](https://github.com/raafatabualazm/ios-linux-emulator/tree/afl-persistent)
+adds the lab's Linux AFL integration. It requires an explicit `--enable-afl`
+build; see that branch's [AFL guide](https://github.com/raafatabualazm/ios-linux-emulator/blob/afl-persistent/docs/afl.md).
 
-By using this software, you acknowledge that you are solely responsible for how you use it. The “ChefKiss Inferno” project team is not responsible for any damage, legal issues, data loss, or other consequences arising from its use.
+The APFS tools replace the macOS mounting/copy-back step in the
+[upstream filesystem instructions](https://chefkiss.dev/guides/inferno/fs-patches/).
+They do not implement general APFS write support. The tested target is iPhone 11
+(`t8030`, `n104ap`), iOS 14.0 beta 5 (`18A5351d`). See the guide for validation
+results and the unresolved fresh-restore failure on the course machine.
 
-This project is intended for lawful purposes only. Users are responsible for complying with all applicable laws, licenses, and agreements, including copyright, trademark, and End User License Agreements (EULAs).
+## Attribution and licensing
 
-The “ChefKiss Inferno” project team does not condone or support piracy, copyright infringement, or any illegal activity.
+Credit for the emulator and filesystem patcher belongs to their upstream
+authors. This fork is independently maintained and uses the neutral product
+name **iOS Linux Emulator**. The restricted upstream splash artwork has been
+removed in accordance with the [branding notice](ui/icons/CKBrandingNotice.md).
+Support upstream development at [ChefKiss's donation page](https://ko-fi.com/chefkiss).
 
-This derivative project (“ChefKiss Inferno”) is licensed under the GNU General Public License, version 3, with our own code licensed under the GNU Affero General Public License, version 3. See `LICENSE` for details.
+The source retains its original copyright notices and licenses; see [LICENSE](LICENSE).
+Upstream's derivative project uses GPLv3, with its own code under AGPLv3;
+individual QEMU components retain their applicable original licenses. The
+external filesystem patcher has its own license. This software is provided as
+is, without warranty. QEMU is a trademark of Fabrice Bellard; iOS is a trademark
+of Apple Inc. Neither is affiliated with this fork.
 
-This was done due to other entities shadowing the project with proprietary, paid solutions based mostly verbatim on this project.
-
-The parts of QEMU which are licensed under the "version 2 or later" clause retain their original license restrictions and copyright holders.
-The parts that are only GNU General Public License, version 2, with no "or later" clause, will be removed in subsequent commits.
-You may explicitly contact us for early/faster removal of your code if desired.
-
-Restrictions apply for the branding of the “ChefKiss Inferno” project, see [here](./ui/icons/CKBrandingNotice.md).
-
-QEMU is a copyright and trademark of Fabrice Bellard. QEMU is unaffiliated with this project.
-
-iOS is a copyright and trademark of Apple, Inc. Apple, Inc. is unaffiliated with this project. 
+Some changes and documentation were prepared with AI assistance and reviewed
+against the laboratory results.

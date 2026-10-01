@@ -1,5 +1,9 @@
 /GNUmakefile
 /build/
+/build-*/
+/.venv/
+/afl-patch-backup/
+/scripts/linux-apfs/extent-probe
 /.cache/
 /.vscode/
 *.pyc
