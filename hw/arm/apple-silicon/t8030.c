@@ -19,6 +19,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "afl/afl.h"
 #include "hw/arm/apple-silicon/a13.h"
 #include "hw/arm/apple-silicon/boot.h"
 #include "hw/arm/apple-silicon/dart.h"
@@ -339,6 +340,26 @@ static void t8030_load_kernelcache(AppleT8030MachineState *t8030,
         t8030->kernel, &address_space_memory,
         apple_dt_get_node(t8030->device_tree, "/chosen/memory-map"),
         g_phys_base + g_phys_slide, g_virt_slide);
+
+    /* SA-RIOT AFL: register executable kernel text for the coverage map.
+     * Translated blocks are keyed on the guest virtual PC, and the kernel
+     * runs at its slide-adjusted Mach-O vmaddrs, which is exactly what
+     * apple_boot_fixup_slide_va() computes. */
+    {
+        static const char *afl_segs[] = {
+            "__TEXT_EXEC", "__TEXT_BOOT_EXEC", "__PRELINK_TEXT", "__KLD",
+        };
+        size_t ai;
+
+        for (ai = 0; ai < ARRAY_SIZE(afl_segs); ai++) {
+            MachoSegmentCommand64 *seg =
+                apple_boot_get_segment(t8030->kernel, afl_segs[ai]);
+            if (seg) {
+                afl_add_range(apple_boot_fixup_slide_va(seg->vmaddr),
+                              seg->vmsize);
+            }
+        }
+    }
 
     info_report("Kernel Virtual Base: 0x%016" VADDR_PRIx, g_virt_base);
     info_report("Kernel Physical Base: 0x" HWADDR_FMT_plx, g_phys_base);

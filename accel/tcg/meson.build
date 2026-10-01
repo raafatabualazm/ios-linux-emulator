@@ -2,6 +2,11 @@ if not have_tcg
    subdir_done()
 endif
 
+# The optional forkserver uses Linux task-stop semantics.
+if have_afl
+  system_ss.add(files('afl.c'))
+endif
+
 tcg_ss = ss.source_set()
 
 tcg_ss.add(files(

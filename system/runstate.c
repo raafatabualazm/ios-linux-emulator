@@ -23,6 +23,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "afl/afl.h"
 #include "audio/audio.h"
 #include "block/block.h"
 #include "block/export.h"
@@ -620,6 +621,10 @@ static char *tdx_parse_panic_message(char *message)
 void qemu_system_guest_panicked(GuestPanicInformation *info)
 {
     qemu_log_mask(LOG_GUEST_ERROR, "Guest crashed");
+
+    /* SA-RIOT AFL: make the child die by signal so afl-fuzz records the
+     * panic as a crash. No-op when not running under afl-fuzz. */
+    afl_crash();
 
     if (current_cpu) {
         current_cpu->crash_occurred = true;

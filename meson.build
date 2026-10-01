@@ -152,6 +152,10 @@ have_vhost_net_kernel = have_vhost_kernel and get_option('vhost_net').allowed()
 have_vhost_net = have_vhost_net_kernel or have_vhost_net_vdpa
 
 have_tcg = get_option('tcg').allowed() and have_system
+have_afl = get_option('afl') \
+  .require(host_os == 'linux' and have_tcg,
+           error_message: 'AFL integration requires Linux and system TCG support') \
+  .enabled()
 
 have_tools = get_option('tools') \
   .disable_auto_if(not have_system) \
@@ -2341,6 +2345,7 @@ config_host_data.set('CONFIG_PASST', enable_passt)
 config_host_data.set('CONFIG_SLIRP', slirp.found())
 config_host_data.set('CONFIG_SNAPPY', snappy.found())
 config_host_data.set('CONFIG_SOLARIS', host_os == 'sunos')
+config_host_data.set('CONFIG_AFL', have_afl)
 if have_tcg
   config_host_data.set('CONFIG_TCG', 1)
   config_host_data.set('CONFIG_TCG_INTERPRETER', tcg_arch == 'tci')
@@ -4286,6 +4291,7 @@ if have_system
   summary_info += {'Xen emulation':     config_all_devices.has_key('CONFIG_XEN_EMU')}
 endif
 summary_info += {'TCG support':       config_all_accel.has_key('CONFIG_TCG')}
+summary_info += {'AFL syscall harness': have_afl}
 if config_all_accel.has_key('CONFIG_TCG')
   if get_option('tcg_interpreter')
     summary_info += {'TCG backend':   'TCI (TCG with bytecode interpreter, slow)'}

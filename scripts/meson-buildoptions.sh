@@ -59,9 +59,9 @@ meson_options_help() {
   printf "%s\n" '  --libdir=VALUE           Library directory [system default]'
   printf "%s\n" '  --libexecdir=VALUE       Library executable directory [libexec]'
   printf "%s\n" '  --localedir=VALUE        Locale data directory [share/locale]'
-  printf "%s\n" '  --localstatedir=VALUE    Localstate data directory [/opt/homebrew/var]'
+  printf "%s\n" '  --localstatedir=VALUE    Localstate data directory [/var/local]'
   printf "%s\n" '  --mandir=VALUE           Manual page directory [share/man]'
-  printf "%s\n" '  --prefix=VALUE           Installation prefix [/opt/homebrew]'
+  printf "%s\n" '  --prefix=VALUE           Installation prefix [/usr/local]'
   printf "%s\n" '  --qemu-ga-distro=VALUE   second path element in qemu-ga registry entries'
   printf "%s\n" '                           [Linux]'
   printf "%s\n" '  --qemu-ga-manufacturer=VALUE'
@@ -88,6 +88,7 @@ meson_options_help() {
   printf "%s\n" '(unless built with --without-default-features):'
   printf "%s\n" ''
   printf "%s\n" '  af-xdp          AF_XDP network backend support'
+  printf "%s\n" '  afl             Linux AFL 2.57b persistent syscall harness'
   printf "%s\n" '  alsa            ALSA sound support'
   printf "%s\n" '  attr            attr/xattr support'
   printf "%s\n" '  auth-pam        PAM access control'
@@ -219,6 +220,8 @@ _meson_option_parse() {
   case $1 in
     --enable-af-xdp) printf "%s" -Daf_xdp=enabled ;;
     --disable-af-xdp) printf "%s" -Daf_xdp=disabled ;;
+    --enable-afl) printf "%s" -Dafl=enabled ;;
+    --disable-afl) printf "%s" -Dafl=disabled ;;
     --enable-alsa) printf "%s" -Dalsa=enabled ;;
     --disable-alsa) printf "%s" -Dalsa=disabled ;;
     --enable-asan) printf "%s" -Dasan=true ;;

@@ -25,6 +25,7 @@
 #include "arm_ldst.h"
 #include "semihosting/semihost.h"
 #include "cpregs.h"
+#include "afl/afl.h"
 
 static TCGv_i64 cpu_X[32];
 static TCGv_i64 cpu_pc;
@@ -1906,6 +1907,41 @@ static bool trans_ERETA(DisasContext *s, arg_reta *a)
     gen_helper_exception_return(tcg_env, dst);
     /* Must exit loop to check un-masked IRQs */
     s->base.is_jmp = DISAS_EXIT;
+    return true;
+}
+
+/* SA-RIOT AFL hypercalls. Unpatched-space HINTs are NOPs; the patched
+ * emulator routes them to HELPER(fuzz_hint). */
+static bool trans_FUZZHINT30(DisasContext *s, arg_NOP *a)
+{
+#if defined(CONFIG_AFL) && !defined(CONFIG_USER_ONLY)
+    gen_helper_fuzz_hint(tcg_env, tcg_constant_i32(0x30));
+#endif
+    return true;
+}
+
+static bool trans_FUZZHINT31(DisasContext *s, arg_NOP *a)
+{
+#if defined(CONFIG_AFL) && !defined(CONFIG_USER_ONLY)
+    gen_a64_update_pc(s, 0);
+    gen_helper_fuzz_hint(tcg_env, tcg_constant_i32(0x31));
+#endif
+    return true;
+}
+
+static bool trans_FUZZHINT32(DisasContext *s, arg_NOP *a)
+{
+#if defined(CONFIG_AFL) && !defined(CONFIG_USER_ONLY)
+    gen_helper_fuzz_hint(tcg_env, tcg_constant_i32(0x32));
+#endif
+    return true;
+}
+
+static bool trans_FUZZHINT33(DisasContext *s, arg_NOP *a)
+{
+#if defined(CONFIG_AFL) && !defined(CONFIG_USER_ONLY)
+    gen_helper_fuzz_hint(tcg_env, tcg_constant_i32(0x33));
+#endif
     return true;
 }
 
@@ -10291,6 +10327,14 @@ static void aarch64_tr_init_disas_context(DisasContextBase *dcbase,
 
 static void aarch64_tr_tb_start(DisasContextBase *db, CPUState *cpu)
 {
+#if defined(CONFIG_AFL) && !defined(CONFIG_USER_ONLY)
+    /* SA-RIOT AFL: one coverage call per TB, keyed on the TB first PC.
+     * Emitted here (after gen_tb_start) rather than in init_disas_context
+     * so the ops land after the TB insn_start markers. */
+    if (afl_enabled()) {
+        gen_helper_fuzz_tb_trace(tcg_env, tcg_constant_i64(db->pc_first));
+    }
+#endif
 }
 
 static void aarch64_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)

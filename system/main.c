@@ -24,6 +24,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu-main.h"
+#include "afl/afl.h"
 #include "qemu/main-loop.h"
 #include "system/replay.h"
 #include "system/system.h"
@@ -68,6 +69,10 @@ int (*qemu_main)(void) = os_darwin_cfrunloop_main;
 
 int main(int argc, char **argv)
 {
+    /* SA-RIOT AFL: move afl-fuzz's testcase stream to fd 9 before the
+     * serial chardev can claim fd 0. No-op when not under afl-fuzz. */
+    afl_setup_stdio();
+
     qemu_init(argc, argv);
 
     /*

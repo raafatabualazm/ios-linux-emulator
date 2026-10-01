@@ -27,6 +27,7 @@
 #include "qemu/main-loop.h"
 #include "qemu/bitops.h"
 #include "internals.h"
+#include "afl/afl.h"
 #include "qemu/crc32c.h"
 #include "exec/cpu-common.h"
 #include "accel/tcg/cpu-ldst.h"
@@ -770,6 +771,9 @@ void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
     arm_call_el_change_hook(cpu);
     bql_unlock();
 
+#if defined(CONFIG_AFL) && !defined(CONFIG_USER_ONLY)
+    afl_exception_return(env_cpu(env)->cpu_index);
+#endif
     return;
 
 illegal_return:
@@ -1880,3 +1884,74 @@ uint64_t HELPER(wkdmd)(CPUARMState *env, uint64_t vaddr_in, uint64_t vaddr_out)
 
     return 0x3000;
 }
+
+
+/* ---- Optional Linux AFL hypercalls and coverage ---- */
+
+#if defined(CONFIG_AFL) && !defined(CONFIG_USER_ONLY)
+void HELPER(fuzz_hint)(CPUARMState *env, uint32_t selector)
+{
+    CPUState *cs = env_cpu(env);
+
+    /* Harness calls are EL0-only. Matching XNU hints remain inert. */
+    if (arm_current_el(env) != 0) {
+        return;
+    }
+    if (selector == 0x30) {
+        env->xregs[0] = afl_enabled();
+        return;
+    }
+    if (!afl_enabled()) {
+        /* Never consume an unrelated host fd when no testcase is staged. */
+        if (selector == 0x32) {
+            env->xregs[0] = (uint64_t)-1;
+        }
+        return;
+    }
+
+    switch (selector) {
+    case 0x31:
+        /* Capture the thread and ASLR-adjusted syscall-wrapper anchor. */
+        afl_filter_tid(env->cp15.tpidr_el[1]);
+        afl_scope_anchor(env->pc);
+        break;
+    case 0x32: {
+        uint64_t buf = env->xregs[1];
+        uint64_t nbyte = env->xregs[2];
+        void *buffer;
+        ssize_t n;
+
+        /* AFL uses testcases up to 1 MiB. Reject larger guest requests
+         * before allocating host memory or consuming any testcase bytes. */
+        if (nbyte > AFL_MAX_TESTCASE_SIZE) {
+            env->xregs[0] = (uint64_t)-1;
+            break;
+        }
+        buffer = g_malloc0(nbyte ? nbyte : 1);
+        n = read(9, buffer, nbyte);
+        if (n > 0 && cpu_memory_rw_debug(cs, buf, buffer, n, true) < 0) {
+            n = -1;
+        }
+        g_free(buffer);
+        env->xregs[0] = (uint64_t)(int64_t)n;
+        break;
+    }
+    case 0x33:
+        afl_persistent_boundary();
+        break;
+    default:
+        break;
+    }
+}
+
+void HELPER(fuzz_tb_trace)(CPUARMState *env, uint64_t pc)
+{
+    /* Per-vCPU history keeps parallel TCG block streams independent. */
+    if (arm_current_el(env) != 0) {
+        afl_maybe_log(pc, pc + 4, env->cp15.tpidr_el[1],
+                      env_cpu(env)->cpu_index, env->cp15.vbar_el[1]);
+    } else {
+        afl_user_pc(pc, env->cp15.tpidr_el[1], env_cpu(env)->cpu_index);
+    }
+}
+#endif
