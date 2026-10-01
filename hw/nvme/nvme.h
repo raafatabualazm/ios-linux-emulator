@@ -524,6 +524,7 @@ typedef struct NvmeCQueue {
     uint64_t    db_addr;
     uint64_t    ei_addr;
     QEMUBH      *bh;
+    QEMUTimer   *irq_kick;
     EventNotifier notifier;
     bool        ioeventfd_enabled;
     QTAILQ_HEAD(, NvmeSQueue) sq_list;

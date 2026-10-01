@@ -292,10 +292,11 @@ static void apple_a13_cluster_tick(AppleA13Cluster *c)
     }
 
     for (uint32_t src = 0; src < A13_MAX_CPU; ++src) {
-        if (!c->cpus[src]) {
-            continue;
-        }
-
+        /*
+         * The pending arrays are indexed by the sender's global CPU ID.
+         * A global IPI's sender belongs to another cluster, so it need not
+         * be present in this destination cluster's cpus array.
+         */
         const uint32_t noWakeCandidates = c->noWakeIPI[src] & awake;
         const uint32_t candidates =
             noWakeCandidates | (c->deferredIPI[src] & on);

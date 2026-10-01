@@ -204,6 +204,7 @@
 #include "system/system.h"
 #include "system/block-backend.h"
 #include "system/hostmem.h"
+#include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/pcie_sriov.h"
 #include "system/spdm-socket.h"
@@ -658,12 +659,43 @@ static uint8_t nvme_sq_empty(NvmeSQueue *sq)
     return sq->head == sq->tail;
 }
 
+static void nvme_notify_vec(NvmeCtrl *n, NvmeCQueue *cq)
+{
+    PCIDevice *pci = &n->parent_obj;
+
+    if (msix_enabled(pci)) {
+        trace_pci_nvme_irq_msix(cq->vector);
+        msix_notify(pci, cq->vector);
+        return;
+    }
+    if (msi_enabled(pci)) {
+        unsigned int vector = cq->vector;
+        unsigned int nvec = msi_nr_vectors_allocated(pci);
+
+        /*
+         * Apple ANS exposes a single MSI vector. iOS still programs per-queue
+         * vector numbers; deliver them on the one vector the device has.
+         * msi_notify re-latches the AIC line. pci_irq_assert does not, because
+         * a second assert while the pin is already high is dropped, and INTx
+         * is masked once the guest enables MSI.
+         */
+        if (nvec == 0) {
+            return;
+        }
+        if (vector >= nvec) {
+            vector = 0;
+        }
+        trace_pci_nvme_irq_msix(vector);
+        msi_notify(pci, vector);
+    }
+}
+
 static void nvme_irq_check(NvmeCtrl *n)
 {
     PCIDevice *pci = &n->parent_obj;
     uint32_t intms = ldl_le_p(&n->bar.intms);
 
-    if (msix_enabled(pci)) {
+    if (msix_enabled(pci) || msi_enabled(pci)) {
         return;
     }
 
@@ -684,13 +716,16 @@ static void nvme_irq_assert(NvmeCtrl *n, NvmeCQueue *cq)
     PCIDevice *pci = &n->parent_obj;
 
     if (cq->irq_enabled) {
-        if (msix_enabled(pci)) {
-            trace_pci_nvme_irq_msix(cq->vector);
-            msix_notify(pci, cq->vector);
+        if (msix_enabled(pci) || msi_enabled(pci)) {
+            nvme_notify_vec(n, cq);
         } else {
             trace_pci_nvme_irq_pin();
             assert(cq->vector < 32);
             n->irq_status |= 1 << cq->vector;
+            /* Pulse so a completion that arrives while the pin is already
+             * high still produces a rising edge. A level that never falls
+             * is invisible to pci_irq_handler. */
+            pci_irq_deassert(pci);
             nvme_irq_check(n);
         }
     } else {
@@ -701,7 +736,7 @@ static void nvme_irq_assert(NvmeCtrl *n, NvmeCQueue *cq)
 static void nvme_irq_deassert(NvmeCtrl *n, NvmeCQueue *cq)
 {
     if (cq->irq_enabled) {
-        if (msix_enabled(&n->parent_obj)) {
+        if (msix_enabled(&n->parent_obj) || msi_enabled(&n->parent_obj)) {
             return;
         } else {
             assert(cq->vector < 32);
@@ -1503,6 +1538,28 @@ static void nvme_update_cq_head(NvmeCQueue *cq)
     trace_pci_nvme_update_cq_head(cq->cqid, cq->head);
 }
 
+static void nvme_cq_kick(void *opaque)
+{
+    NvmeCQueue *cq = opaque;
+
+    if (cq->tail == cq->head || !cq->irq_enabled) {
+        return;
+    }
+    /* Guest is still sitting on a posted completion. Say so again. */
+    nvme_irq_assert(cq->ctrl, cq);
+    timer_mod_ns(cq->irq_kick,
+                 qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 200 * SCALE_MS);
+}
+
+static void nvme_arm_cq_kick(NvmeCQueue *cq)
+{
+    if (!cq->irq_kick) {
+        cq->irq_kick = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_cq_kick, cq);
+    }
+    timer_mod_ns(cq->irq_kick,
+                 qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 200 * SCALE_MS);
+}
+
 static void nvme_post_cqes(void *opaque)
 {
     NvmeCQueue *cq = opaque;
@@ -1555,6 +1612,7 @@ static void nvme_post_cqes(void *opaque)
         }
 
         nvme_irq_assert(n, cq);
+        nvme_arm_cq_kick(cq);
     }
 }
 
@@ -5522,6 +5580,11 @@ static void nvme_free_cq(NvmeCQueue *cq, NvmeCtrl *n)
 
     n->cq[cq->cqid] = NULL;
     qemu_bh_delete(cq->bh);
+    if (cq->irq_kick) {
+        timer_del(cq->irq_kick);
+        timer_free(cq->irq_kick);
+        cq->irq_kick = NULL;
+    }
     if (cq->ioeventfd_enabled) {
         memory_region_del_eventfd(&n->iomem,
                                   0x1000 + offset, 4, false, 0, &cq->notifier);

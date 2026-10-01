@@ -25,7 +25,6 @@
 #include "hw/qdev-properties.h"
 #include "hw/registerfields.h"
 #include "migration/vmstate.h"
-#include "qemu/cutils.h"
 #include "qemu/log.h"
 #include "system/dma.h"
 #include "ui/console.h"
@@ -34,12 +33,6 @@
 #include "pixman.h"
 #else
 #error "Pixman support is required"
-#endif
-
-#ifdef CONFIG_PNG
-#include <png.h>
-#else
-#error "PNG support is required"
 #endif
 
 #if 0
@@ -176,7 +169,7 @@ struct AppleDisplayPipeV4State {
     ADPV4BlendUnitState blend_unit;
     QemuConsole *console;
     QEMUBH *update_disp_image_bh;
-    QEMUTimer *boot_splash_timer;
+    QEMUTimer *scanout_timer;
 };
 
 static const VMStateDescription vmstate_adp_v4 = {
@@ -194,7 +187,7 @@ static const VMStateDescription vmstate_adp_v4 = {
                                  ADPV4GenPipe),
             VMSTATE_STRUCT(blend_unit, AppleDisplayPipeV4State, 0,
                            vmstate_adp_v4_blend_unit, ADPV4BlendUnitState),
-            VMSTATE_TIMER_PTR(boot_splash_timer, AppleDisplayPipeV4State),
+            VMSTATE_TIMER_PTR(scanout_timer, AppleDisplayPipeV4State),
             VMSTATE_END_OF_LIST(),
         },
 };
@@ -676,6 +669,42 @@ static void adp_v4_gfx_update(void *opaque)
     adp_v4_update_irqs(adp);
 }
 
+#define ADP_V4_SCANOUT_INTERVAL_NS (NANOSECONDS_PER_SECOND / 60)
+
+static void adp_v4_scanout_timer(void *opaque)
+{
+    AppleDisplayPipeV4State *adp = opaque;
+
+    /*
+     * Real hardware scans out continuously, so the pipe always makes progress
+     * on its own. QEMU only invokes our gfx_update via graphic_hw_update(),
+     * which no backend calls on a plain periodic basis:
+     *
+     *   - dpy_refresh() (ui/console.c) runs the listeners' *refresh* ops; this
+     *     device registers none, so the GUI timer never reaches us.
+     *   - VNC does call graphic_hw_update() (ui/vnc.c:2342, :3265, :3384), but
+     *     the periodic one in vnc_refresh() returns early on
+     *     QTAILQ_EMPTY(&vd->clients), and the other two are client-driven.
+     *     So it only fires while a viewer is actually attached.
+     *   - Under -display none there is no backend at all.
+     *
+     * In every headless configuration, then - -display none, or -vnc with
+     * nobody watching - nothing called adp_v4_gfx_update, so OUTPUT_READY was
+     * never raised and the guest blocked forever in
+     * IOMobileFramebufferLegacy::swap_wait_gated, which wedged `restored` and
+     * hung the whole restore.
+     *
+     * Note the corollary: attaching a VNC viewer to the guest masks the bug.
+     * A headless A/B is the only honest way to test this.
+     *
+     * Drive our own scanout so the pipe progresses under any backend, or none.
+     */
+    graphic_hw_update(adp->console);
+
+    timer_mod(adp->scanout_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                                      ADP_V4_SCANOUT_INTERVAL_NS);
+}
+
 static const GraphicHwOps adp_v4_ops = {
     .invalidate = adp_v4_invalidate,
     .gfx_update = adp_v4_gfx_update,
@@ -700,137 +729,6 @@ static void adp_v4_update_disp_image_ptr(AppleDisplayPipeV4State *adp)
     qemu_pixman_image_unref(image);
 }
 
-typedef struct {
-    AppleDisplayPipeV4State *adp;
-    uint32_t width;
-    uint32_t height;
-    pixman_transform_t transform;
-    double dest_width;
-    int16_t dest_x;
-    int16_t dest_y;
-    pixman_image_t *image;
-    pixman_image_t *disp_image;
-} ADPV4DrawBootSplashContext;
-
-static void adp_v4_draw_boot_splash(void *opaque)
-{
-    ADPV4DrawBootSplashContext *ctx = opaque;
-
-    pixman_image_composite(PIXMAN_OP_SRC, ctx->image, NULL, ctx->disp_image, 0,
-                           0, 0, 0, ctx->dest_x, ctx->dest_y, ctx->dest_width,
-                           ctx->dest_width);
-
-    dpy_gfx_update_full(ctx->adp->console);
-}
-
-static void adp_v4_draw_boot_splash_timer(void *opaque)
-{
-    ADPV4DrawBootSplashContext *ctx = opaque;
-
-    adp_v4_draw_boot_splash(ctx);
-
-    pixman_image_unref(ctx->image);
-    timer_free(ctx->adp->boot_splash_timer);
-    ctx->adp->boot_splash_timer = NULL;
-    g_free(ctx);
-}
-
-// Please see `ui/icons/CKBrandingNotice.md`
-static void adp_v4_read_and_draw_boot_splash(AppleDisplayPipeV4State *adp)
-{
-    char *path;
-    FILE *fp;
-    uint8_t sig[8] = { 0 };
-    png_structp png_ptr;
-    png_infop info_ptr;
-    ADPV4DrawBootSplashContext *ctx;
-    uint32_t *data;
-    png_bytep *row_ptrs;
-    uint32_t disp_width;
-    uint32_t disp_height;
-
-    path = get_relocated_path(CONFIG_QEMU_ICONDIR
-                              "/hicolor/512x512/apps/CKQEMUBootSplash@2x.png");
-    assert_nonnull(path);
-    fp = fopen(path, "rb");
-    if (fp == NULL) {
-        error_setg(&error_abort, "Missing emulator branding: %s.", path);
-        return;
-    }
-    fread(sig, sizeof(sig), 1, fp);
-    if (png_sig_cmp(sig, 0, sizeof(sig)) != 0) {
-        error_setg(&error_abort, "Invalid emulator branding: %s.", path);
-        return;
-    }
-    g_free(path);
-    png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    assert_nonnull(png_ptr);
-    info_ptr = png_create_info_struct(png_ptr);
-    assert_nonnull(info_ptr);
-    png_init_io(png_ptr, fp);
-    png_set_sig_bytes(png_ptr, sizeof(sig));
-
-    png_read_info(png_ptr, info_ptr);
-
-    ctx = g_new(ADPV4DrawBootSplashContext, 1);
-    ctx->width = png_get_image_width(png_ptr, info_ptr);
-    ctx->height = png_get_image_height(png_ptr, info_ptr);
-    ctx->image =
-        pixman_image_create_bits(PIXMAN_a8b8g8r8, ctx->width, ctx->height, NULL,
-                                 ctx->width * sizeof(uint32_t));
-    data = pixman_image_get_data(ctx->image);
-
-    png_read_update_info(png_ptr, info_ptr);
-
-    row_ptrs = g_new(png_bytep, ctx->height);
-    for (size_t y = 0; y < ctx->height; y++) {
-        row_ptrs[y] = (png_bytep)(data + (y * ctx->width));
-    }
-
-    png_read_image(png_ptr, row_ptrs);
-
-    g_free(row_ptrs);
-    png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
-    fclose(fp);
-
-    disp_width = qemu_console_get_width(adp->console, 0);
-    disp_height = qemu_console_get_height(adp->console, 0);
-
-    ctx->adp = adp;
-    ctx->dest_width = (double)disp_width / 1.5;
-    ctx->dest_x = (disp_width / 2) - (ctx->dest_width / 2);
-    ctx->dest_y = (disp_height / 2) - (ctx->dest_width / 2);
-    ctx->disp_image = qemu_console_surface(adp->console)->image;
-
-    pixman_image_set_filter(ctx->image, PIXMAN_FILTER_BEST, NULL, 0);
-    pixman_transform_init_identity(&ctx->transform);
-    pixman_transform_scale(
-        &ctx->transform, NULL,
-        pixman_double_to_fixed((double)ctx->width / ctx->dest_width),
-        pixman_double_to_fixed((double)ctx->height / ctx->dest_width));
-    pixman_image_set_transform(ctx->image, &ctx->transform);
-
-    pixman_rectangle16_t rect = {
-        .x = 0,
-        .y = 0,
-        .width = disp_width,
-        .height = disp_height,
-    };
-    pixman_color_t color = QEMU_PIXMAN_COLOR_BLACK;
-
-    pixman_image_fill_rectangles(PIXMAN_OP_SRC, ctx->disp_image, &color, 1,
-                                 &rect);
-
-    adp_v4_draw_boot_splash(ctx);
-
-    adp->boot_splash_timer =
-        timer_new_ns(QEMU_CLOCK_VIRTUAL, adp_v4_draw_boot_splash_timer, ctx);
-
-    // Workaround for `-v` removing the boot splash.
-    timer_mod(adp->boot_splash_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                                          (NANOSECONDS_PER_SECOND / 2));
-}
-
 static void adp_v4_reset_hold(Object *obj, ResetType type)
 {
     AppleDisplayPipeV4State *adp = APPLE_DISPLAY_PIPE_V4(obj);
@@ -845,8 +743,6 @@ static void adp_v4_reset_hold(Object *obj, ResetType type)
     adp_v4_gp_reset(&adp->genpipe[0]);
     adp_v4_gp_reset(&adp->genpipe[1]);
     adp_v4_blend_reset(&adp->blend_unit);
-
-    adp_v4_read_and_draw_boot_splash(adp);
 }
 
 static void adp_v4_realize(DeviceState *dev, Error **errp)
@@ -854,6 +750,11 @@ static void adp_v4_realize(DeviceState *dev, Error **errp)
     AppleDisplayPipeV4State *adp = APPLE_DISPLAY_PIPE_V4(dev);
 
     adp->console = graphic_console_init(dev, 0, &adp_v4_ops, adp);
+
+    adp->scanout_timer =
+        timer_new_ns(QEMU_CLOCK_VIRTUAL, adp_v4_scanout_timer, adp);
+    timer_mod(adp->scanout_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                                      ADP_V4_SCANOUT_INTERVAL_NS);
 }
 
 static const Property adp_v4_props[] = {

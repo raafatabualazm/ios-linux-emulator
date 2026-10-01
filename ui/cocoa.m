@@ -1187,9 +1187,9 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
     COCOA_DEBUG("QemuCocoaView: grabMouse\n");
 
     if (qemu_name)
-        [[self window] setTitle:[NSString stringWithFormat:@"ChefKiss Inferno %s - (Press  " UC_CTRL_KEY " " UC_ALT_KEY " G  to release Mouse)", qemu_name]];
+        [[self window] setTitle:[NSString stringWithFormat:@"iOS Linux Emulator %s - (Press  " UC_CTRL_KEY " " UC_ALT_KEY " G  to release Mouse)", qemu_name]];
     else
-        [[self window] setTitle:@"ChefKiss Inferno - (Press  " UC_CTRL_KEY " " UC_ALT_KEY " G  to release Mouse)"];
+        [[self window] setTitle:@"iOS Linux Emulator - (Press  " UC_CTRL_KEY " " UC_ALT_KEY " G  to release Mouse)"];
     [self hideCursor];
     CGAssociateMouseAndMouseCursorPosition(isAbsoluteEnabled);
     isMouseGrabbed = TRUE; // while isMouseGrabbed = TRUE, QemuCocoaApp sends all events to [cocoaView handleEvent:]
@@ -1200,9 +1200,9 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
     COCOA_DEBUG("QemuCocoaView: ungrabMouse\n");
 
     if (qemu_name)
-        [[self window] setTitle:[NSString stringWithFormat:@"ChefKiss Inferno %s", qemu_name]];
+        [[self window] setTitle:[NSString stringWithFormat:@"iOS Linux Emulator %s", qemu_name]];
     else
-        [[self window] setTitle:@"ChefKiss Inferno"];
+        [[self window] setTitle:@"iOS Linux Emulator"];
     [self unhideCursor];
     CGAssociateMouseAndMouseCursorPosition(TRUE);
     isMouseGrabbed = FALSE;
@@ -1309,7 +1309,7 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
         }
         [window setAcceptsMouseMovedEvents:YES];
         [window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
-        [window setTitle:qemu_name ? [NSString stringWithFormat:@"ChefKiss Inferno %s", qemu_name] : @"ChefKiss Inferno"];
+        [window setTitle:qemu_name ? [NSString stringWithFormat:@"iOS Linux Emulator %s", qemu_name] : @"iOS Linux Emulator"];
         [window setContentView:cocoaView];
         [window makeKeyAndOrderFront:self];
         [window center];
@@ -1655,8 +1655,8 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
     NSString *icon_path = [NSString stringWithUTF8String:icon_path_c];
     g_free(icon_path_c);
     NSImage *icon = [[NSImage alloc] initWithContentsOfFile:icon_path];
-    NSString *version = @"ChefKiss Inferno emulator version " QEMU_FULL_VERSION;
-    NSString *copyright = @QEMU_COPYRIGHT "\n\nChefKiss Inferno\nCopyright (c) 2023-2026 Visual Ehrmanntraut and Inferno team";
+    NSString *version = @"iOS Linux Emulator version " QEMU_FULL_VERSION;
+    NSString *copyright = @QEMU_COPYRIGHT "\n\niOS Linux Emulator\nCopyright (c) 2023-2026 Visual Ehrmanntraut and Inferno team";
     NSDictionary *options;
     if (icon) {
         options = @{
