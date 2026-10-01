@@ -31,6 +31,8 @@ The APFS tools replace the macOS mounting/copy-back step in the
 They do not implement general APFS write support. The tested target is iPhone 11
 (`t8030`, `n104ap`), iOS 14.0 beta 5 (`18A5351d`). See the guide for validation
 results and the unresolved fresh-restore failure on the course machine.
+The [publication validation record](docs/validation.md) also records a host
+startup crash observed before a successful GUI retry.
 
 ## Attribution and licensing
 
