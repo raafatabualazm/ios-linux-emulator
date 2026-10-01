@@ -1,29 +1,18 @@
 /*
- * AFL 2.57b forkserver, coverage map, and persistent-mode handshake for
- * ChefKiss Inferno. Ported from the qemu-t8030 integration
- * used by the iOS 14 edition of this module (softmmu/afl-bootstrap.c and
- * the HINT #0x3X hypercalls in target/arm/helper-a64.c).
+ * Linux AFL 2.57b forkserver, coverage map, and persistent handshake for
+ * iOS Linux Emulator. Ported from the qemu-t8030 integration, with per-vCPU
+ * edge history and synchronous thread-stop verification for parallel TCG.
  *
- * The iOS 27 qemu-sptm port has its own runtime in qemu-afl/. This Inferno
- * runtime adds per-vCPU edge history and a synchronous persistent stop so
- * parallel TCG execution cannot corrupt iteration boundaries or the map.
+ * The guest boots once and keeps kernel state between cases; no snapshot
+ * reset is performed. The AArch64 translator emits coverage helper calls.
+ * See docs/afl.md for the HINT contract and validated coverage scope.
  *
- * Differences from the original iOS 14 edition:
- *
- *   - qemu-t8030 restored a savevm snapshot between cases. Both modern
- *     trees use persistent mode instead, with no guest-state reset: the guest
- *     boots once and the harness loops over testcases. Guest kernel state
- *     accumulates across cases, which is documented in the chapter. On
- *     qemu-sptm this was forced (`loadvm` fails in the ARM cpreg post-load
- *     hook); the Inferno lab uses its harness loop directly.
- *
- *   - qemu-t8030 hooked TB execution from cpu-exec.c, which was compiled
- *     per target in QEMU 6.1. Modern QEMU compiles it once, so the coverage
- *     call is emitted per translation block from the AArch64 translator
- *     instead (HELPER(fuzz_tb_trace)).
- *
- * The forkserver writes hello on FORKSRV_FD + 1, forks on demand, then
- * waits for all vCPU threads to stop before publishing the map.
+ * Forkserver logic derives from AFL's LLVM instrumentation bootstrap:
+ * Copyright 2015 Google LLC. All rights reserved.
+ * Written by Laszlo Szekeres and Michal Zalewski.
+ * Those portions are licensed under the Apache License, Version 2.0;
+ * see afl-license.txt. Emulator-specific additions follow this repository's
+ * applicable source license. Modified for this fork.
  */
 #include "qemu/osdep.h"
 #include <dirent.h>

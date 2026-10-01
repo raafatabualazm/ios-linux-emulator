@@ -90,7 +90,7 @@ python3 scripts/inferno-afl/validate_runtime.py \
 
 python3 scripts/inferno-afl/run_afl_smoke.py \
   --lab "$INFERNO_LAB" --data "$INFERNO_DATA" --afl "$INFERNO_AFL" \
-  --seconds 50 --out-dir /tmp/inferno-smoke
+  --seconds 50 --timeout-ms 30000 --out-dir /tmp/inferno-smoke
 ```
 
 The replay uses AFL's actual forkserver protocol with seven guest CPUs. Its
@@ -101,6 +101,16 @@ with complete serial and map files beside it. Check that every repeated
 input has the same map, that the two syscalls have different maps, and that
 empty input contributes no coverage beyond AFL's live-map marker. The
 smoke helper records AFL's own `fuzzer_stats` in its report.
+
+Allow at least a 50-second smoke window and run one guest at a time when
+checking the baseline. Initial guest boot counts toward AFL's testcase
+timeout; the default 30-second allowance avoids the previous 10-second
+timeout under compilation or concurrent-guest load. Increase
+`--timeout-ms` and `--seconds` together on slower hosts. A completed report
+means AFL ran until the requested time limit, stopped cleanly, and recorded
+completed executions. Early AFL aborts, missing statistics, and forced
+shutdowns produce `status: failed` and a nonzero helper exit code. Preserve
+those logs when investigating boot or resource failures.
 
 Replay a saved queue, hang, or crash input from a fresh guest boot:
 

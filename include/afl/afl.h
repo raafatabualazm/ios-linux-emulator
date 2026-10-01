@@ -1,7 +1,6 @@
 /*
- * AFL 2.57b integration for ChefKiss Inferno (iOS 14 / t8030), based on
- * the qemu-t8030 design from the iOS 14 edition of this module. The iOS 27
- * qemu-sptm port has a separate runtime under qemu-afl/.
+ * AFL 2.57b integration for iOS Linux Emulator (iOS 14 / t8030), based on
+ * the qemu-t8030 design. See docs/afl.md for setup and validated scope.
  *
  * The host side of the contract (all implemented in accel/tcg/afl.c):
  *   - a constructor starts the forkserver before qemu_init() creates any

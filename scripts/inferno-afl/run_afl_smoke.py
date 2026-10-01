@@ -29,13 +29,15 @@ def main():
                         help='new directory for copied disks, seeds, and AFL results')
     parser.add_argument('--seconds', type=int, default=50,
                         help='maximum AFL runtime (default: 50)')
+    parser.add_argument('--timeout-ms', type=int, default=30000,
+                        help='AFL testcase timeout including initial guest boot (default: 30000 ms)')
     args = parser.parse_args()
     rt.configure_paths(args, parser)
     AFL = args.afl.expanduser().resolve()
     if not AFL.is_file() or not os.access(AFL, os.X_OK):
         parser.error(f'afl-fuzz executable is missing or not executable: {AFL}')
-    if args.seconds <= 0 or args.smp <= 0:
-        parser.error('--seconds and --smp must be positive')
+    if args.seconds <= 0 or args.smp <= 0 or args.timeout_ms <= 0:
+        parser.error('--seconds, --smp, and --timeout-ms must be positive')
     scope = None if args.wide_coverage else os.getenv(
         'AFL_HARNESS_SCOPE', rt.DEFAULT_HARNESS_SCOPE)
     if scope and args.no_tid_filter:
@@ -57,7 +59,7 @@ def main():
     qemu[qemu.index('-smp') + 1] = str(args.smp)
     i = qemu.index('-d')
     del qemu[i:i+6]
-    argv = [str(AFL), '-m', '16G', '-t', '10000', '-i', str(corpus),
+    argv = [str(AFL), '-m', '16G', '-t', str(args.timeout_ms), '-i', str(corpus),
             '-o', str(WORK / 'out')] + qemu
     env = dict(os.environ, AFL_SKIP_CPUFREQ='1',
                AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES='1',
@@ -72,6 +74,8 @@ def main():
         env.pop('AFL_NO_TID_FILTER', None)
     (WORK / 'argv.json').write_text(json.dumps(argv, indent=2) + '\n')
     start = time.monotonic()
+    stopped_at_limit = False
+    forced_stop = False
     with (WORK / 'afl-console.log').open('wb') as log:
         process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
                                    stdout=log, stderr=subprocess.STDOUT,
@@ -79,15 +83,27 @@ def main():
         try:
             process.wait(timeout=args.seconds)
         except subprocess.TimeoutExpired:
+            stopped_at_limit = True
             os.killpg(process.pid, signal.SIGINT)
             try:
                 process.wait(timeout=6)
             except subprocess.TimeoutExpired:
+                forced_stop = True
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
     report = {'elapsed_seconds': round(time.monotonic()-start, 3),
+              'requested_seconds': args.seconds,
+              'testcase_timeout_ms': args.timeout_ms,
+              'stopped_at_time_limit': stopped_at_limit,
               'coverage_scope': scope or 'wide kernel coverage',
               'afl_exit_code': process.returncode}
+    errors = []
+    if not stopped_at_limit:
+        errors.append('AFL exited before the requested run window')
+    if forced_stop:
+        errors.append('AFL did not stop after SIGINT and required SIGKILL')
+    if process.returncode != 0:
+        errors.append(f'AFL exited with code {process.returncode}; inspect afl-console.log')
     stats = WORK / 'out' / 'fuzzer_stats'
     if stats.exists():
         report['fuzzer_stats'] = {
@@ -95,8 +111,21 @@ def main():
             for line in stats.read_text().splitlines() if ':' in line
             for key, value in [line.split(':', 1)]
         }
+        try:
+            executions = int(report['fuzzer_stats'].get('execs_done', '0'))
+        except ValueError:
+            executions = 0
+        if executions <= 0:
+            errors.append('AFL statistics contain no completed executions')
+    else:
+        errors.append('AFL did not produce fuzzer_stats; inspect afl-console.log')
+    report['status'] = 'failed' if errors else 'completed'
+    if errors:
+        report['errors'] = errors
     (WORK / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))
+    if errors:
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':
