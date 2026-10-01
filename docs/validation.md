@@ -71,8 +71,8 @@ Map SHA-256 values:
 
 The final enabled executable's SHA-256 is
 `4b3ef42a44f6458310483093ea5bf9724440589100ed2b5e0d4afa3592d68110`.
-The repeat test preceded an attribution-comment-only rebuild; the smoke and
-shell checks used this final executable. Narrow-scope repeatability and a short
+The repeat and shell tests preceded an attribution-comment-only rebuild; the
+smoke check used this final executable. Narrow-scope repeatability and a short
 smoke run do not establish whole-kernel coverage or long-run stability.
 
 ## Earlier restore results and remaining gaps
