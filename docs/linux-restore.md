@@ -215,6 +215,7 @@ helper sends the same button and saves the current display:
 ```sh
 python3 "$EMULATOR/scripts/linux-restore/qmp.py" "$IPHONE_DATA/qmp.sock" status
 python3 "$EMULATOR/scripts/linux-restore/qmp.py" "$IPHONE_DATA/qmp.sock" wake
+sleep 3
 python3 "$EMULATOR/scripts/linux-restore/qmp.py" "$IPHONE_DATA/qmp.sock" screenshot \
   --output "$IPHONE_DATA/screen.ppm"
 ```
@@ -253,6 +254,13 @@ transfer finishes, then `update_iBoot` crashes and a DART panic follows. Its GUI
 validation used the successful local disk set. The dyld patch and boot argument
 were tested together, without isolating their individual effects. Old snapshots
 and cross-version migration have not been validated with these state changes.
+
+The [publication validation record](validation.md) distinguishes those earlier
+restore results from tests of the fork's fresh binaries. The fresh fork reached
+Hello/setup on a debugger retry after one startup attempt exited with a host
+segmentation fault; that fault has no identified cause yet. GUI boot is verified,
+but completely reliable startup is not established. Allow the phone to finish
+booting before waking it, and retain the emulator output if startup fails.
 
 See the [upstream manual](https://chefkiss.dev/guides/inferno/) for device setup
 and [upstream repository](https://github.com/ChefKissInc/Inferno) for attribution.
