@@ -9,6 +9,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'boot.c',
     'dt.c',
     'mem.c',
+    'modern-boot-layout.c',
     'mt-spi.c',
     'sep-sim.c',
     'sep.c',

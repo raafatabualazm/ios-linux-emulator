@@ -98,6 +98,11 @@ struct AppleMTSPIState {
     int32_t prev_btn_state;
     uint32_t display_width;
     uint32_t display_height;
+    /* Host-only epoch: queued touch updates must not survive device reset. */
+    uint64_t touch_generation;
+    /* Host-only FIFO; one scheduled BH drains it in input-event order. */
+    GQueue touch_updates;
+    bool touch_bh_pending;
 };
 
 static const VMStateDescription vmstate_apple_mt_spi = {
@@ -806,7 +811,9 @@ static uint32_t apple_mt_spi_transfer(SSIPeripheral *dev, uint32_t val)
 }
 
 static void apple_mt_spi_send_path_update(AppleMTSPIState *s, uint64_t ts,
-                                          uint8_t path_stage)
+                                          uint8_t path_stage, int16_t x,
+                                          int16_t y, int16_t prev_x,
+                                          int16_t prev_y)
 {
     AppleMTSPILLPacket *packet;
     uint64_t ts_delta;
@@ -819,8 +826,8 @@ static void apple_mt_spi_send_path_update(AppleMTSPIState *s, uint64_t ts,
     ts_delta = MAX(ts_delta, 1); // Prevent div-by-zero
     s->prev_ts = ts;
 
-    x_delta = s->x - s->prev_x;
-    y_delta = s->y - s->prev_y;
+    x_delta = x - prev_x;
+    y_delta = y - prev_y;
 
     packet->type = LL_PACKET_LOSSLESS_OUTPUT;
     apple_mt_spi_buf_ensure_capacity(&packet->buf, 9 + 27 + 20 + 2);
@@ -852,8 +859,8 @@ static void apple_mt_spi_send_path_update(AppleMTSPIState *s, uint64_t ts,
     apple_mt_spi_buf_push_byte(&packet->buf, path_stage);
     apple_mt_spi_buf_push_byte(&packet->buf, 1); // Finger ID
     apple_mt_spi_buf_push_byte(&packet->buf, 1); // Hand ID
-    apple_mt_spi_buf_push_word(&packet->buf, s->x);
-    apple_mt_spi_buf_push_word(&packet->buf, s->y);
+    apple_mt_spi_buf_push_word(&packet->buf, x);
+    apple_mt_spi_buf_push_word(&packet->buf, y);
     apple_mt_spi_buf_push_word(&packet->buf, ABS(x_delta) / ts_delta * 1000);
     apple_mt_spi_buf_push_word(&packet->buf, ABS(y_delta) / ts_delta * 1000);
     apple_mt_spi_buf_push_word(&packet->buf, 660); // rad0
@@ -896,6 +903,11 @@ typedef struct {
     AppleMTSPIState *s;
     uint64_t ts;
     uint8_t path_stage;
+    uint64_t generation;
+    int16_t x;
+    int16_t y;
+    int16_t prev_x;
+    int16_t prev_y;
 } AppleMTSPITouchUpdate;
 
 static AppleMTSPITouchUpdate *apple_mt_spi_new_touch_update(AppleMTSPIState *s,
@@ -905,26 +917,45 @@ static AppleMTSPITouchUpdate *apple_mt_spi_new_touch_update(AppleMTSPIState *s,
     update->s = s;
     update->ts = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     update->path_stage = path_stage;
+    update->generation = s->touch_generation;
+    /* Called with s->lock held. Keep the event position while the BH waits. */
+    update->x = s->x;
+    update->y = s->y;
+    update->prev_x = s->prev_x;
+    update->prev_y = s->prev_y;
     return update;
 }
 
 static void apple_mt_spi_send_touch_update_bh(void *opaque)
 {
-    AppleMTSPITouchUpdate *update = opaque;
+    AppleMTSPIState *s = opaque;
+    AppleMTSPITouchUpdate *update;
 
-    QEMU_LOCK_GUARD(&update->s->lock);
+    QEMU_LOCK_GUARD(&s->lock);
 
-    apple_mt_spi_send_path_update(update->s, update->ts, update->path_stage);
-
-    g_free(opaque);
+    while ((update = g_queue_pop_head(&s->touch_updates))) {
+        if (update->generation == s->touch_generation) {
+            apple_mt_spi_send_path_update(s, update->ts, update->path_stage,
+                                         update->x, update->y, update->prev_x,
+                                         update->prev_y);
+        }
+        g_free(update);
+    }
+    s->touch_bh_pending = false;
 }
 
 static void apple_mt_spi_schedule_touch_update(AppleMTSPIState *s,
                                                uint8_t path_stage)
 {
-    aio_bh_schedule_oneshot(qemu_get_aio_context(),
-                            apple_mt_spi_send_touch_update_bh,
-                            apple_mt_spi_new_touch_update(s, path_stage));
+    /* QEMU's one-shot BH list is newest-first. Preserve stage/timestamp order
+     * in this device's FIFO rather than scheduling a BH for each update. */
+    g_queue_push_tail(&s->touch_updates,
+                      apple_mt_spi_new_touch_update(s, path_stage));
+    if (!s->touch_bh_pending) {
+        s->touch_bh_pending = true;
+        aio_bh_schedule_oneshot(qemu_get_aio_context(),
+                                apple_mt_spi_send_touch_update_bh, s);
+    }
 }
 
 static void apple_mt_spi_timer_tick(void *opaque)
@@ -1024,6 +1055,12 @@ static void apple_mt_spi_reset_enter(Object *obj, ResetType type)
 
     s = APPLE_MT_SPI(obj);
 
+    QEMU_LOCK_GUARD(&s->lock);
+    ++s->touch_generation;
+    g_queue_clear_full(&s->touch_updates, g_free);
+    /* An already scheduled BH still owns s, not a freed queue item. Keep the
+     * pending flag until that BH drains fresh events or finishes empty. */
+
     timer_del(s->timer);
     timer_del(s->end_timer);
 
@@ -1088,6 +1125,7 @@ static void apple_mt_instance_init(Object *obj)
         timer_new_ns(QEMU_CLOCK_VIRTUAL, apple_mt_spi_end_timer_tick, s);
 
     QTAILQ_INIT(&s->pending_fw);
+    g_queue_init(&s->touch_updates);
 
     qemu_mutex_init(&s->lock);
 }
