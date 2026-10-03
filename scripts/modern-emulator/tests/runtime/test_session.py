@@ -220,7 +220,7 @@ class SessionTests(unittest.TestCase):
         with patch.object(session.subprocess, 'Popen', side_effect=self.fake_launch(child)), \
              patch.object(session, 'QMP', side_effect=OSError('no fixture QMP')), \
              patch.object(session, 'write_json', side_effect=fail_result), \
-             patch.object(session.shutil, 'disk_usage', return_value=actual_usage._replace(free=1)), \
+             patch.object(session.shutil, 'disk_usage', side_effect=[actual_usage, actual_usage._replace(free=1)]), \
              patch('builtins.print'):
             with self.assertRaisesRegex(OSError, 'result logging fixture failure'):
                 session.run(self.state, seconds=30)
@@ -261,7 +261,8 @@ class SessionTests(unittest.TestCase):
         binary.write_text('#!/usr/bin/python3\nimport time\ntime.sleep(60)\n')
         self.prepare()
         original_disk_usage = session.shutil.disk_usage
-        with patch.object(session.shutil, 'disk_usage', return_value=original_disk_usage(self.state)._replace(free=1)):
+        actual_usage = original_disk_usage(self.state)
+        with patch.object(session.shutil, 'disk_usage', side_effect=[actual_usage, actual_usage._replace(free=1)]):
             result = session.run(self.state, seconds=30)
         self.assertEqual(result['stop_reason'], 'disk space limit')
         self.assertEqual(result['status'], 'stopped')

@@ -4385,6 +4385,102 @@ static CPAccessResult el2_e2h_e12_access(CPUARMState *env,
     return CP_ACCESS_OK;
 }
 
+/* Install one alias using the same access and raw-state rules as Arm VHE. */
+void arm_define_vhe_alias(ARMCPU *cpu, uint32_t src_key, uint32_t dst_key,
+                          uint32_t alias_key, const char *src_name,
+                          const char *dst_name, const char *alias_name)
+{
+    ARMCPRegInfo *src_reg, *dst_reg, *src_info, *dst_info;
+    ARMCPRegInfo new_reg = { 0 };
+
+    src_reg = ARMCPRegTable_get(cpu->cp_regs, src_key);
+    dst_reg = ARMCPRegTable_get(cpu->cp_regs, dst_key);
+    assert(src_reg != NULL);
+    assert(dst_reg != NULL);
+
+    /* Cross-compare names to detect typos in the keys.  */
+    assert(strcmp(src_reg->name, src_name) == 0);
+    assert(strcmp(dst_reg->name, dst_name) == 0);
+
+    /* None of the core system registers use opaque; we will.  */
+    assert(src_reg->opaque == NULL);
+
+    src_info = src_reg;
+    dst_info = dst_reg;
+    if (cpu->apple_modern_gxf) {
+        /* Alias callbacks need unredirected metadata with CPU lifetime.
+         * The register dictionary may move its entries during insertion.
+         */
+        if (!cpu->modern_vhe_snapshots) {
+            cpu->modern_vhe_snapshots = g_ptr_array_new_with_free_func(g_free);
+        }
+        src_info = g_memdup2(src_reg, sizeof(*src_reg));
+        dst_info = g_memdup2(dst_reg, sizeof(*dst_reg));
+        g_ptr_array_add(cpu->modern_vhe_snapshots, src_info);
+        g_ptr_array_add(cpu->modern_vhe_snapshots, dst_info);
+    }
+
+    /* Create alias before redirection so we dup the right data. */
+    new_reg = *src_reg;
+
+    new_reg.name = alias_name;
+    new_reg.type |= ARM_CP_ALIAS;
+    /* Remove PL1/PL0 access, leaving PL2/PL3 R/W in place.  */
+    new_reg.access &= PL2_RW | PL3_RW;
+    /* The new_reg op fields are as per new_key, not the target reg */
+    new_reg.crn = (alias_key & CP_REG_ARM64_SYSREG_CRN_MASK)
+        >> CP_REG_ARM64_SYSREG_CRN_SHIFT;
+    new_reg.crm = (alias_key & CP_REG_ARM64_SYSREG_CRM_MASK)
+        >> CP_REG_ARM64_SYSREG_CRM_SHIFT;
+    new_reg.opc0 = (alias_key & CP_REG_ARM64_SYSREG_OP0_MASK)
+        >> CP_REG_ARM64_SYSREG_OP0_SHIFT;
+    new_reg.opc1 = (alias_key & CP_REG_ARM64_SYSREG_OP1_MASK)
+        >> CP_REG_ARM64_SYSREG_OP1_SHIFT;
+    new_reg.opc2 = (alias_key & CP_REG_ARM64_SYSREG_OP2_MASK)
+        >> CP_REG_ARM64_SYSREG_OP2_SHIFT;
+    new_reg.opaque = src_info;
+    new_reg.orig_readfn = src_reg->readfn ?: raw_read;
+    new_reg.orig_writefn = src_reg->writefn ?: raw_write;
+    new_reg.orig_accessfn = src_reg->accessfn;
+    if (!new_reg.raw_readfn) {
+        new_reg.raw_readfn = raw_read;
+    }
+    if (!new_reg.raw_writefn) {
+        new_reg.raw_writefn = raw_write;
+    }
+    new_reg.readfn = el2_e2h_e12_read;
+    new_reg.writefn = el2_e2h_e12_write;
+    new_reg.accessfn = el2_e2h_e12_access;
+
+    /*
+     * If the _EL1 register is redirected to memory by FEAT_NV2,
+     * then it shares the offset with the _EL12 register,
+     * and which one is redirected depends on HCR_EL2.NV1.
+     */
+    if (new_reg.nv2_redirect_offset) {
+        assert(new_reg.nv2_redirect_offset & NV2_REDIR_NV1);
+        new_reg.nv2_redirect_offset &= ~NV2_REDIR_NV1;
+        new_reg.nv2_redirect_offset |= NV2_REDIR_NO_NV1;
+    }
+
+    assert_null(ARMCPRegTable_cget(cpu->cp_regs, alias_key));
+    ARMCPRegTable_set_at(cpu->cp_regs, alias_key, new_reg);
+
+    src_reg = ARMCPRegTable_get(cpu->cp_regs, src_key);
+    assert(src_reg != NULL);
+    src_reg->opaque = dst_info;
+    src_reg->orig_readfn = src_reg->readfn ?: raw_read;
+    src_reg->orig_writefn = src_reg->writefn ?: raw_write;
+    if (!src_reg->raw_readfn) {
+        src_reg->raw_readfn = raw_read;
+    }
+    if (!src_reg->raw_writefn) {
+        src_reg->raw_writefn = raw_write;
+    }
+    src_reg->readfn = el2_e2h_read;
+    src_reg->writefn = el2_e2h_write;
+}
+
 static void define_arm_vh_e2h_redirects_aliases(ARMCPU *cpu)
 {
     struct E2HAlias {
@@ -4451,81 +4547,13 @@ static void define_arm_vh_e2h_redirects_aliases(ARMCPU *cpu)
 
     for (i = 0; i < ARRAY_SIZE(aliases); i++) {
         const struct E2HAlias *a = &aliases[i];
-        ARMCPRegInfo *src_reg, *dst_reg, new_reg = { 0 };
 
         if (a->feature && !a->feature(&cpu->isar)) {
             continue;
         }
 
-        src_reg = ARMCPRegTable_get(cpu->cp_regs, a->src_key);
-        dst_reg = ARMCPRegTable_get(cpu->cp_regs, a->dst_key);
-        assert(src_reg != NULL);
-        assert(dst_reg != NULL);
-
-        /* Cross-compare names to detect typos in the keys.  */
-        assert(strcmp(src_reg->name, a->src_name) == 0);
-        assert(strcmp(dst_reg->name, a->dst_name) == 0);
-
-        /* None of the core system registers use opaque; we will.  */
-        assert(src_reg->opaque == NULL);
-
-        /* Create alias before redirection so we dup the right data. */
-        new_reg = *src_reg;
-
-        new_reg.name = a->new_name;
-        new_reg.type |= ARM_CP_ALIAS;
-        /* Remove PL1/PL0 access, leaving PL2/PL3 R/W in place.  */
-        new_reg.access &= PL2_RW | PL3_RW;
-        /* The new_reg op fields are as per new_key, not the target reg */
-        new_reg.crn = (a->new_key & CP_REG_ARM64_SYSREG_CRN_MASK)
-            >> CP_REG_ARM64_SYSREG_CRN_SHIFT;
-        new_reg.crm = (a->new_key & CP_REG_ARM64_SYSREG_CRM_MASK)
-            >> CP_REG_ARM64_SYSREG_CRM_SHIFT;
-        new_reg.opc0 = (a->new_key & CP_REG_ARM64_SYSREG_OP0_MASK)
-            >> CP_REG_ARM64_SYSREG_OP0_SHIFT;
-        new_reg.opc1 = (a->new_key & CP_REG_ARM64_SYSREG_OP1_MASK)
-            >> CP_REG_ARM64_SYSREG_OP1_SHIFT;
-        new_reg.opc2 = (a->new_key & CP_REG_ARM64_SYSREG_OP2_MASK)
-            >> CP_REG_ARM64_SYSREG_OP2_SHIFT;
-        new_reg.opaque = src_reg;
-        new_reg.orig_readfn = src_reg->readfn ?: raw_read;
-        new_reg.orig_writefn = src_reg->writefn ?: raw_write;
-        new_reg.orig_accessfn = src_reg->accessfn;
-        if (!new_reg.raw_readfn) {
-            new_reg.raw_readfn = raw_read;
-        }
-        if (!new_reg.raw_writefn) {
-            new_reg.raw_writefn = raw_write;
-        }
-        new_reg.readfn = el2_e2h_e12_read;
-        new_reg.writefn = el2_e2h_e12_write;
-        new_reg.accessfn = el2_e2h_e12_access;
-
-        /*
-         * If the _EL1 register is redirected to memory by FEAT_NV2,
-         * then it shares the offset with the _EL12 register,
-         * and which one is redirected depends on HCR_EL2.NV1.
-         */
-        if (new_reg.nv2_redirect_offset) {
-            assert(new_reg.nv2_redirect_offset & NV2_REDIR_NV1);
-            new_reg.nv2_redirect_offset &= ~NV2_REDIR_NV1;
-            new_reg.nv2_redirect_offset |= NV2_REDIR_NO_NV1;
-        }
-
-        assert_null(ARMCPRegTable_cget(cpu->cp_regs, a->new_key));
-        ARMCPRegTable_set_at(cpu->cp_regs, a->new_key, new_reg);
-
-        src_reg->opaque = dst_reg;
-        src_reg->orig_readfn = src_reg->readfn ?: raw_read;
-        src_reg->orig_writefn = src_reg->writefn ?: raw_write;
-        if (!src_reg->raw_readfn) {
-            src_reg->raw_readfn = raw_read;
-        }
-        if (!src_reg->raw_writefn) {
-            src_reg->raw_writefn = raw_write;
-        }
-        src_reg->readfn = el2_e2h_read;
-        src_reg->writefn = el2_e2h_write;
+        arm_define_vhe_alias(cpu, a->src_key, a->dst_key, a->new_key,
+                             a->src_name, a->dst_name, a->new_name);
     }
 }
 
@@ -7033,12 +7061,19 @@ void register_cp_regs_for_features(ARMCPU *cpu)
 
     define_pm_cpregs(cpu);
 
+    if (cpu->apple_modern_gxf) {
+        arm_register_apple_modern_gxf(cpu);
+    }
+
     /*
      * Register redirections and aliases must be done last,
      * after the registers from the other extensions have been defined.
      */
     if (arm_feature(env, ARM_FEATURE_EL2) && cpu_isar_feature(aa64_vh, cpu)) {
         define_arm_vh_e2h_redirects_aliases(cpu);
+        if (cpu->apple_modern_gxf) {
+            arm_register_apple_modern_gxf_aliases(cpu);
+        }
     }
 }
 

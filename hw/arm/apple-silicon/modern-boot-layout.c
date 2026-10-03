@@ -442,6 +442,10 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
     DTree tree = { .blob = in->dtree };
     uint64_t tc_size, before, index, cursor, sptm_base, start;
     Image *bkc = &images[0], *sptm = &images[1], *txm = &images[2];
+    if ((!in->ramdisk.data != !in->ramdisk.size) ||
+        in->ramdisk.size > APPLE_MODERN_MAX_RAMDISK_SIZE) {
+        return fail(errp, "missing or oversized optional ramdisk bytes");
+    }
     if (!in->dram_size || in->dram_base != (UINT64_C(1) << 40) ||
         in->dram_size > VIRTUAL_INDEX_MASK + 1 ||
         in->dram_size % APPLE_MODERN_PAGE_SIZE ||
@@ -579,6 +583,21 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
         !region(out, "BootArgs", start, cursor - start, errp)) {
         return false;
     }
+    if (in->ramdisk.size) {
+        uint64_t rounded;
+        if (!round_page(in->ramdisk.size, &rounded, errp) ||
+            !region(out, "RAMDisk", cursor, rounded, errp)) {
+            return false;
+        }
+        out->ramdisk_physical = cursor;
+        out->ramdisk_size = in->ramdisk.size;
+        out->copies[out->copy_count++] = (AppleModernBootCopy){
+            .image = APPLE_MODERN_RAMDISK, .segment = "ramdisk",
+            .file_size = in->ramdisk.size, .physical_address = cursor,
+            .memory_size = rounded,
+        };
+        cursor += rounded;
+    }
     out->top_of_kernel_data = cursor;
     out->sptm_entry_physical = sptm_base + sptm->entry - sptm->low;
     for (size_t i = 0; i < 3; i++) {
@@ -595,6 +614,26 @@ bool apple_modern_boot_layout_build(const AppleModernBootInput *input,
     AppleModernBootLayout temporary = {0};
     if (!output) {
         return fail(errp, "missing layout output");
+    }
+    if (input) {
+        AppleModernBlob blobs[6] = {input->bootkc, input->sptm, input->txm,
+                                    input->dtree, input->trustcache, input->ramdisk};
+        uintptr_t begin = (uintptr_t)output;
+        uintptr_t source = (uintptr_t)input;
+        if (begin > UINTPTR_MAX - sizeof(*output) ||
+            source > UINTPTR_MAX - sizeof(*input) ||
+            (begin < source + sizeof(*input) &&
+             source < begin + sizeof(*output))) {
+            return fail(errp, "layout input/output struct alias");
+        }
+        for (size_t i = 0; i < 6; i++) {
+            source = (uintptr_t)blobs[i].data;
+            if (source > UINTPTR_MAX - blobs[i].size ||
+                (blobs[i].size && begin < source + blobs[i].size &&
+                 source < begin + sizeof(*output))) {
+                return fail(errp, "layout input/output blob alias or pointer overflow");
+            }
+        }
     }
     memset(output, 0, sizeof(*output));
     if (!input) {

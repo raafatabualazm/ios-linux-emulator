@@ -1362,6 +1362,7 @@ static void arm_cpu_finalizefn(Object *obj)
     ARMELChangeHook *hook, *next;
 
     ARMCPRegTable_clear(cpu->cp_regs);
+    g_clear_pointer(&cpu->modern_vhe_snapshots, g_ptr_array_unref);
 
     QLIST_FOREACH_SAFE(hook, &cpu->pre_el_change_hooks, node, next) {
         QLIST_REMOVE(hook, node);
@@ -1437,6 +1438,10 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
     ARMCPUClass *acc = ARM_CPU_GET_CLASS(dev);
     CPUARMState *env = &cpu->env;
     Error *local_err = NULL;
+
+    if (!arm_apple_modern_gxf_validate(cpu, errp)) {
+        return;
+    }
 
 #ifdef CONFIG_TCG
     /* Use pc-relative instructions in system-mode */
@@ -2023,6 +2028,7 @@ static ObjectClass *arm_cpu_class_by_name(const char *cpu_model)
 }
 
 static const Property arm_cpu_properties[] = {
+    DEFINE_PROP_BOOL("apple-modern-gxf", ARMCPU, apple_modern_gxf, false),
     DEFINE_PROP_UINT64("midr", ARMCPU, midr, 0),
     DEFINE_PROP_UINT64("mp-affinity", ARMCPU,
                         mp_affinity, ARM64_AFFINITY_INVALID),

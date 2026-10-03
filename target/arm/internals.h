@@ -358,6 +358,9 @@ static inline int r14_bank_number(int mode)
 void arm_cpu_register(const ARMCPUInfo *info);
 
 void register_cp_regs_for_features(ARMCPU *cpu);
+void arm_define_vhe_alias(ARMCPU *cpu, uint32_t src_key, uint32_t dst_key,
+                          uint32_t alias_key, const char *src_name,
+                          const char *dst_name, const char *alias_name);
 void init_cpreg_list(ARMCPU *cpu);
 
 void arm_cpu_register_gdb_regs_for_features(ARMCPU *cpu);

@@ -30,6 +30,7 @@ arm_common_system_ss.add(files(
   'debug_helper.c',
   'helper.c',
   'machine.c',
+  'modern-gxf.c',
   'ptw.c',
   'vfp_fpscr.c',
 ))

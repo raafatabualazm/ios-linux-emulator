@@ -209,6 +209,12 @@ int main(int argc, char **argv)
     changed = in; changed.dram_size = (UINT64_C(1) << 36) + PAGE;
     rejected("DRAM exceeds virtual index window", &changed);
     changed = in; changed.dram_size = UINT64_MAX - in.dram_base + 1; rejected("DRAM overflow", &changed);
+    changed = in; changed.ramdisk = (AppleModernBlob){NULL, 1};
+    rejected("missing ramdisk bytes", &changed);
+    changed.ramdisk = (AppleModernBlob){in.bootkc.data, 0};
+    rejected("empty non-NULL ramdisk", &changed);
+    changed.ramdisk = (AppleModernBlob){in.bootkc.data, APPLE_MODERN_MAX_RAMDISK_SIZE + 1};
+    rejected("oversized ramdisk", &changed);
     assert(apple_modern_boot_layout_build(&in, &repeated, &err));
     assert(!memcmp(&out, &repeated, sizeof(out))); checks++;
     if (argc == 2) {

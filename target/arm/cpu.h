@@ -34,6 +34,7 @@
 #include "target/arm/gtimer.h"
 #include "target/arm/cpu-sysregs.h"
 #include "target/arm/cpregs.h"
+#include "target/arm/modern-gxf.h"
 
 #define EXCP_UDEF            1   /* undefined instruction */
 #define EXCP_SWI             2   /* software interrupt */
@@ -617,6 +618,8 @@ typedef struct CPUArchState {
         uint64_t apcfg_el1;
     } cp15;
 
+    AppleModernGXFState modern_gxf;
+
     struct {
         uint64_t gxf_config_el[4];
         uint64_t gxf_enter_el[4];
@@ -1033,6 +1036,10 @@ struct ArchCPU {
 
     /* CPU has virtualization extension */
     bool has_el2;
+    /* Experimental modern Apple register interface, separate from A13 GXF. */
+    bool apple_modern_gxf;
+    /* Stable alias metadata for the opt-in modern register interface. */
+    GPtrArray *modern_vhe_snapshots;
     /* CPU has security extension */
     bool has_el3;
     /* CPU has PMU (Performance Monitor Unit) */

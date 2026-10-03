@@ -16,24 +16,30 @@ publication worktrees remain separate. The new branch is `modern-ios`.
   despite QEMU's newest-first one-shot callbacks. The production scheduling/encoder/reset regression
   passes ASan and UBSan; the retained base fails that same test. The A13 IPI
   regression also passes. Migration and snapshot fidelity are not established.
-- A separate AArch64 QEMU build reached Hello, accepted the opening swipe and
-  English selection, then advanced through country selection to Quick Start. After restart and wake,
-  manual setup and Continue reached the Wi-Fi page.
-  That manual progression used the earlier coordinate/reset candidate. A fresh
-  FIFO candidate reached Quick Start; manual setup was not retested while awake.
-  This is iOS 14.0/18A5351d with inherited guest software-rendering changes.
-  SpringBoard exists in a read-only process snapshot; its home screen and IPA
-  execution remain unverified.
+- The retained FIFO candidate advances the iOS 14.0/18A5351d GUI through stock
+  Setup. The user-approved beta agreement was accepted; the latest completed
+  observation reached iPhone Analytics before becoming unresponsive. Runner 143
+  and missing final result are recorded with unknown cause. A fresh bounded run
+  is continuing that same isolated state. Home and IPA execution are unverified.
 - Strict firmware selection prepared unchanged iPhone17,3/d47ap iOS27.0/24A437
-  kernel, device tree, SPTM, TXM and stock restore trustcache with hashes. A matched
-  ramdisk/full userspace and modern CPU/device integration remain required.
-- The C modern layout module is included in the AArch64 build. ASan/UBSan
-  verification passes 26 checks, including the actual prepared iOS 27 components
-  (452 ADT nodes, 305 fileset entries, 19 regions and 24 copies). It validates
-  bounded Mach-O command/segment tables, the selected ADT identity and the stock
-  trustcache, then describes copies and reserved metadata regions. It has no
-  board caller, populated boot metadata or modern execution path. Region names
-  are ADT metadata and do not enforce page protections.
+  kernel, device tree, SPTM, TXM and stock restore trustcache with hashes.
+- Modern layout and metadata pass 29 layout plus 41 metadata sanitizer checks.
+  Working ADT/1152-byte boot arguments preserve 452 nodes and 5414 unrelated
+  property values. The optional ramdisk layout is implemented; no matching
+  full userspace is qualified yet.
+- An opt-in modern register interface has 23 base registers and 9 VHE aliases,
+  independent GL1/GL2 banks and CPU-owned alias metadata. It passes 299 sanitizer
+  checks and two actual CPU instruction/reset runs. Guarded entry/exit and page
+  protections remain unimplemented; default legacy CPU properties are unchanged.
+- Experimental `apple-modern` prepares unchanged assets in RAM and defaults to
+  halting the CPU. Whole-machine preparation/reset verifies PC/x0/EL2h, complete
+  bootargs/ADT/stock trustcache, 23 sampled segments and zero BSS. One bounded
+  unchanged-SPTM execution hit unsupported `MSR S3_1_C15_C9_4, XZR`; it did not
+  boot the kernel or iOS. Modern interrupt/storage/display/touch devices remain
+  unfinished.
+- Runtime/diagnostics pass 52 tests, including a real loopback RFB handshake,
+  signal-aware guest reaping, conservative dead-session recovery, and recorder
+  run/PID binding. An interruption is never reported as guest success.
 - IPA preflight validates the uploaded device arm64 app and stages unchanged
   bytes. Its development profile expired in December 2025. Normal installation
   requires a newly signed build accepted by the guest.
@@ -44,12 +50,13 @@ Detailed command references: [firmware](tools/firmware/README.md),
 
 ## Build the integration candidate
 
-Use a fresh out-of-tree build directory. `/tmp` is volatile on this host.
+Use a fresh out-of-tree build directory. The working build below is persistent;
+`/tmp` is volatile on this host.
 
 ```sh
 task_source="$(pwd)/Inferno/integration"
-mkdir -p /tmp/inferno-modern-build
-cd /tmp/inferno-modern-build
+mkdir -p modern-emulator/build
+cd modern-emulator/build
 "$task_source/configure" \
   --target-list=aarch64-softmmu --enable-lzfse --enable-nettle --enable-gnutls \
   --disable-werror --disable-qom-cast-debug --disable-debug-info
@@ -64,10 +71,16 @@ requires a separately prepared bundle rather than changing a pinned manifest.
 ```sh
 python3 modern-emulator/tools/runtime/session.py prepare \
   --bundle Inferno/gui-runtime --state modern-emulator/runtime/NEW_STATE \
-  --binary modern-emulator/bin/qemu-system-aarch64
+  --binary modern-emulator/bin/qemu-system-aarch64-input
 python3 modern-emulator/tools/runtime/session.py run \
   --state modern-emulator/runtime/NEW_STATE --seconds 900
 ```
+
+For VNC, append `--vnc 127.0.0.1:1` and connect a local viewer to port 5901.
+The runner supplies the source `pc-bios` keymap directory; override it with
+`--qemu-data /path/to/qemu-data` if needed. Resource paths/hash are recorded at
+startup. GUI evidence/control commands are described in
+[Private GUI diagnostics](tools/runtime/DIAGNOSTICS.md).
 
 For a GTK window, append
 `--display gtk,zoom-to-fit=on,show-cursor=on` to `run`. The state bundle includes
@@ -103,30 +116,42 @@ bundle hit a guest SEP panic. This build currently has no GTK backend; use QMP
 screenshots or VNC, or install GTK development dependencies and rebuild before
 selecting `--display gtk`.
 
-## Modern layout preparation
+## Modern RAM preparation
 
-The public API is
-`include/hw/arm/apple-silicon/modern-boot-layout.h`. The consumer must prepare and
-bound its working ADT, boot arguments and matching persistent userspace, then
-provide the modern CPU/platform devices. The module makes no guest writes,
-changes no executable bytes and performs no Apple signature verification.
-Its command/segment bounds checks are not a complete validator for Mach-O
-sections, relocations or all load-command semantics.
+The layout and metadata APIs are in
+`include/hw/arm/apple-silicon/modern-boot-{layout,metadata}.h`. They describe
+normal copies, reserved regions and boot metadata; region names do not enforce
+page permissions. The bounds checks do not verify Apple signatures or every
+Mach-O section/relocation semantic.
 
-Run the same C parser/layout under sanitizers from `Inferno/integration`:
+The experimental board takes decoded `bootkc`, `sptm`, `txm`, `dtree` and `tc`
+machine properties; `ramdisk` is optional. It accepts one CPU, defaults to 8 GiB,
+and has a 512 MiB per-file/1 GiB aggregate input bound. Use the
+`boot-command-line` machine property for ordinary boot arguments. Generic QEMU
+rejects `-append` without `-kernel`; this board takes explicit components.
+`timebase-frequency` defaults to 24 MHz as an experiment value; a real T8140
+frequency is not established. `mte` is optional and unqualified by the default
+preparation test. Snapshot/migration and modern platform fidelity are unqualified.
+
+Run the stopped preparation/reset gate from the workspace root:
 
 ```sh
-cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
-  -fno-omit-frame-pointer -g -DAPPLE_MODERN_LAYOUT_STANDALONE -Iinclude \
-  hw/arm/apple-silicon/modern-boot-layout.c \
-  scripts/test-apple-modern-boot-layout.c -o /tmp/test-modern-layout
-/tmp/test-modern-layout /path/to/prepared/derived
+python3 Inferno/integration/scripts/test-apple-modern-machine.py \
+  --binary modern-emulator/bin/qemu-system-aarch64-modern-prep \
+  --components /path/to/matched/decoded-components \
+  --output-dir /path/to/new/private/report-directory
+python3 Inferno/integration/scripts/test-apple-modern-cpu-qemu.py \
+  --binary modern-emulator/bin/qemu-system-aarch64-modern-prep \
+  --output-dir /path/to/new/private/cpu-report
+python3 Inferno/integration/scripts/test-apple-modern-gxf.py
+python3 Inferno/integration/scripts/test-apple-modern-boot-metadata.py \
+  --components /path/to/matched/decoded-components \
+  --evidence /path/to/new/private/metadata-report
 ```
 
-Omit the last argument for synthetic checks only. The directory argument must
-contain the unchanged decoded `bootkc`, `sptm`, `txm`, `dtree` and
-`restore-trustcache` selected for the same identity. The test reports layout
-preparation; it does not boot a guest.
+The whole-machine gate never resumes the guest; its RAM dumps are transient.
+The CPU gate executes a small owned register-test ROM on generic `virt`.
+Neither qualifies an iOS boot or SpringBoard.
 
 ## Verification
 

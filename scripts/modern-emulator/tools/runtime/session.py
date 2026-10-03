@@ -9,10 +9,13 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
+import signal
 import socket
 import stat
 import subprocess
+import threading
 import time
 import uuid
 
@@ -26,6 +29,39 @@ BOOT_FILES = {'trustcache': '038-44135-124.dmg.trustcache',
 
 class SessionError(Exception):
     pass
+
+
+class RunSignals:
+    """Defer termination until the owned child has been stopped and reaped."""
+    def __init__(self):
+        self.received = None
+        self.previous = {}
+
+    def receive(self, number, frame):
+        if self.received is None:
+            self.received = number
+
+    def __enter__(self):
+        # Python only permits installing process handlers from the main thread.
+        if threading.current_thread() is threading.main_thread():
+            try:
+                for number in (signal.SIGTERM, signal.SIGINT):
+                    self.previous[number] = signal.getsignal(number)
+                    signal.signal(number, self.receive)
+            except BaseException:
+                self.__exit__(None, None, None)
+                raise
+        return self
+
+    def __exit__(self, *unused):
+        for number, handler in self.previous.items():
+            signal.signal(number, handler)
+
+    def annotate(self, record):
+        if self.received is not None:
+            name = signal.Signals(self.received).name
+            record.update(stop_reason=f'runner interrupted by {name}', status='interrupted',
+                          interruption_signal=name, interruption_signal_number=self.received)
 
 
 def sha256(path):
@@ -175,6 +211,56 @@ def validate_state(state, manifest):
     reject_open_writers([*originals, *(state / name for name in DISKS)])
 
 
+def recover_dead_session(state):
+    """Called under the state lock after pin/store validation; preserve stale markers."""
+    live_path, endpoint = state / 'live.json', state / 'qmp.sock'
+    if not live_path.exists() and not live_path.is_symlink():
+        if endpoint.exists() or endpoint.is_symlink():
+            raise SessionError('QMP socket has no recorded session; inspect it before recovery')
+        return None
+    info = live_path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 65536:
+        raise SessionError('Invalid stale live marker; recovery refused')
+    with live_path.open('rb') as stream:
+        raw = stream.read(65537)
+    if len(raw) > 65536:
+        raise SessionError('Stale live marker exceeds size bound')
+    live = json.loads(raw)
+    if not isinstance(live, dict) or type(live.get('pid')) is not int or live['pid'] <= 0:
+        raise SessionError('Invalid stale PID; recovery refused')
+    if (Path('/proc') / str(live['pid'])).exists():
+        raise SessionError('Recorded guest PID exists (possibly reused); recovery refused')
+    previous_run = Path(live.get('run', ''))
+    if (previous_run.parent != state / 'runs' or not re.fullmatch('[0-9a-f]{32}', previous_run.name)
+            or previous_run.is_symlink() or not previous_run.is_dir()
+            or live.get('qmp') != str(endpoint)):
+        raise SessionError('Stale markers do not identify this state; recovery refused')
+    endpoint_info = None
+    if endpoint.exists() or endpoint.is_symlink():
+        endpoint_info = endpoint.lstat()
+        if not stat.S_ISSOCK(endpoint_info.st_mode):
+            raise SessionError('Stale QMP endpoint is not a socket; recovery refused')
+    retained = previous_run / ('recovery-' + uuid.uuid4().hex + '.json')
+    write_json(retained, {'recovered_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                         'live': live, 'live_sha256': hashlib.sha256(raw).hexdigest(),
+                         'recorded_pid_absent': True, 'stores_validated_before_recovery': True,
+                         'endpoint': None if endpoint_info is None else {
+                             'device': endpoint_info.st_dev, 'inode': endpoint_info.st_ino}})
+    # A recreated/replaced marker must never be removed using the earlier proof.
+    def identity(value):
+        # Reading the marker may update atime under relatime; that is not replacement.
+        return (value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+                value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+    if identity(live_path.lstat()) != identity(info) or (Path('/proc') / str(live['pid'])).exists():
+        raise SessionError('Stale session changed during recovery')
+    if endpoint_info is not None and identity(endpoint.lstat()) != identity(endpoint_info):
+        raise SessionError('Stale endpoint changed during recovery')
+    live_path.unlink()
+    if endpoint_info is not None:
+        endpoint.unlink()
+    return str(retained)
+
+
 class QMP:
     def __init__(self, path, timeout=8):
         self.socket = socket.socket(socket.AF_UNIX)
@@ -266,7 +352,25 @@ def gesture(qmp, start, end, width=828, height=1792, duration=0.2):
     time.sleep(0.15)  # Device's end timer emits OUT_OF_RANGE after 100 ms.
 
 
-def argv_for(state, manifest, display, run_dir):
+def checked_vnc(value):
+    """One explicit local RFB endpoint, with no QEMU option passthrough."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r'127\.0\.0\.1:(0|[1-9][0-9]?)', value):
+        raise SessionError('VNC endpoint must be 127.0.0.1:DISPLAY with DISPLAY from 0 to 99')
+    return value
+
+
+def checked_qemu_data(value=None):
+    directory = checked_path(value or Path(__file__).resolve().parents[4] / 'pc-bios')
+    if not directory.is_dir():
+        raise SessionError('QEMU data directory is missing')
+    file_identity(directory / 'keymaps/en-us')
+    return directory
+
+
+def argv_for(state, manifest, display, run_dir, vnc=None, qemu_data=None):
+    vnc = checked_vnc(vnc)
     assets = {name: item['path'] for name, item in manifest['assets'].items()}
     machine = 't8030,' + ','.join(f'{name}={assets[name]}'
                                  for name in ('trustcache', 'ticket', 'sep-fw', 'sep-rom'))
@@ -287,10 +391,19 @@ def argv_for(state, manifest, display, run_dir):
         args += ['-drive', f'file={state / name},if=none,format={fmt},id={name}',
                  '-device', f'{dev},drive={name},bus=nvme-bus.0,nsid={nsid},nstype={nstype}'
                  f'{extra},logical_block_size=4096,physical_block_size=4096']
+    if vnc is not None:
+        args += ['-L', str(checked_qemu_data(qemu_data)), '-vnc', vnc]
     return args
 
 
-def run(state, seconds=900, display='none'):
+def run(state, seconds=900, display='none', vnc=None, qemu_data=None):
+    vnc = checked_vnc(vnc)
+    if qemu_data is not None and vnc is None:
+        raise SessionError('The QEMU data directory option requires VNC')
+    resources = None
+    if vnc is not None:
+        qemu_data = checked_qemu_data(qemu_data)
+        resources = {'directory': str(qemu_data), 'keymap_en_us_sha256': sha256(qemu_data / 'keymaps/en-us')}
     state = checked_path(state)
     if not 30 <= seconds <= 3600 or len(os.fsencode(state / 'qmp.sock')) > 100:
         raise SessionError('Use a short state path and a 30–3600 second time bound')
@@ -308,22 +421,33 @@ def run(state, seconds=900, display='none'):
         except BlockingIOError as error:
             raise SessionError('This state already has an active runner') from error
         validate_state(state, manifest)
+        if file_identity(manifest['source_root']) != manifest['original_stores']['root'] or any(
+                sha256(Path(manifest['bundle']) / name) != value
+                for name, value in manifest['original_small_hashes'].items()):
+            raise SessionError('Original stores changed; do not launch or recover this state')
+        if shutil.disk_usage(state).free < 64 << 20:
+            raise SessionError('Less than 64 MiB of working space remains; launch refused')
         socket_path = state / 'qmp.sock'
-        if socket_path.exists():
-            raise SessionError('QMP socket exists; inspect the prior session before removing it')
+        recovery = recover_dead_session(state)
         run_dir = state / 'runs' / uuid.uuid4().hex
         run_dir.mkdir(parents=True)
-        args = argv_for(state, manifest, display, run_dir)
+        args = (argv_for(state, manifest, display, run_dir) if vnc is None
+                else argv_for(state, manifest, display, run_dir, vnc, qemu_data))
         write_json(run_dir / 'argv.json', args)
         started = time.monotonic()
         record = {'run_id': run_dir.name, 'start_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                  'seconds_limit': seconds, 'ipa_result': 'not attempted', 'gui_result': 'requires visual/semantic evidence'}
-        with (run_dir / 'emulator.log').open('wb') as output:
+                  'seconds_limit': seconds, 'vnc_endpoint': vnc, 'vnc_resources': resources,
+                  'stale_session_recovery': recovery,
+                  'ipa_result': 'not attempted', 'gui_result': 'requires visual/semantic evidence'}
+        with RunSignals() as interruptions, (run_dir / 'emulator.log').open('wb') as output:
             process = subprocess.Popen(args, cwd=manifest['bundle'], stdout=output, stderr=subprocess.STDOUT)
             try:
                 write_json(state / 'live.json', {'pid': process.pid, 'run': str(run_dir), 'qmp': str(socket_path)})
                 print(json.dumps({'pid': process.pid, 'run': str(run_dir), 'qmp': str(socket_path)}), flush=True)
                 while process.poll() is None:
+                    if interruptions.received is not None:
+                        interruptions.annotate(record)
+                        break
                     if time.monotonic() - started >= seconds:
                         record['stop_reason'] = 'time limit'
                         break
@@ -366,6 +490,7 @@ def run(state, seconds=900, display='none'):
                     reason = record.get('stop_reason')
                     record['status'] = ('unexpected-exit' if reason == 'unexpected emulator exit'
                                         else 'runner-error' if reason == 'runner interrupted' else 'stopped')
+                    interruptions.annotate(record)
                     record['elapsed_seconds'] = round(time.monotonic() - started, 2)
                     record['original_root_metadata_unchanged'] = file_identity(manifest['source_root']) == manifest['original_stores']['root']
                     record['original_small_hashes_unchanged'] = all(
@@ -393,6 +518,8 @@ def main():
     launch.add_argument('--state', type=Path, required=True)
     launch.add_argument('--seconds', type=int, default=900)
     launch.add_argument('--display', choices=('none', 'gtk,zoom-to-fit=on,show-cursor=on'), default='none')
+    launch.add_argument('--vnc', help='local VNC endpoint 127.0.0.1:DISPLAY (0–99); TCP port is 5900 + DISPLAY')
+    launch.add_argument('--qemu-data', type=Path, help='QEMU data directory for VNC keymaps; defaults to integration pc-bios')
     ctl = sub.add_parser('control')
     ctl.add_argument('--state', type=Path, required=True)
     ctl.add_argument('action', choices=('status', 'side', 'home', 'screenshot', 'tap', 'swipe', 'quit'))
@@ -410,7 +537,10 @@ def main():
             result = prepare(args.bundle, args.state, args.binary)
             print(json.dumps({'profile': result['profile'], 'state': str(args.state.resolve())}))
         elif args.command == 'run':
-            result = run(args.state, args.seconds, args.display)
+            result = run(args.state, args.seconds, args.display, args.vnc, args.qemu_data)
+            if result['status'] == 'interrupted':
+                parser.exit(128 + result['interruption_signal_number'],
+                            f'Runner interrupted by {result["interruption_signal"]}; guest reaped.\n')
             if result['exit_code'] != 0 or result['status'] == 'unexpected-exit':
                 raise SessionError(f'Emulator exited unexpectedly: {result["exit_code"]}')
         else:
