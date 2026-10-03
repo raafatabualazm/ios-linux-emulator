@@ -23,3 +23,55 @@ The classifier reads at most the final 4 MiB of each serial/emulator log and rec
 Live operations are bound to the recorder's run ID and PID. A stopped guest or a restarted state rejects capture, input and runtime snapshots. Create a fresh evidence directory for each run; historical observations remain readable.
 
 Verification: `python3 -m unittest discover -s tests/runtime -p test_diagnostics.py -v` uses temporary fixtures and mock QMP; it runs no guest.
+
+## Optional USB companion endpoint
+
+The iOS 14 `t8030` USB controller connects to a companion's Unix listener through
+the machine properties `usb-conn-type` and `usb-conn-addr`. Enable its private
+endpoint with:
+
+```sh
+python3 tools/runtime/session.py run --state /path/to/private-state --seconds 900 --usb
+```
+
+The runner holds the state lock, requires an owned mode-0700 directory, and
+rejects an existing `usb.sock` or an active Linux socket using that pathname.
+It writes `runs/RUN/usb-startup.json` and prints the generated endpoint before
+waiting up to 30 seconds for the companion. Start the companion during this
+waiting phase; the phone QEMU starts automatically after the listener is ready.
+The startup wait counts towards `--seconds`. Default runs keep their existing
+arguments and do not enter this waiting phase.
+
+Use a pinned custom x86 QEMU with `usb-tcp-remote`, a USB-capable Linux kernel,
+and an already prepared disposable companion overlay. In a second terminal:
+
+```sh
+/path/to/custom-qemu-system-x86_64 -M q35 -m 3G -smp 2 \
+  -drive file=/path/to/disposable-companion.qcow2,if=virtio,format=qcow2 \
+  -usb -device usb-ehci,id=ehci \
+  -device usb-tcp-remote,bus=ehci.0,conn-type=unix,conn-addr=/path/to/private-state/usb.sock \
+  -nic none -display none -serial mon:stdio
+```
+
+Readiness uses a bounded passive `/proc/net/unix` read, requires a single stream
+listener, and rechecks the captured filesystem device/inode/owner. It does not
+connect to the listener or consume its USB accept. `usb_listener_ready` means
+only that the companion listener is ready; USB enumeration, normal-mode
+lockdown pairing, AFC and installation_proxy require separate observations.
+The endpoint uses the Unix USB bridge directly; no USB chardev is added.
+
+After the phone is reaped, cleanup removes only the captured socket identity;
+replacement files/sockets are preserved. Cleanup is inode checked within the
+private state directory, not an atomic guarantee against concurrent same-user
+pathname replacement. Unreaped phone processes retain their live/QMP metadata
+and USB endpoint. The runner does not manage or stop the external companion;
+stop it separately after the phone run, including startup timeout/interruption.
+Unlinking its endpoint does not terminate the companion listener process.
+
+Pairing material stays private in the companion. The uploaded IPA has an
+expired profile; this transport option performs no installation. Normal
+installation requires a freshly signed app accepted by the guest, followed by
+independent registration and GUI launch evidence.
+
+Verification: `python3 -m unittest discover -s tests/runtime -p test_usb.py -v`
+uses owned disposable Unix sockets and process fixtures, with no iOS guest.

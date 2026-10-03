@@ -18,11 +18,13 @@ publication worktrees remain separate. The new branch is `modern-ios`.
   regression also passes. Migration and snapshot fidelity are not established.
 - The retained FIFO candidate advances the iOS 14.0/18A5351d GUI through stock
   Setup. The user-approved beta agreement was accepted; the latest completed
-  observation reached iPhone Analytics before becoming unresponsive. Runner 143
-  and missing final result are recorded with unknown cause. A fresh bounded run
-  is continuing that same isolated state. Home and IPA execution are unverified.
+  observation reached final Welcome to iPhone with 37 captures, then stopped
+  cleanly at its bound. The final swipe did not show Home. A complete copied
+  state is continuing input diagnosis; Home and IPA execution are unverified.
 - Strict firmware selection prepared unchanged iPhone17,3/d47ap iOS27.0/24A437
   kernel, device tree, SPTM, TXM and stock restore trustcache with hashes.
+  Explicit optional extraction also prepares the matched restore ramdisk;
+  full RAM copying across reset is verified, filesystem/recovery boot is not.
 - Modern layout and metadata pass 29 layout plus 41 metadata sanitizer checks.
   Working ADT/1152-byte boot arguments preserve 452 nodes and 5414 unrelated
   property values. The optional ramdisk layout is implemented; no matching
@@ -65,6 +67,21 @@ ninja -j4 qemu-system-aarch64
 
 Pin the resulting executable when preparing a state bundle. A binary update
 requires a separately prepared bundle rather than changing a pinned manifest.
+
+To preserve a stopped state's setup progress with a different executable:
+
+```sh
+python3 modern-emulator/tools/runtime/session.py fork \
+  --source-state modern-emulator/runtime/EXISTING_STATE \
+  --state modern-emulator/runtime/NEW_STATE \
+  --binary /path/to/new/qemu-system-aarch64
+```
+
+The command copies all nine writable stores and retains the pinned original raw
+root backing. It rejects an active/marked source and checks source and copied
+bytes before publishing a usable manifest. A failed copy can leave an incomplete
+directory without a manifest. Boot assets and the original backing bundle must
+remain available. Historical GUI/IPA qualification is not inherited.
 
 ## Persistent isolated GUI state
 
@@ -111,6 +128,10 @@ per-run logs have new destinations. A QMP acknowledgement means the event was
 sent; verify the resulting guest screen. Wait for list scrolling to settle
 before selecting a row. An unexpected early exit, including exit 0, is a failure.
 Controlled termination is not a successful guest boot or application result.
+For an executable containing the new touch trace events, `run --trace-touch`
+records host input, encoded contact reports and SPI reply construction in the
+bounded emulator log. It preserves the normal wire format. Reply construction
+does not establish guest driver or gesture acceptance.
 Startup reliability remains unresolved: one restart of the earlier integration
 bundle hit a guest SEP panic. This build currently has no GTK backend; use QMP
 screenshots or VNC, or install GTK development dependencies and rebuild before

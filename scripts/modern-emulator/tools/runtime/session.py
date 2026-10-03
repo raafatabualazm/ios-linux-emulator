@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import fcntl
 import hashlib
 import json
@@ -62,6 +63,102 @@ class RunSignals:
             name = signal.Signals(self.received).name
             record.update(stop_reason=f'runner interrupted by {name}', status='interrupted',
                           interruption_signal=name, interruption_signal_number=self.received)
+
+
+class USBEndpoint:
+    """Reserve one private companion listener path without speaking USB."""
+    WAIT_SECONDS = 30
+
+    def __init__(self, state):
+        self.state = checked_path(state)
+        info = self.state.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or
+                info.st_mode & 0o077):
+            raise SessionError('USB requires an owned private state directory (mode 0700)')
+        self.state_identity = (info.st_dev, info.st_ino, info.st_uid)
+        self.path = self.state / 'usb.sock'
+        if len(os.fsencode(self.path)) > 100:
+            raise SessionError('Use a shorter state path for the USB Unix socket')
+        self.identity = None
+        try:
+            self.path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise SessionError('USB endpoint already exists; inspect its owner before another run')
+        if self._entries():
+            raise SessionError('USB path still belongs to an active Unix socket')
+
+    def _entries(self):
+        # A readiness connection would consume the companion's USB accept.
+        # Linux's passive table uses a different inode from the filesystem.
+        with Path('/proc/net/unix').open('rb') as stream:
+            data = stream.read((1 << 20) + 1)
+        if len(data) > 1 << 20:
+            raise SessionError('Unix socket readiness table exceeds its 1 MiB bound')
+        entries = []
+        for line in data.decode(errors='surrogateescape').splitlines()[1:]:
+            fields = line.split(maxsplit=7)
+            if len(fields) == 8 and fields[7] == str(self.path):
+                entries.append((int(fields[3], 16), int(fields[4], 16)))
+        return entries
+
+    def _capture(self):
+        state = self.state.lstat()
+        if ((state.st_dev, state.st_ino, state.st_uid) != self.state_identity or
+                not stat.S_ISDIR(state.st_mode) or state.st_mode & 0o077):
+            raise SessionError('USB state directory changed during startup')
+        try:
+            info = self.path.lstat()
+        except FileNotFoundError:
+            if self.identity is not None:
+                raise SessionError('Captured USB endpoint disappeared during startup')
+            return False
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+            raise SessionError('USB companion endpoint must be an owned Unix socket')
+        identity = {'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid}
+        if self.identity is None:
+            self.identity = identity
+        elif self.identity != identity:
+            raise SessionError('USB endpoint changed during startup')
+        return True
+
+    def wait(self, interruptions, timeout=WAIT_SECONDS):
+        if not math.isfinite(timeout) or not 0 < timeout <= self.WAIT_SECONDS:
+            raise SessionError('USB startup timeout must be positive and at most 30 seconds')
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if interruptions.received is not None:
+                return False
+            if self._capture():
+                entries = self._entries()
+                if len(entries) > 1:
+                    raise SessionError('USB path has multiple active Unix sockets')
+                if entries and entries[0][1] == socket.SOCK_STREAM and entries[0][0] & 0x10000:
+                    # Verify the captured filesystem identity after reading proc.
+                    self._capture()
+                    return True
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        raise SessionError('USB companion did not start listening within the startup bound')
+
+    def cleanup(self, child_reaped):
+        if not child_reaped:
+            raise SessionError('USB endpoint cleanup requires the phone child to be reaped')
+        if self.identity is None:
+            return 'not captured'
+        state = self.state.lstat()
+        if ((state.st_dev, state.st_ino, state.st_uid) != self.state_identity or
+                not stat.S_ISDIR(state.st_mode) or state.st_mode & 0o077):
+            return 'preserved changed state directory'
+        try:
+            info = self.path.lstat()
+        except FileNotFoundError:
+            return 'already absent'
+        identity = {'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid}
+        if not stat.S_ISSOCK(info.st_mode) or identity != self.identity:
+            return 'preserved replacement'
+        self.path.unlink()
+        return 'removed captured socket'
 
 
 def sha256(path):
@@ -209,6 +306,82 @@ def validate_state(state, manifest):
             or details.get('data-file') or details.get('corrupt')):
         raise SessionError('Root must be an intact qcow2 overlay of the pinned raw original, without an external data file')
     reject_open_writers([*originals, *(state / name for name in DISKS)])
+
+
+def validate_pins(manifest):
+    if manifest.get('schema') != 1 or manifest.get('profile') != 'inferno-ios14-gui':
+        raise SessionError('Unknown runtime manifest')
+    for item in [manifest['binary'], *manifest['assets'].values()]:
+        if sha256(item['path']) != item['sha256']:
+            raise SessionError('Pinned executable/boot artifact changed')
+    if file_identity(manifest['source_root']) != manifest['original_stores']['root']:
+        raise SessionError('Original backing root changed; do not reuse this state generation')
+    if any(sha256(Path(manifest['bundle']) / name) != value
+           for name, value in manifest['original_small_hashes'].items()):
+        raise SessionError('Original stores changed; do not reuse this state generation')
+
+
+def fork_state(source, destination, binary=None):
+    """Copy a stopped state's complete nine-store generation with a new binary pin."""
+    source, destination = checked_path(source), checked_path(destination)
+    if destination == source or source in destination.parents:
+        raise SessionError('Place the fork outside the source state')
+    if destination.exists() or destination.is_symlink():
+        raise SessionError('Destination must be new; existing state is never replaced')
+    with (source / 'session.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise SessionError('Source state already has an active runner') from error
+        if any((source / name).exists() or (source / name).is_symlink()
+               for name in ('live.json', 'qmp.sock')):
+            raise SessionError('Source state has session markers; stop or recover it before copying')
+        manifest_path = source / 'manifest.json'
+        manifest_identity = file_identity(manifest_path)
+        manifest_hash = sha256(manifest_path)
+        manifest = json.loads(manifest_path.read_text())
+        validate_pins(manifest)
+        validate_state(source, manifest)
+        bundle = checked_path(manifest['bundle'])
+        if destination == bundle or bundle in destination.parents:
+            raise SessionError('Place the fork outside the original bundle')
+        binary = checked_path(binary or manifest['binary']['path'])
+        binary_identity = file_identity(binary)
+        if not os.access(binary, os.X_OK):
+            raise SessionError('QEMU is not executable')
+        binary_hash = sha256(binary)
+        before = {name: file_identity(source / name) for name in DISKS}
+        source_hashes = {name: sha256(source / name) for name in DISKS}
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # A conservative logical-size bound also covers a non-sparse copy.
+        if shutil.disk_usage(destination.parent).free < sum(item['size'] for item in before.values()) + (128 << 20):
+            raise SessionError('Insufficient space for a complete state copy plus 128 MiB')
+        destination.mkdir(mode=0o700)
+        for name in DISKS:
+            subprocess.run(['cp', '--sparse=always', '--reflink=auto', '--',
+                            str(source / name), str(destination / name)],
+                           check=True, timeout=120)
+            (destination / name).chmod(0o600)
+        if (before != {name: file_identity(source / name) for name in DISKS}
+                or manifest_identity != file_identity(manifest_path)
+                or manifest_hash != sha256(manifest_path)
+                or binary_identity != file_identity(binary) or binary_hash != sha256(binary)):
+            raise SessionError('Source state or executable changed during copying; discard incomplete fork')
+        if any(sha256(destination / name) != value or sha256(source / name) != value
+               for name, value in source_hashes.items()):
+            raise SessionError('Source state/copy differs from the stopped generation; discard incomplete fork')
+        validate_pins(manifest)
+        forked = copy.deepcopy(manifest)
+        forked.update(binary={'path': str(binary), 'sha256': binary_hash},
+                      gui_complete=False, ipa_qualified=False,
+                      fork={'source_state': str(source), 'manifest_sha256': manifest_hash,
+                            'copied_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                            'source_stores': before, 'copied_store_sha256': source_hashes,
+                            'policy': 'all nine writable stores copied; original raw backing retained'})
+        validate_state(destination, forked)
+        # Publish a usable manifest only after all copies and pins pass.
+        write_json(destination / 'manifest.json', forked)
+        return forked
 
 
 def recover_dead_session(state):
@@ -369,12 +542,15 @@ def checked_qemu_data(value=None):
     return directory
 
 
-def argv_for(state, manifest, display, run_dir, vnc=None, qemu_data=None):
+def argv_for(state, manifest, display, run_dir, vnc=None, qemu_data=None, usb=False):
     vnc = checked_vnc(vnc)
     assets = {name: item['path'] for name, item in manifest['assets'].items()}
     machine = 't8030,' + ','.join(f'{name}={assets[name]}'
                                  for name in ('trustcache', 'ticket', 'sep-fw', 'sep-rom'))
     machine += ',kaslr-off=true'
+    if usb:
+        endpoint = checked_path(state) / 'usb.sock'
+        machine += ',usb-conn-type=unix,usb-conn-addr=' + str(endpoint)
     args = [manifest['binary']['path'], '-M', machine, '-kernel', assets['kernel'],
             '-dtb', assets['dtb'], '-append',
             'tlto_us=-1 mtxspin=-1 agm-genuine=1 agm-authentic=1 agm-trusted=1 '
@@ -396,7 +572,7 @@ def argv_for(state, manifest, display, run_dir, vnc=None, qemu_data=None):
     return args
 
 
-def run(state, seconds=900, display='none', vnc=None, qemu_data=None):
+def run(state, seconds=900, display='none', vnc=None, qemu_data=None, trace_touch=False, usb=False):
     vnc = checked_vnc(vnc)
     if qemu_data is not None and vnc is None:
         raise SessionError('The QEMU data directory option requires VNC')
@@ -429,22 +605,43 @@ def run(state, seconds=900, display='none', vnc=None, qemu_data=None):
             raise SessionError('Less than 64 MiB of working space remains; launch refused')
         socket_path = state / 'qmp.sock'
         recovery = recover_dead_session(state)
+        usb_endpoint = USBEndpoint(state) if usb else None
         run_dir = state / 'runs' / uuid.uuid4().hex
         run_dir.mkdir(parents=True)
-        args = (argv_for(state, manifest, display, run_dir) if vnc is None
-                else argv_for(state, manifest, display, run_dir, vnc, qemu_data))
+        args = (argv_for(state, manifest, display, run_dir) if vnc is None and not usb
+                else argv_for(state, manifest, display, run_dir, vnc, qemu_data, usb))
+        if trace_touch:
+            args += ['-trace', 'enable=apple_mt_spi_*']
         write_json(run_dir / 'argv.json', args)
         started = time.monotonic()
         record = {'run_id': run_dir.name, 'start_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                   'seconds_limit': seconds, 'vnc_endpoint': vnc, 'vnc_resources': resources,
                   'stale_session_recovery': recovery,
+                  'touch_trace': bool(trace_touch),
+                  'usb_endpoint': str(usb_endpoint.path) if usb_endpoint else None,
+                  'usb_listener_ready': False,
+                  'usb_companion_managed': False,
+                  'usb_wait_limit_seconds': USBEndpoint.WAIT_SECONDS if usb else None,
                   'ipa_result': 'not attempted', 'gui_result': 'requires visual/semantic evidence'}
         with RunSignals() as interruptions, (run_dir / 'emulator.log').open('wb') as output:
-            process = subprocess.Popen(args, cwd=manifest['bundle'], stdout=output, stderr=subprocess.STDOUT)
+            process = None
             try:
-                write_json(state / 'live.json', {'pid': process.pid, 'run': str(run_dir), 'qmp': str(socket_path)})
-                print(json.dumps({'pid': process.pid, 'run': str(run_dir), 'qmp': str(socket_path)}), flush=True)
-                while process.poll() is None:
+                if usb_endpoint:
+                    startup = {'status': 'awaiting USB companion', 'run': str(run_dir),
+                               'endpoint': str(usb_endpoint.path),
+                               'wait_limit_seconds': USBEndpoint.WAIT_SECONDS,
+                               'companion_managed': False}
+                    write_json(run_dir / 'usb-startup.json', startup)
+                    print(json.dumps(startup), flush=True)
+                    record['usb_listener_ready'] = usb_endpoint.wait(interruptions)
+                if interruptions.received is None:
+                    process = subprocess.Popen(args, cwd=manifest['bundle'], stdout=output, stderr=subprocess.STDOUT)
+                    live = {'pid': process.pid, 'run': str(run_dir), 'qmp': str(socket_path)}
+                    if usb_endpoint:
+                        live['usb_endpoint'] = str(usb_endpoint.path)
+                    write_json(state / 'live.json', live)
+                    print(json.dumps(live), flush=True)
+                while process is not None and process.poll() is None:
                     if interruptions.received is not None:
                         interruptions.annotate(record)
                         break
@@ -458,18 +655,20 @@ def run(state, seconds=900, display='none', vnc=None, qemu_data=None):
                         record['stop_reason'] = 'log size limit'
                         break
                     time.sleep(1)
-                if process.poll() is not None and 'stop_reason' not in record:
+                if process is not None and process.poll() is not None and 'stop_reason' not in record:
                     marker = state / 'stop-request.json'
                     requested = json.loads(marker.read_text()) if marker.exists() else {}
                     record['stop_reason'] = ('explicit stop request'
                                              if requested.get('run_id') == run_dir.name
                                              else 'unexpected emulator exit')
-            except BaseException:
-                record['stop_reason'] = 'runner interrupted'
+            except BaseException as error:
+                record['stop_reason'] = ('startup failed' if process is None else 'runner interrupted')
+                if process is None:
+                    record['startup_error'] = str(error)
                 raise
             finally:
                 try:
-                    if process.poll() is None:
+                    if process is not None and process.poll() is None:
                         try:
                             with QMP(socket_path) as qmp:
                                 qmp.request('quit')
@@ -483,13 +682,27 @@ def run(state, seconds=900, display='none', vnc=None, qemu_data=None):
                                 process.wait(timeout=5)
                             except subprocess.TimeoutExpired:
                                 process.kill()
-                                process.wait()
-                    else:
-                        process.wait()
-                    record['exit_code'] = process.returncode
+                                try:
+                                    process.wait(timeout=5)
+                                except subprocess.TimeoutExpired:
+                                    record['child_cleanup_error'] = 'Phone process did not reap after kill'
+                    elif process is not None:
+                        process.wait(timeout=5)
+                    record['phone_started'] = process is not None
+                    record['child_reaped'] = process is None or process.poll() is not None
+                    record['exit_code'] = process.returncode if process is not None else None
+                    if usb_endpoint:
+                        record['usb_socket_identity'] = usb_endpoint.identity
+                        try:
+                            record['usb_endpoint_cleanup'] = usb_endpoint.cleanup(record['child_reaped'])
+                        except (OSError, SessionError) as error:
+                            record['usb_endpoint_cleanup_error'] = str(error)
                     reason = record.get('stop_reason')
                     record['status'] = ('unexpected-exit' if reason == 'unexpected emulator exit'
-                                        else 'runner-error' if reason == 'runner interrupted' else 'stopped')
+                                        else 'startup-error' if reason == 'startup failed'
+                                        else 'runner-error' if reason == 'runner interrupted' or
+                                        record.get('usb_endpoint_cleanup_error') or
+                                        record.get('child_cleanup_error') else 'stopped')
                     interruptions.annotate(record)
                     record['elapsed_seconds'] = round(time.monotonic() - started, 2)
                     record['original_root_metadata_unchanged'] = file_identity(manifest['source_root']) == manifest['original_stores']['root']
@@ -500,10 +713,12 @@ def run(state, seconds=900, display='none', vnc=None, qemu_data=None):
                     print(json.dumps(record), flush=True)
                 finally:
                     try:
-                        (state / 'live.json').unlink(missing_ok=True)
+                        if process is not None and process.poll() is not None:
+                            (state / 'live.json').unlink(missing_ok=True)
                     finally:
                         # Only this runner's stopped QMP endpoint is removed.
-                        socket_path.unlink(missing_ok=True)
+                        if process is not None and process.poll() is not None:
+                            socket_path.unlink(missing_ok=True)
         return record
 
 
@@ -514,12 +729,18 @@ def main():
     prep.add_argument('--bundle', type=Path, required=True)
     prep.add_argument('--state', type=Path, required=True)
     prep.add_argument('--binary', type=Path)
+    fork = sub.add_parser('fork', help='copy all nine stores of a stopped state, optionally with a new binary pin')
+    fork.add_argument('--source-state', type=Path, required=True)
+    fork.add_argument('--state', type=Path, required=True)
+    fork.add_argument('--binary', type=Path)
     launch = sub.add_parser('run')
     launch.add_argument('--state', type=Path, required=True)
     launch.add_argument('--seconds', type=int, default=900)
     launch.add_argument('--display', choices=('none', 'gtk,zoom-to-fit=on,show-cursor=on'), default='none')
     launch.add_argument('--vnc', help='local VNC endpoint 127.0.0.1:DISPLAY (0–99); TCP port is 5900 + DISPLAY')
     launch.add_argument('--qemu-data', type=Path, help='QEMU data directory for VNC keymaps; defaults to integration pc-bios')
+    launch.add_argument('--trace-touch', action='store_true', help='trace input/report/delivery to the bounded emulator log (requires trace-capable binary)')
+    launch.add_argument('--usb', action='store_true', help='reserve state/usb.sock and wait up to 30 seconds for a companion listener before phone launch')
     ctl = sub.add_parser('control')
     ctl.add_argument('--state', type=Path, required=True)
     ctl.add_argument('action', choices=('status', 'side', 'home', 'screenshot', 'tap', 'swipe', 'quit'))
@@ -536,12 +757,18 @@ def main():
         if args.command == 'prepare':
             result = prepare(args.bundle, args.state, args.binary)
             print(json.dumps({'profile': result['profile'], 'state': str(args.state.resolve())}))
+        elif args.command == 'fork':
+            result = fork_state(args.source_state, args.state, args.binary)
+            print(json.dumps({'profile': result['profile'], 'state': str(args.state.resolve()),
+                              'source_state': result['fork']['source_state']}))
         elif args.command == 'run':
-            result = run(args.state, args.seconds, args.display, args.vnc, args.qemu_data)
+            result = run(args.state, args.seconds, args.display, args.vnc, args.qemu_data, args.trace_touch, args.usb)
             if result['status'] == 'interrupted':
+                disposition = ('no phone started' if not result.get('phone_started') else
+                               'guest reaped' if result.get('child_reaped') else 'guest could not be reaped')
                 parser.exit(128 + result['interruption_signal_number'],
-                            f'Runner interrupted by {result["interruption_signal"]}; guest reaped.\n')
-            if result['exit_code'] != 0 or result['status'] == 'unexpected-exit':
+                            f'Runner interrupted by {result["interruption_signal"]}; {disposition}.\n')
+            if result['exit_code'] != 0 or result['status'] in ('unexpected-exit', 'runner-error', 'startup-error'):
                 raise SessionError(f'Emulator exited unexpectedly: {result["exit_code"]}')
         else:
             with QMP(args.state.resolve() / 'qmp.sock') as qmp:
