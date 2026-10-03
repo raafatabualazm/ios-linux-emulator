@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Read a local or HTTP-range IPSW and prepare matched, unmodified boot payloads.
 
-No root filesystem, restore ramdisk, key, ticket, or security patch is selected.
+The default selects five boot components. A matching restore ramdisk can be
+selected explicitly; no full filesystem, key, ticket or security patch is used.
 Requires only Python's standard library. Compressed Image4 payloads optionally
 use an existing img4 executable with its ordinary extraction operation.
 """
@@ -31,6 +32,9 @@ import zipfile
 MIB = 1024 * 1024
 MAX_METADATA = 16 * MIB
 DEFAULT_LIMIT = 300 * MIB
+RAMDISK_LIMIT = 640 * MIB
+BOOT_MEMBER_LIMIT = 128 * MIB
+RAMDISK_MEMBER_LIMIT = 256 * MIB
 MAX_REQUEST = 8 * MIB
 MAX_REPORT = MIB
 COMPONENTS = {
@@ -41,7 +45,21 @@ COMPONENTS = {
     "restore-trustcache": ("RestoreTrustCache",),
 }
 IMAGE4_TYPES = {"bootkc": "krnl", "dtree": "dtre", "sptm": "sptm",
-                "txm": "trxm", "restore-trustcache": "rtsc"}
+                "txm": "trxm", "restore-trustcache": "rtsc", "ramdisk": "rdsk"}
+
+
+def selected_components(selection):
+    if selection == "boot":
+        return COMPONENTS
+    if selection == "boot-and-ramdisk":
+        return {**COMPONENTS, "ramdisk": ("RestoreRamDisk",)}
+    if selection == "ramdisk-only":
+        return {"ramdisk": ("RestoreRamDisk",)}
+    raise FirmwareError("unknown component selection")
+
+
+def member_limit(name):
+    return RAMDISK_MEMBER_LIMIT if name == "ramdisk" else BOOT_MEMBER_LIMIT
 
 
 class FirmwareError(Exception):
@@ -51,7 +69,8 @@ class FirmwareError(Exception):
 class RangeReader(io.RawIOBase):
     """Seekable, bounded, identity-encoded HTTP byte ranges with entity pinning."""
 
-    def __init__(self, url: str, *, limit: int = DEFAULT_LIMIT, timeout: float = 15):
+    def __init__(self, url: str, *, limit: int = DEFAULT_LIMIT, timeout: float = 15,
+                 maximum_limit: int = DEFAULT_LIMIT):
         super().__init__()
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -59,7 +78,9 @@ class RangeReader(io.RawIOBase):
         if parsed.username or parsed.password or parsed.fragment:
             raise FirmwareError("credentials and fragments are not allowed in source URLs")
         self.url = url
-        if not 0 < limit <= DEFAULT_LIMIT or not math.isfinite(timeout) or not 0 < timeout <= 120:
+        if (maximum_limit not in (DEFAULT_LIMIT, RAMDISK_LIMIT)
+                or not 0 < limit <= maximum_limit
+                or not math.isfinite(timeout) or not 0 < timeout <= 120):
             raise FirmwareError("invalid transfer budget or timeout")
         self.limit = limit
         self.timeout = timeout
@@ -245,9 +266,10 @@ def check_zip_metadata(reader):
 
 
 @contextlib.contextmanager
-def open_archive(source, limit=DEFAULT_LIMIT, timeout=15):
+def open_archive(source, limit=DEFAULT_LIMIT, timeout=15, maximum_limit=DEFAULT_LIMIT):
     if urllib.parse.urlsplit(source).scheme in ("http", "https"):
-        reader = RangeReader(source, limit=limit, timeout=timeout)
+        reader = RangeReader(source, limit=limit, timeout=timeout,
+                             maximum_limit=maximum_limit)
     else:
         reader = open(source, "rb")
     try:
@@ -264,7 +286,9 @@ def open_archive(source, limit=DEFAULT_LIMIT, timeout=15):
         reader.close()
 
 
-def read_member(zf, name, limit):
+def read_member(zf, name, limit, chunk_size=256 * 1024):
+    if not 0 < chunk_size <= MAX_REQUEST:
+        raise FirmwareError("invalid selected member read size")
     checked_name(name)
     try:
         info = zf.getinfo(name)
@@ -276,7 +300,7 @@ def read_member(zf, name, limit):
     try:
         with zf.open(info) as member:
             while True:
-                chunk = member.read(min(256 * 1024, limit - len(data) + 1))
+                chunk = member.read(min(chunk_size, limit - len(data) + 1))
                 if not chunk:
                     break
                 data.extend(chunk)
@@ -289,7 +313,9 @@ def read_member(zf, name, limit):
     return bytes(data)
 
 
-def select_identity(manifest, *, product, board, version=None, build=None, variant=None):
+def select_identity(manifest, *, product, board, version=None, build=None, variant=None,
+                    selection="boot"):
+    requested_components = selected_components(selection)
     if not isinstance(manifest, dict) or not isinstance(manifest.get("SupportedProductTypes"), list):
         raise FirmwareError("invalid BuildManifest dictionary/products")
     if product not in manifest.get("SupportedProductTypes", []):
@@ -326,7 +352,7 @@ def select_identity(manifest, *, product, board, version=None, build=None, varia
     if not isinstance(identity.get("Manifest"), dict):
         raise FirmwareError("invalid build identity component manifest")
     components = {}
-    for dest, aliases in COMPONENTS.items():
+    for dest, aliases in requested_components.items():
         found = [(name, identity.get("Manifest", {}).get(name)) for name in aliases
                  if name in identity.get("Manifest", {})]
         if len(found) > 1:
@@ -449,9 +475,12 @@ def extract_payload(data, original, output, *, img4, limit, expected_type=None):
 
 
 def prepare(source, output, *, product, board, version=None, build=None,
-            variant=None, inspect_only=False, img4=None, limit=DEFAULT_LIMIT, timeout=15):
-    if not 0 < limit <= DEFAULT_LIMIT or not math.isfinite(timeout) or not 0 < timeout <= 120:
-        raise FirmwareError("resource limit must be between 1 byte and 300 MiB")
+            variant=None, inspect_only=False, img4=None, limit=DEFAULT_LIMIT, timeout=15,
+            selection="boot"):
+    selected_components(selection)
+    maximum_limit = DEFAULT_LIMIT if selection == "boot" else RAMDISK_LIMIT
+    if not 0 < limit <= maximum_limit or not math.isfinite(timeout) or not 0 < timeout <= 120:
+        raise FirmwareError(f"resource limit must be between 1 byte and {maximum_limit // MIB} MiB")
     # Reserve space for a bounded failure/success report even if payload output
     # consumes its allowance. The limit covers all file contents, not just images.
     data_limit = limit - MAX_REPORT
@@ -462,16 +491,20 @@ def prepare(source, output, *, product, board, version=None, build=None,
         raise FirmwareError("output directory must be new; existing firmware is never overwritten")
     report = {"schema": 1, "source": source, "requested_product": product,
               "requested_board": board, "inspect_only": inspect_only,
+              "component_selection": selection, "limit_bytes": limit,
+              "maximum_limit_bytes": maximum_limit,
               "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
               "security_changes": [], "artifacts": [], "status": "started"}
-    with open_archive(source, limit=limit, timeout=timeout) as (zf, reader, archive_size):
+    with open_archive(source, limit=limit, timeout=timeout,
+                      maximum_limit=maximum_limit) as (zf, reader, archive_size):
         raw_manifest = read_member(zf, "BuildManifest.plist", MAX_METADATA)
         try:
             manifest = plistlib.loads(raw_manifest)
         except (plistlib.InvalidFileException, ValueError, TypeError) as exc:
             raise FirmwareError("invalid BuildManifest plist") from exc
         identity, components = select_identity(manifest, product=product, board=board,
-                                               version=version, build=build, variant=variant)
+                                               version=version, build=build, variant=variant,
+                                               selection=selection)
         report.update({"archive_size": archive_size,
                        "product_version": manifest.get("ProductVersion"),
                        "product_build": manifest.get("ProductBuildVersion"),
@@ -482,9 +515,12 @@ def prepare(source, output, *, product, board, version=None, build=None,
                                     "ApBoardID": identity.get("ApBoardID")},
                        "build_manifest": digest(raw_manifest), "selected": {}})
         for name, component in components.items():
-            member = zf.getinfo(component["member"])
-            if member.file_size > 128 * MIB:
-                raise FirmwareError("selected boot component exceeds 128 MiB bound")
+            try:
+                member = zf.getinfo(component["member"])
+            except KeyError as exc:
+                raise FirmwareError(f"missing selected ZIP member: {component['member']}") from exc
+            if member.file_size > member_limit(name):
+                raise FirmwareError(f"selected {name} exceeds {member_limit(name) // MIB} MiB member bound")
             report["selected"][name] = {**component, "zip_size": member.file_size,
                                          "compressed_size": member.compress_size,
                                          "crc32": f"{member.CRC:08x}"}
@@ -501,16 +537,23 @@ def prepare(source, output, *, product, board, version=None, build=None,
                 (out / "original").mkdir(mode=0o700)
                 (out / "derived").mkdir(mode=0o700)
                 for name, component in components.items():
-                    raw = read_member(zf, component["member"], min(128 * MIB, data_limit - disk_used))
+                    raw = read_member(zf, component["member"],
+                                      min(member_limit(name), data_limit - disk_used),
+                                      chunk_size=2 * MIB if name == "ramdisk" else 256 * 1024)
                     original = out / "original" / (name + ".im4p")
                     derived = out / "derived" / name
                     exclusive_write(original, raw)
                     disk_used += len(raw)
                     record = {"component": name, "member": component["member"],
                               "original": {"path": str(original), **digest(raw)}}
+                    if name == "ramdisk":
+                        record["filesystem_qualified"] = False
                     report["artifacts"].append(record)
+                    decoded_limit = data_limit - disk_used
+                    if name == "ramdisk":
+                        decoded_limit = min(decoded_limit, RAMDISK_MEMBER_LIMIT)
                     typ, derived_digest, operation = extract_payload(raw, original, derived,
-                                                  img4=img4, limit=data_limit - disk_used,
+                                                  img4=img4, limit=decoded_limit,
                                                   expected_type=IMAGE4_TYPES[name])
                     record["derived"] = {"path": str(derived), **derived_digest}
                     record["image4_type"] = typ
@@ -553,6 +596,12 @@ def main():
     parser.add_argument("--variant")
     parser.add_argument("--inspect-only", action="store_true")
     parser.add_argument("--img4-tool", help="existing Image4 decoder; no keys or patch operations")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--include-ramdisk", dest="selection", action="store_const",
+                           const="boot-and-ramdisk", help="also select the matched RestoreRamDisk")
+    selection.add_argument("--ramdisk-only", dest="selection", action="store_const",
+                           const="ramdisk-only", help="select only the matched RestoreRamDisk")
+    parser.set_defaults(selection="boot")
     parser.add_argument("--limit-mib", type=int, default=300)
     parser.add_argument("--timeout", type=float, default=15)
     args = parser.parse_args()
@@ -560,7 +609,7 @@ def main():
         report = prepare(args.source, args.output, product=args.product, board=args.board,
                          version=args.version, build=args.build, variant=args.variant,
                          inspect_only=args.inspect_only, img4=args.img4_tool,
-                         limit=args.limit_mib * MIB, timeout=args.timeout)
+                         limit=args.limit_mib * MIB, timeout=args.timeout, selection=args.selection)
     except (FirmwareError, OSError, KeyError, zipfile.BadZipFile) as exc:
         parser.exit(1, f"firmware preparation failed: {exc}\n")
     print(json.dumps(report, indent=2))
