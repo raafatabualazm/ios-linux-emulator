@@ -32,6 +32,7 @@
 #include "qemu/timer.h"
 #include "ui/console.h"
 #include "ui/input.h"
+#include "hw/arm/trace.h"
 
 typedef struct AppleMTSPIBuffer {
     uint8_t *data;
@@ -716,6 +717,13 @@ static void apple_mt_spi_handle_fw_packet(AppleMTSPIState *s)
         } else {
             packet = QTAILQ_FIRST(&s->pending_fw);
             assert_nonnull(packet);
+            if (packet->type == LL_PACKET_LOSSLESS_OUTPUT &&
+                packet->buf.len == 58 &&
+                packet->buf.data[1] == HID_REPORT_BINARY_PATH_OR_IMAGE) {
+                trace_apple_mt_spi_deliver(packet->buf.data[9],
+                                           packet->buf.data[37],
+                                           packet->buf.len);
+            }
             apple_mt_spi_push_ll_hdr(&buf, packet->type, 0, 0, 0,
                                      packet->buf.len);
             apple_mt_spi_buf_append(&buf, &packet->buf);
@@ -828,6 +836,11 @@ static void apple_mt_spi_send_path_update(AppleMTSPIState *s, uint64_t ts,
 
     x_delta = x - prev_x;
     y_delta = y - prev_y;
+
+    trace_apple_mt_spi_report(s->frame, path_stage, ts, ts_delta, x, y,
+                              prev_x, prev_y,
+                              (uint16_t)(ABS(x_delta) / ts_delta * 1000),
+                              (uint16_t)(ABS(y_delta) / ts_delta * 1000));
 
     packet->type = LL_PACKET_LOSSLESS_OUTPUT;
     apple_mt_spi_buf_ensure_capacity(&packet->buf, 9 + 27 + 20 + 2);
@@ -1011,8 +1024,13 @@ static void apple_mt_spi_mouse_event(void *opaque, int dx, int dy, int dz,
     //         s->display_height, s->display_width);
     s->y -= qemu_input_scale_axis(16, 0, s->display_height, 0,
                                   MT_SENSOR_SURFACE_HEIGHT);
+    /* Calibration must not move a contact outside the advertised surface. */
+    s->y = CLAMP(s->y, 0, MT_SENSOR_SURFACE_HEIGHT);
     s->prev_btn_state = s->btn_state;
     s->btn_state = buttons_state;
+
+    trace_apple_mt_spi_input(dx, dy, buttons_state, s->x, s->y,
+                             qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 
     if ((s->prev_btn_state & MOUSE_EVENT_LBUTTON) == 0 &&
         (s->btn_state & MOUSE_EVENT_LBUTTON) != 0) {

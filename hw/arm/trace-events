@@ -79,3 +79,8 @@ z2_aer915_event(int8_t event, int8_t len) "i2c event =0x%x len=%d bytes"
 
 # bcm2838.c
 bcm2838_gic_set_irq(int irq, int level) "gic irq:%d lvl:%d"
+
+# apple-silicon/mt-spi.c (explicit opt-in diagnostics; unchanged wire format)
+apple_mt_spi_input(int dx, int dy, int buttons, int x, int y, uint64_t ts) "abs=(%d,%d) buttons=%d sensor=(%d,%d) ts_ns=%"PRIu64
+apple_mt_spi_report(unsigned frame, unsigned stage, uint64_t ts, uint64_t dt, int x, int y, int prev_x, int prev_y, unsigned rel_x, unsigned rel_y) "frame=%u stage=%u ts_ns=%"PRIu64" dt_ns=%"PRIu64" sensor=(%d,%d) previous=(%d,%d) wire_relative=(%u,%u)"
+apple_mt_spi_deliver(unsigned frame, unsigned stage, unsigned bytes) "frame=%u stage=%u bytes=%u"

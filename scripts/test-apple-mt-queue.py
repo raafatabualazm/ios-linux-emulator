@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Exercise actual MT scheduling, encoding, drain and reset under sanitizers.
+"""Exercise actual MT input, scheduling, encoding, drain and reset under sanitizers.
 
 The C fixture models QEMU's newest-first one-shot BH list and uses real GLib
-queues; it stubs locking/IRQ/timer/CRC plumbing. It calls production scheduling.
-Packet fields are checked independently against coordinates at event creation.
+queues; it stubs locking/IRQ/timer/CRC plumbing. It calls production scheduling,
+mouse input and QEMU axis scaling. Packet fields are checked independently
+against coordinates at event creation, including sensor edges and calibration.
 This is a device component check, not a guest GUI acceptance test.
 """
 import argparse
@@ -14,7 +15,7 @@ import tempfile
 
 
 def function(text, name):
-    match = re.search(r"^static[^\n{;]*\b" + name + r"\([^;{]*?\)\n\{", text, re.M)
+    match = re.search(r"^(?:static|int)\b[^\n{;]*\b" + name + r"\([^;{]*?\)\n\{", text, re.M)
     if match is None:
         raise RuntimeError(f"Missing function {name}")
     # These functions have balanced braces, including their comments.
@@ -31,6 +32,7 @@ def main():
     parser.add_argument('--source', type=Path, default=Path(__file__).resolve().parents[1] / 'hw/arm/apple-silicon/mt-spi.c')
     args = parser.parse_args()
     source = args.source.read_text()
+    input_source = (Path(__file__).resolve().parents[1] / 'ui/input.c').read_text()
     touch_type = re.search(r'typedef struct \{[^}]+\} AppleMTSPITouchUpdate;', source).group()
     names = ('apple_mt_spi_buf_push_byte', 'apple_mt_spi_buf_push_word',
              'apple_mt_spi_buf_push_dword', 'apple_mt_spi_buf_push_crc16',
@@ -45,16 +47,28 @@ def main():
 #include <stdlib.h>
 #include <string.h>
 #define SCALE_MS 1000000
+#define NANOSECONDS_PER_SECOND 1000000000
 #define QEMU_CLOCK_VIRTUAL 0
+#define INPUT_EVENT_ABS_MIN 0
+#define INPUT_EVENT_ABS_MAX 0x7fff
+#define MT_SENSOR_SURFACE_WIDTH 6458
+#define MT_SENSOR_SURFACE_HEIGHT 13977
+#define MOUSE_EVENT_LBUTTON 1
+#define PATH_STAGE_MAKE_TOUCH 3
+#define PATH_STAGE_TOUCHING 4
+#define PATH_STAGE_BREAK_TOUCH 5
+#define PATH_STAGE_OUT_OF_RANGE 7
 #define HID_TRANSFER_PACKET_OUTPUT 0x20
 #define HID_REPORT_BINARY_PATH_OR_IMAGE 0x44
 #define HID_PACKET_STATUS_SUCCESS 0
 #define LL_PACKET_LOSSLESS_OUTPUT 0x10
 #define QEMU_LOCK_GUARD(lock) ((void)(lock))
+#define trace_apple_mt_spi_report(...) ((void)0)
+#define trace_apple_mt_spi_input(...) ((void)0)
 typedef struct { uint8_t *data; uint32_t capacity, len, read_pos; } AppleMTSPIBuffer;
 typedef struct AppleMTSPILLPacket { AppleMTSPIBuffer buf; uint8_t type; struct AppleMTSPILLPacket *next; } AppleMTSPILLPacket;
 typedef struct { AppleMTSPILLPacket *first; } FWQueue;
-typedef struct { int lock, irq, *timer, *end_timer; FWQueue pending_fw; AppleMTSPIBuffer tx,rx,pending_hbpp; uint8_t frame; int16_t x,y,prev_x,prev_y; int32_t btn_state,prev_btn_state; uint64_t prev_ts,touch_generation; GQueue touch_updates; bool touch_bh_pending; } AppleMTSPIState;
+typedef struct { int lock, irq, *timer, *end_timer; FWQueue pending_fw; AppleMTSPIBuffer tx,rx,pending_hbpp; uint8_t frame; int16_t x,y,prev_x,prev_y; int32_t btn_state,prev_btn_state; uint64_t prev_ts,touch_generation; GQueue touch_updates; bool touch_bh_pending; uint32_t display_width,display_height; } AppleMTSPIState;
 typedef AppleMTSPIState Object;
 typedef int ResetType;
 #define APPLE_MT_SPI(obj) (obj)
@@ -88,6 +102,7 @@ static void probe_callback(void *opaque) { assert(callback_count<2); callback_or
 static uint64_t virtual_time;
 static uint64_t qemu_clock_get_ns(int clock) { (void)clock; return virtual_time; }
 static void timer_del(int *timer) { (void)timer; }
+static void timer_mod(int *timer, int64_t expiry) { (void)timer; (void)expiry; }
 static void apple_mt_spi_buf_free(AppleMTSPIBuffer *buf) { free(buf->data); memset(buf,0,sizeof(*buf)); }
 static void apple_mt_spi_buf_ensure_capacity(AppleMTSPIBuffer *buf, size_t count) {
     size_t required=buf->len+count;
@@ -99,11 +114,14 @@ static void stw_le_p(uint8_t *p, uint16_t v) { p[0]=v; p[1]=v>>8; }
 static void stl_le_p(uint8_t *p, uint32_t v) { for (int i=0;i<4;i++) p[i]=v>>(8*i); }
 static uint16_t crc16(uint16_t seed, const uint8_t *p, size_t len) { while(len--) seed+=*p++; return seed; }
 '''
+    code += function(input_source, 'qemu_input_scale_axis') + '\n'
     code += '\n'.join(function(source, name) for name in names)
     code += '\n' + touch_type + '\n'
     code += '\n'.join(function(source, name) for name in
                       ('apple_mt_spi_new_touch_update', 'apple_mt_spi_send_touch_update_bh',
-                       'apple_mt_spi_schedule_touch_update', 'apple_mt_spi_reset_enter'))
+                       'apple_mt_spi_schedule_touch_update', 'apple_mt_spi_timer_tick',
+                       'apple_mt_spi_end_timer_tick', 'apple_mt_spi_mouse_event',
+                       'apple_mt_spi_reset_enter'))
     code += r'''
 static int check_packet(size_t index, uint8_t stage, int x, int y, uint32_t timestamp_ms) {
     const AppleMTSPIBuffer *buf=&packets[index]->buf;
@@ -183,7 +201,62 @@ int main(void) {
     apple_mt_spi_reset_enter(&state,0);
     assert(packet_count==0 && !pending_bh_count);
     if(bad) return 1;
-    puts("PASS: production scheduling preserves touch FIFO despite LIFO BHs; reset clears stale updates and retains pending drain lifetime");
+    /* Fixed expectations include the calibrated bottom boundary, immediately
+     * outside it, interior samples and both X endpoints. These are QEMU ABS
+     * coordinates for the 828x1792 display, not a copied calibration formula. */
+    static const struct { int dx,dy,x,y; } samples[] = {
+        {0,32767,0,0}, {32767,32767,6458,0},
+        {16383,32493,3228,0}, {16383,32474,3228,0},
+        {16383,32200,3228,117}, {16383,31907,3228,242},
+        {16383,30004,3228,1054}, {16383,16383,3228,6864},
+        {0,0,0,13853}, {32767,0,6458,13853},
+    };
+    state.display_width=828; state.display_height=1792;
+    for(size_t i=0;i<G_N_ELEMENTS(samples);i++) {
+        uint32_t time_ms=1000+100*i;
+        virtual_time=(uint64_t)time_ms*SCALE_MS;
+        apple_mt_spi_mouse_event(&state,samples[i].dx,samples[i].dy,0,MOUSE_EVENT_LBUTTON);
+        virtual_time+=10*SCALE_MS;
+        apple_mt_spi_mouse_event(&state,samples[i].dx,samples[i].dy,0,0);
+        /* Change live coordinates before draining: encoded edges must be the
+         * captured contact coordinates, not the later top-center position. */
+        apple_mt_spi_mouse_event(&state,16383,0,0,0);
+        assert(pending_bh_count==1);
+        poll_bhs();
+        assert(packet_count==2);
+        bad |= check_packet(0,3,samples[i].x,samples[i].y,time_ms)
+                | check_packet(1,5,samples[i].x,samples[i].y,time_ms+10);
+        apple_mt_spi_reset_enter(&state,0);
+    }
+    if(bad) return 1;
+    /* Every valid ABS Y value stays within the surface advertised to the guest.
+     * No button transition occurs, so this bounded sweep queues no reports. */
+    for(int y=INPUT_EVENT_ABS_MIN;y<=INPUT_EVENT_ABS_MAX;y++) {
+        apple_mt_spi_mouse_event(&state,16383,y,0,0);
+        assert(state.y>=0 && state.y<=MT_SENSOR_SURFACE_HEIGHT);
+        assert(state.x==3228 && !pending_bh_count && packet_count==0);
+    }
+    apple_mt_spi_reset_enter(&state,0);
+    /* Exercise actual movement/end timers across the clamped edge. */
+    virtual_time=3000ULL*SCALE_MS;
+    apple_mt_spi_mouse_event(&state,16383,32767,0,MOUSE_EVENT_LBUTTON);
+    virtual_time=3050ULL*SCALE_MS;
+    apple_mt_spi_mouse_event(&state,16383,32200,0,MOUSE_EVENT_LBUTTON);
+    apple_mt_spi_timer_tick(&state);
+    virtual_time=3100ULL*SCALE_MS;
+    apple_mt_spi_mouse_event(&state,16383,32200,0,0);
+    virtual_time=3200ULL*SCALE_MS;
+    apple_mt_spi_end_timer_tick(&state);
+    apple_mt_spi_mouse_event(&state,16383,0,0,0);
+    assert(pending_bh_count==1);
+    poll_bhs();
+    assert(packet_count==4);
+    bad |= check_packet(0,3,3228,0,3000) | check_packet(1,4,3228,117,3050)
+            | check_packet(2,5,3228,117,3100) | check_packet(3,7,3228,117,3200);
+    apple_mt_spi_reset_enter(&state,0);
+    assert(packet_count==0 && !pending_bh_count);
+    if(bad) return 1;
+    puts("PASS: production mouse input bounds all 32768 ABS Y values, preserves interior calibration and captured stage coordinates; FIFO/reset checks pass");
     return 0;
 }
 '''

@@ -3,6 +3,7 @@
 
 The CPU stays stopped throughout: this checks normal loading, metadata and
 system_reset only. It does not qualify SPTM execution, iOS boot, GUI or IPAs.
+An optional decoded restore ramdisk is checked without mounting its filesystem.
 Firmware RAM dumps are transient; retained reports contain hashes and counts.
 """
 from __future__ import annotations
@@ -135,10 +136,20 @@ def expected_layout(blobs: dict[str, bytes]) -> dict:
             require(copy["physical"] == sptm_base + copy["virtual"] - images["sptm"]["low"],
                     "SPTM virtual and physical segment orders agree")
     require(len(copies) == 23 and len(regions) == 19, "Reference component schema")
+    ramdisk = None
+    if blobs.get("ramdisk"):
+        size = len(blobs["ramdisk"])
+        reserved = page(size)
+        require(cursor % PAGE == 0 and cursor + reserved <= DRAM + RAM_SIZE,
+                "Reference ramdisk fits aligned DRAM")
+        ramdisk = {"physical": cursor, "file": size, "memory": reserved}
+        regions["RAMDisk"] = (cursor, reserved)
+        cursor += reserved
     return {"images": images, "regions": regions, "copies": copies,
             "entry": sptm_base + images["sptm"]["entry"] - images["sptm"]["low"],
             "args": regions["BootArgs"][0], "tree": regions["DeviceTree"][0] + PAGE,
-            "top": cursor, "virtual_base": images["bootkc"]["low"] & ~INDEX_MASK}
+            "top": cursor, "virtual_base": images["bootkc"]["low"] & ~INDEX_MASK,
+            "ramdisk": ramdisk}
 
 
 class QMP:
@@ -207,10 +218,12 @@ def parse_registers(text: str) -> dict:
 
 def audit(qmp: QMP, scratch: Path, blobs: dict, layout: dict, parse_adt) -> dict:
     reads, total = 0, 0
+    ramdisk_size = len(blobs.get("ramdisk", b""))
+    inspection_limit = 18 * 1024 * 1024 + ramdisk_size
 
     def memory(address: int, size: int) -> bytes:
         nonlocal reads, total
-        require(0 < size <= 17 * 1024 * 1024 and total + size <= 18 * 1024 * 1024,
+        require(0 < size <= 17 * 1024 * 1024 and total + size <= inspection_limit,
                 "RAM inspection byte budget")
         path = scratch / "ram-inspection.bin"
         path.unlink(missing_ok=True)
@@ -245,8 +258,10 @@ def audit(qmp: QMP, scratch: Path, blobs: dict, layout: dict, parse_adt) -> dict
         normal[prefix + "-virt"] = struct.pack("<QQ", layout["images"][image]["low"], 0)
         normal[prefix + "-entry"] = struct.pack("<QQ", layout["images"][image]["entry"], 0)
     normal["slide"] = bytes(16)
-    for name in ("SPTM-rm", "CL4-rx", "CL4-ro", "CL4-rw", "CL4-le", "CL4-entry", "CL4-virt", "RAMDisk"):
+    for name in ("SPTM-rm", "CL4-rx", "CL4-ro", "CL4-rw", "CL4-le", "CL4-entry", "CL4-virt"):
         normal[name] = b"\xff" * 16
+    if layout["ramdisk"] is None:
+        normal["RAMDisk"] = b"\xff" * 16
     generated = {"/chosen": {"dram-base": struct.pack("<Q", DRAM),
                               "dram-size": struct.pack("<Q", RAM_SIZE)},
                  "/chosen/memory-map": normal}
@@ -292,6 +307,29 @@ def audit(qmp: QMP, scratch: Path, blobs: dict, layout: dict, parse_adt) -> dict
     require(memory(dummy, PAGE) == bytes(PAGE), "Reserved dummy page is zero")
     require(memory(layout["regions"]["DeviceTree"][0], PAGE) == bytes(PAGE),
             "DeviceTree prefix page is zero")
+    ramdisk_observation = None
+    if layout["ramdisk"] is not None:
+        ramdisk = layout["ramdisk"]
+        loaded_hash = hashlib.sha256()
+        for offset in range(0, ramdisk["file"], 8 * 1024 * 1024):
+            length = min(8 * 1024 * 1024, ramdisk["file"] - offset)
+            loaded_hash.update(memory(ramdisk["physical"] + offset, length))
+        expected_hash = hashlib.sha256(blobs["ramdisk"]).hexdigest()
+        require(loaded_hash.hexdigest() == expected_hash, "Complete unchanged ramdisk RAM copy")
+        padding = ramdisk["memory"] - ramdisk["file"]
+        if padding:
+            require(memory(ramdisk["physical"] + ramdisk["file"], padding) == bytes(padding),
+                    "Ramdisk reservation padding is zero")
+        require(layout["top"] == ramdisk["physical"] + ramdisk["memory"],
+                "Bootargs topOfKernelData includes the complete ramdisk reservation")
+        ramdisk_observation = {"physical_address": hex(ramdisk["physical"]),
+                               "payload_bytes_verified": ramdisk["file"],
+                               "reserved_bytes_verified": ramdisk["memory"],
+                               "payload_sha256": loaded_hash.hexdigest(),
+                               "zero_padding_bytes_verified": padding,
+                               "adt_descriptor_verified": True,
+                               "bootargs_reservation_end_verified": True,
+                               "filesystem_qualified": False}
     return {"bootargs_bytes_verified": len(args), "bootargs_sha256": hashlib.sha256(args).hexdigest(),
             "prepared_dtree_bytes": len(tree), "prepared_dtree_sha256": hashlib.sha256(tree).hexdigest(),
             "adt_nodes_preserved_in_order": len(original),
@@ -300,12 +338,17 @@ def audit(qmp: QMP, scratch: Path, blobs: dict, layout: dict, parse_adt) -> dict
             "advertised_regions_verified": len(layout["regions"]), "graphics_node_retained": True,
             "stock_trustcache_bytes_verified": len(wrapped), "segments_sampled": len(layout["copies"]),
             "segment_samples_verified": segment_samples, "zero_bss_samples_verified": bss_samples,
-            "physical_memory_reads": reads, "physical_memory_bytes_read": total}
+            "physical_memory_reads": reads, "physical_memory_bytes_read": total,
+            "physical_memory_byte_limit": inspection_limit,
+            "ramdisk": ramdisk_observation}
 
 
-def run(binary: Path, components: Path, output: Path) -> dict:
-    before = {name: digest(components / name) for name in ASSETS}
-    blobs = {name: (components / name).read_bytes() for name in ASSETS}
+def run(binary: Path, components: Path, output: Path, ramdisk: Path | None = None) -> dict:
+    asset_paths = {name: components / name for name in ASSETS}
+    if ramdisk is not None:
+        asset_paths["ramdisk"] = ramdisk
+    before = {name: digest(path) for name, path in asset_paths.items()}
+    blobs = {name: path.read_bytes() for name, path in asset_paths.items()}
     layout = expected_layout(blobs)
     spec = importlib.util.spec_from_file_location(
         "metadata_oracle", Path(__file__).with_name("test-apple-modern-boot-metadata.py"))
@@ -313,7 +356,8 @@ def run(binary: Path, components: Path, output: Path) -> dict:
     spec.loader.exec_module(oracle)
     report = {"scope": "Whole apple-modern machine: stopped RAM preparation and reset only",
               "binary": str(binary), "binary_sha256": digest(binary)["sha256"],
-              "components": str(components), "component_hashes_before": before,
+              "components": str(components), "ramdisk": str(ramdisk) if ramdisk else None,
+              "component_hashes_before": before,
               "passed": False, "stage": "startup", "observations": [], "modern_guest_boot": False,
               "guest_execution": False, "gui_verified": False, "ipa_executed": False}
     process = qmp = None
@@ -326,6 +370,8 @@ def run(binary: Path, components: Path, output: Path) -> dict:
                 name + "=" + str(components / asset)
                 for name, asset in zip(("bootkc", "sptm", "txm", "dtree", "tc"), ASSETS))
             machine += ",boot-command-line=" + COMMAND_LINE
+            if ramdisk is not None:
+                machine += ",ramdisk=" + str(ramdisk)
             argv = [str(binary), "-M", machine, "-m", "8G", "-smp", "1",
                     "-nodefaults", "-display", "none", "-serial", "none",
                     "-monitor", "none", "-S", "-qmp", "unix:" + str(endpoint) + ",server=on,wait=off"]
@@ -386,6 +432,8 @@ def run(binary: Path, components: Path, output: Path) -> dict:
                 require(report["observations"][0]["bootargs_sha256"] == report["observations"][1]["bootargs_sha256"] and
                         report["observations"][0]["prepared_dtree_sha256"] == report["observations"][1]["prepared_dtree_sha256"],
                         "Metadata repeats byte-exactly across system_reset")
+                require(report["observations"][0]["ramdisk"] == report["observations"][1]["ramdisk"],
+                        "Optional ramdisk copy and descriptor repeat across system_reset")
                 qmp.request("quit")
                 require(process.wait(timeout=5) == 0, "Clean requested QEMU shutdown")
             report["passed"] = True
@@ -412,7 +460,7 @@ def run(binary: Path, components: Path, output: Path) -> dict:
             report["exit_code"] = process.returncode
             report["child_reaped"] = process.poll() is not None
         try:
-            after = {name: digest(components / name) for name in ASSETS}
+            after = {name: digest(path) for name, path in asset_paths.items()}
             report["component_hashes_after"] = after
             report["components_unchanged"] = before == after
             report["binary_unchanged"] = digest(binary)["sha256"] == report["binary_sha256"]
@@ -430,6 +478,8 @@ def main() -> int:
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--components", type=Path, required=True,
                         help="Directory containing bootkc, sptm, txm, dtree and restore-trustcache")
+    parser.add_argument("--ramdisk", type=Path,
+                        help="Optional regular decoded ramdisk; checks RAM bytes, not filesystem boot")
     parser.add_argument("--output-dir", type=Path,
                         help="New private directory for report and bounded log; RAM dumps are deleted")
     args = parser.parse_args()
@@ -441,15 +491,25 @@ def main() -> int:
         asset = components / name
         require(not asset.is_symlink() and asset.is_file() and 0 < asset.stat().st_size <= 512 * 1024 * 1024,
                 "Regular bounded decoded asset: " + name)
+    ramdisk = None
+    if args.ramdisk is not None:
+        require(not args.ramdisk.is_symlink(), "Ramdisk must not be a symlink")
+        ramdisk = args.ramdisk.resolve(strict=True)
+        require(ramdisk.is_file() and "," not in str(ramdisk) and
+                0 < ramdisk.stat().st_size <= 512 * 1024 * 1024,
+                "Regular bounded decoded ramdisk without QEMU option separators")
+    require(sum((components / name).stat().st_size for name in ASSETS) +
+            (ramdisk.stat().st_size if ramdisk else 0) <= 1024 * 1024 * 1024,
+            "All decoded inputs fit the machine's 1 GiB budget")
     previous_umask = os.umask(0o077)
     try:
         if args.output_dir:
             output = args.output_dir.resolve()
             output.mkdir(parents=True, exist_ok=False, mode=0o700)
-            report = run(binary, components, output)
+            report = run(binary, components, output, ramdisk)
         else:
             with tempfile.TemporaryDirectory(prefix="modern-machine-report-") as directory:
-                report = run(binary, components, Path(directory))
+                report = run(binary, components, Path(directory), ramdisk)
     finally:
         os.umask(previous_umask)
     print(json.dumps({key: report.get(key) for key in
