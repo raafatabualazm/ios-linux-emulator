@@ -106,8 +106,8 @@ struct AppleMTSPIState {
     bool touch_bh_pending;
     /*
      * Host-only, runtime-settable report fidelity controls (QOM properties,
-     * settable with qom-set while the guest runs). Defaults reproduce the
-     * original wire behaviour exactly.
+     * settable with qom-set while the guest runs). Legacy wire behaviour is
+     * velocity-mode=0, sample-hz=20, report-stationary=0, range-stages=0.
      *   velocity-mode 0: legacy ABS(delta)/ts_delta_ns*1000 (always 0 in practice)
      *                 1: signed sensor-unit delta since the previous report
      *                 2: signed sensor units per second, saturated to int16
@@ -1209,10 +1209,14 @@ static void apple_mt_instance_init(Object *obj)
 
     qemu_mutex_init(&s->lock);
 
-    /* Pointer properties stay writable after realize, unlike qdev props. */
-    s->velocity_mode = 0;
-    s->sample_hz = 20;
-    s->report_stationary = 0;
+    /* Pointer properties stay writable after realize, unlike qdev props.
+     * Defaults: signed per-frame delta at 60 Hz with stationary frames. This
+     * combination unlocked the iOS 14 lock screen to SpringBoard where the
+     * legacy encoding (velocity-mode=0, sample-hz=20, report-stationary=0;
+     * still selectable) did not, under the same injected swipe. */
+    s->velocity_mode = 1;
+    s->sample_hz = 60;
+    s->report_stationary = 1;
     s->range_stages = 0;
     object_property_add_uint32_ptr(obj, "velocity-mode", &s->velocity_mode,
                                    OBJ_PROP_FLAG_READWRITE);

@@ -513,7 +513,9 @@ def gesture(qmp, start, end, width=828, height=1792, duration=0.2):
     qmp.request('input-send-event', {'events': initial + [
         {'type': 'btn', 'data': {'button': 'left', 'down': True}}]})
     try:
-        steps = 1 if start == end else max(2, round(duration * 20))
+        # 60 Hz host points match the device's default 60 Hz touching frames;
+        # 20 Hz points with the legacy encoding did not unlock SpringBoard.
+        steps = 1 if start == end else max(2, round(duration * 60))
         for step in range(1, steps + 1):
             time.sleep(duration / steps)
             x = round(start[0] + (end[0] - start[0]) * step / steps)
