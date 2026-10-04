@@ -104,6 +104,25 @@ struct AppleMTSPIState {
     /* Host-only FIFO; one scheduled BH drains it in input-event order. */
     GQueue touch_updates;
     bool touch_bh_pending;
+    /*
+     * Host-only, runtime-settable report fidelity controls (QOM properties,
+     * settable with qom-set while the guest runs). Defaults reproduce the
+     * original wire behaviour exactly.
+     *   velocity-mode 0: legacy ABS(delta)/ts_delta_ns*1000 (always 0 in practice)
+     *                 1: signed sensor-unit delta since the previous report
+     *                 2: signed sensor units per second, saturated to int16
+     *   sample-hz:      touching-frame rate; first frame after contact at 2 periods
+     *   report-stationary: emit TOUCHING frames even without movement
+     *   range-stages:   emit START_IN_RANGE before contact and LINGER_IN_RANGE
+     *                   before OUT_OF_RANGE
+     */
+    uint32_t velocity_mode;
+    uint32_t sample_hz;
+    uint32_t report_stationary;
+    uint32_t range_stages;
+    int16_t rep_x;
+    int16_t rep_y;
+    bool rep_valid;
 };
 
 static const VMStateDescription vmstate_apple_mt_spi = {
@@ -827,6 +846,8 @@ static void apple_mt_spi_send_path_update(AppleMTSPIState *s, uint64_t ts,
     uint64_t ts_delta;
     int32_t x_delta;
     int32_t y_delta;
+    int64_t vx;
+    int64_t vy;
 
     packet = g_new0(AppleMTSPILLPacket, 1);
 
@@ -834,13 +855,40 @@ static void apple_mt_spi_send_path_update(AppleMTSPIState *s, uint64_t ts,
     ts_delta = MAX(ts_delta, 1); // Prevent div-by-zero
     s->prev_ts = ts;
 
-    x_delta = x - prev_x;
-    y_delta = y - prev_y;
+    switch (s->velocity_mode) {
+    case 1:
+    case 2:
+        /* Delta against the previously *reported* frame, not the last host
+         * pointer event, so the field matches what the guest has observed. */
+        x_delta = s->rep_valid ? x - s->rep_x : 0;
+        y_delta = s->rep_valid ? y - s->rep_y : 0;
+        if (s->velocity_mode == 1) {
+            vx = x_delta;
+            vy = y_delta;
+        } else {
+            vx = (int64_t)x_delta * NANOSECONDS_PER_SECOND / (int64_t)ts_delta;
+            vy = (int64_t)y_delta * NANOSECONDS_PER_SECOND / (int64_t)ts_delta;
+        }
+        vx = CLAMP(vx, INT16_MIN, INT16_MAX);
+        vy = CLAMP(vy, INT16_MIN, INT16_MAX);
+        break;
+    default:
+        x_delta = x - prev_x;
+        y_delta = y - prev_y;
+        vx = (uint16_t)(ABS(x_delta) / ts_delta * 1000);
+        vy = (uint16_t)(ABS(y_delta) / ts_delta * 1000);
+        break;
+    }
+    if (path_stage == PATH_STAGE_OUT_OF_RANGE) {
+        s->rep_valid = false;
+    } else {
+        s->rep_x = x;
+        s->rep_y = y;
+        s->rep_valid = true;
+    }
 
     trace_apple_mt_spi_report(s->frame, path_stage, ts, ts_delta, x, y,
-                              prev_x, prev_y,
-                              (uint16_t)(ABS(x_delta) / ts_delta * 1000),
-                              (uint16_t)(ABS(y_delta) / ts_delta * 1000));
+                              prev_x, prev_y, (uint16_t)vx, (uint16_t)vy);
 
     packet->type = LL_PACKET_LOSSLESS_OUTPUT;
     apple_mt_spi_buf_ensure_capacity(&packet->buf, 9 + 27 + 20 + 2);
@@ -874,8 +922,8 @@ static void apple_mt_spi_send_path_update(AppleMTSPIState *s, uint64_t ts,
     apple_mt_spi_buf_push_byte(&packet->buf, 1); // Hand ID
     apple_mt_spi_buf_push_word(&packet->buf, x);
     apple_mt_spi_buf_push_word(&packet->buf, y);
-    apple_mt_spi_buf_push_word(&packet->buf, ABS(x_delta) / ts_delta * 1000);
-    apple_mt_spi_buf_push_word(&packet->buf, ABS(y_delta) / ts_delta * 1000);
+    apple_mt_spi_buf_push_word(&packet->buf, (uint16_t)vx);
+    apple_mt_spi_buf_push_word(&packet->buf, (uint16_t)vy);
     apple_mt_spi_buf_push_word(&packet->buf, 660); // rad0
     apple_mt_spi_buf_push_word(&packet->buf,
                                580); // rad1
@@ -971,19 +1019,26 @@ static void apple_mt_spi_schedule_touch_update(AppleMTSPIState *s,
     }
 }
 
+static int64_t apple_mt_spi_period_ns(AppleMTSPIState *s)
+{
+    uint32_t hz = s->sample_hz ? CLAMP(s->sample_hz, 10, 240) : 20;
+
+    return NANOSECONDS_PER_SECOND / hz;
+}
+
 static void apple_mt_spi_timer_tick(void *opaque)
 {
     AppleMTSPIState *s = opaque;
 
     QEMU_LOCK_GUARD(&s->lock);
 
-    if (s->prev_x != s->x || s->prev_y != s->y) {
+    if (s->prev_x != s->x || s->prev_y != s->y || s->report_stationary) {
         apple_mt_spi_schedule_touch_update(s, PATH_STAGE_TOUCHING);
     }
 
     if (s->btn_state & MOUSE_EVENT_LBUTTON) {
         timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                                NANOSECONDS_PER_SECOND / 20);
+                                apple_mt_spi_period_ns(s));
     }
 }
 
@@ -993,6 +1048,9 @@ static void apple_mt_spi_end_timer_tick(void *opaque)
 
     QEMU_LOCK_GUARD(&s->lock);
 
+    if (s->range_stages) {
+        apple_mt_spi_schedule_touch_update(s, PATH_STAGE_LINGER_IN_RANGE);
+    }
     apple_mt_spi_schedule_touch_update(s, PATH_STAGE_OUT_OF_RANGE);
 
     s->prev_ts = 0;
@@ -1034,11 +1092,14 @@ static void apple_mt_spi_mouse_event(void *opaque, int dx, int dy, int dz,
 
     if ((s->prev_btn_state & MOUSE_EVENT_LBUTTON) == 0 &&
         (s->btn_state & MOUSE_EVENT_LBUTTON) != 0) {
+        if (s->range_stages) {
+            apple_mt_spi_schedule_touch_update(s, PATH_STAGE_START_IN_RANGE);
+        }
         apple_mt_spi_schedule_touch_update(s, PATH_STAGE_MAKE_TOUCH);
 
         timer_del(s->end_timer);
         timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                                NANOSECONDS_PER_SECOND / 10);
+                                2 * apple_mt_spi_period_ns(s));
     } else if ((s->prev_btn_state & MOUSE_EVENT_LBUTTON) != 0 &&
                (s->btn_state & MOUSE_EVENT_LBUTTON) == 0) {
         apple_mt_spi_schedule_touch_update(s, PATH_STAGE_BREAK_TOUCH);
@@ -1090,6 +1151,7 @@ static void apple_mt_spi_reset_enter(Object *obj, ResetType type)
     s->y = 0;
     s->prev_ts = 0;
     s->frame = 0;
+    s->rep_valid = false;
 
     apple_mt_spi_buf_free(&s->tx);
     apple_mt_spi_buf_free(&s->rx);
@@ -1146,6 +1208,21 @@ static void apple_mt_instance_init(Object *obj)
     g_queue_init(&s->touch_updates);
 
     qemu_mutex_init(&s->lock);
+
+    /* Pointer properties stay writable after realize, unlike qdev props. */
+    s->velocity_mode = 0;
+    s->sample_hz = 20;
+    s->report_stationary = 0;
+    s->range_stages = 0;
+    object_property_add_uint32_ptr(obj, "velocity-mode", &s->velocity_mode,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "sample-hz", &s->sample_hz,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "report-stationary",
+                                   &s->report_stationary,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "range-stages", &s->range_stages,
+                                   OBJ_PROP_FLAG_READWRITE);
 }
 
 static const TypeInfo apple_mt_spi_type_info = {

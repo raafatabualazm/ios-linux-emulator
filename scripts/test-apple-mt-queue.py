@@ -54,10 +54,15 @@ def main():
 #define MT_SENSOR_SURFACE_WIDTH 6458
 #define MT_SENSOR_SURFACE_HEIGHT 13977
 #define MOUSE_EVENT_LBUTTON 1
+#define PATH_STAGE_START_IN_RANGE 1
 #define PATH_STAGE_MAKE_TOUCH 3
 #define PATH_STAGE_TOUCHING 4
 #define PATH_STAGE_BREAK_TOUCH 5
+#define PATH_STAGE_LINGER_IN_RANGE 6
 #define PATH_STAGE_OUT_OF_RANGE 7
+#ifndef CLAMP
+#define CLAMP(x, lo, hi) ((x) < (lo) ? (lo) : ((x) > (hi) ? (hi) : (x)))
+#endif
 #define HID_TRANSFER_PACKET_OUTPUT 0x20
 #define HID_REPORT_BINARY_PATH_OR_IMAGE 0x44
 #define HID_PACKET_STATUS_SUCCESS 0
@@ -68,7 +73,7 @@ def main():
 typedef struct { uint8_t *data; uint32_t capacity, len, read_pos; } AppleMTSPIBuffer;
 typedef struct AppleMTSPILLPacket { AppleMTSPIBuffer buf; uint8_t type; struct AppleMTSPILLPacket *next; } AppleMTSPILLPacket;
 typedef struct { AppleMTSPILLPacket *first; } FWQueue;
-typedef struct { int lock, irq, *timer, *end_timer; FWQueue pending_fw; AppleMTSPIBuffer tx,rx,pending_hbpp; uint8_t frame; int16_t x,y,prev_x,prev_y; int32_t btn_state,prev_btn_state; uint64_t prev_ts,touch_generation; GQueue touch_updates; bool touch_bh_pending; uint32_t display_width,display_height; } AppleMTSPIState;
+typedef struct { int lock, irq, *timer, *end_timer; FWQueue pending_fw; AppleMTSPIBuffer tx,rx,pending_hbpp; uint8_t frame; int16_t x,y,prev_x,prev_y; int32_t btn_state,prev_btn_state; uint64_t prev_ts,touch_generation; GQueue touch_updates; bool touch_bh_pending; uint32_t display_width,display_height; uint32_t velocity_mode,sample_hz,report_stationary,range_stages; int16_t rep_x,rep_y; bool rep_valid; } AppleMTSPIState;
 typedef AppleMTSPIState Object;
 typedef int ResetType;
 #define APPLE_MT_SPI(obj) (obj)
@@ -119,7 +124,8 @@ static uint16_t crc16(uint16_t seed, const uint8_t *p, size_t len) { while(len--
     code += '\n' + touch_type + '\n'
     code += '\n'.join(function(source, name) for name in
                       ('apple_mt_spi_new_touch_update', 'apple_mt_spi_send_touch_update_bh',
-                       'apple_mt_spi_schedule_touch_update', 'apple_mt_spi_timer_tick',
+                       'apple_mt_spi_schedule_touch_update', 'apple_mt_spi_period_ns',
+                       'apple_mt_spi_timer_tick',
                        'apple_mt_spi_end_timer_tick', 'apple_mt_spi_mouse_event',
                        'apple_mt_spi_reset_enter'))
     code += r'''
@@ -256,7 +262,57 @@ int main(void) {
     apple_mt_spi_reset_enter(&state,0);
     assert(packet_count==0 && !pending_bh_count);
     if(bad) return 1;
-    puts("PASS: production mouse input bounds all 32768 ABS Y values, preserves interior calibration and captured stage coordinates; FIFO/reset checks pass");
+    /* Opt-in fidelity modes. Velocity words are signed int16 at path+8/+10. */
+    #define VEL(i,off) ((int16_t)(packets[i]->buf.data[9+27+(off)] | (packets[i]->buf.data[9+27+(off)+1]<<8)))
+    for(uint32_t mode=0; mode<=2; mode++) {
+        state.velocity_mode=mode; state.display_width=828; state.display_height=1792;
+        virtual_time=5000ULL*SCALE_MS;
+        apple_mt_spi_mouse_event(&state,16383,30004,0,MOUSE_EVENT_LBUTTON); /* y=1054 */
+        virtual_time=5050ULL*SCALE_MS;
+        apple_mt_spi_mouse_event(&state,16383,16383,0,MOUSE_EVENT_LBUTTON); /* y=6864 */
+        apple_mt_spi_timer_tick(&state);
+        virtual_time=5100ULL*SCALE_MS;
+        apple_mt_spi_mouse_event(&state,16383,16383,0,0);
+        poll_bhs();
+        assert(packet_count==3);
+        bad |= check_packet(1,4,3228,6864,5050);
+        int16_t vy=VEL(1,10), vx=VEL(1,8);
+        int16_t expect = mode==0 ? 0 : mode==1 ? (6864-1054) : INT16_MAX; /* 116200/s saturates */
+        if(vy!=expect || vx!=0) { fprintf(stderr,"mode %u: vx=%d vy=%d expected 0/%d\n",mode,vx,vy,expect); bad=1; }
+        /* Break frame repeats the position: zero delta in modes 1/2. */
+        if(mode && VEL(2,10)!=0) { fprintf(stderr,"mode %u break vy=%d\n",mode,VEL(2,10)); bad=1; }
+        apple_mt_spi_reset_enter(&state,0);
+    }
+    /* Downward slow movement is negative in signed modes (units/s fits int16). */
+    state.velocity_mode=2;
+    virtual_time=6000ULL*SCALE_MS;
+    apple_mt_spi_mouse_event(&state,16383,16383,0,MOUSE_EVENT_LBUTTON); /* 6864 */
+    virtual_time=6500ULL*SCALE_MS;
+    apple_mt_spi_mouse_event(&state,16383,17383,0,MOUSE_EVENT_LBUTTON);
+    apple_mt_spi_timer_tick(&state);
+    poll_bhs();
+    assert(packet_count==2);
+    { int16_t y1=packets[1]->buf.data[9+27+6] | (packets[1]->buf.data[9+27+7]<<8);
+      int16_t want=(int16_t)((int64_t)(y1-6864)*1000000000LL/500000000LL);
+      if(VEL(1,10)!=want || want>=0) { fprintf(stderr,"downward vy=%d want=%d\n",VEL(1,10),want); bad=1; } }
+    apple_mt_spi_reset_enter(&state,0);
+    /* Range stages wrap the contact: 1,3,...,5,6,7. */
+    state.velocity_mode=0; state.range_stages=1;
+    virtual_time=7000ULL*SCALE_MS;
+    apple_mt_spi_mouse_event(&state,16383,16383,0,MOUSE_EVENT_LBUTTON);
+    virtual_time=7010ULL*SCALE_MS;
+    apple_mt_spi_mouse_event(&state,16383,16383,0,0);
+    virtual_time=7110ULL*SCALE_MS;
+    apple_mt_spi_end_timer_tick(&state);
+    poll_bhs();
+    assert(packet_count==5);
+    bad |= check_packet(0,1,3228,6864,7000) | check_packet(1,3,3228,6864,7000)
+            | check_packet(2,5,3228,6864,7010) | check_packet(3,6,3228,6864,7110)
+            | check_packet(4,7,3228,6864,7110);
+    apple_mt_spi_reset_enter(&state,0);
+    state.range_stages=0;
+    if(bad) return 1;
+    puts("PASS: production mouse input bounds all 32768 ABS Y values, preserves interior calibration and captured stage coordinates; FIFO/reset checks pass; default wire velocity unchanged; signed delta/units-per-second and range-stage modes pass");
     return 0;
 }
 '''
