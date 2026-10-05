@@ -31,6 +31,9 @@ dev=next(x for x in args if x.startswith('usb-tcp-remote,'))
 usb=next(x.split('=',1)[1] for x in dev.split(',') if x.startswith('conn-addr='))
 qs=socket.socket(socket.AF_UNIX);qs.bind(qmp);qs.listen(1)
 us=socket.socket(socket.AF_UNIX);us.bind(usb);us.listen(1)
+if mode=='accepted':
+ peer=socket.socket(socket.AF_UNIX);peer.connect(usb)
+ accepted,_=us.accept()
 print('SIZE_LIMIT='+str(resource.getrlimit(resource.RLIMIT_FSIZE)[1]),flush=True)
 if mode=='flood':
  os.write(1,b'x'*(1<<20))
@@ -44,7 +47,9 @@ while True:
    if not line:break
    request=json.loads(line)
    stream.write((json.dumps({'return':{},'id':request['id']})+'\n').encode());stream.flush()
-   if request['execute']=='quit':sys.exit(0)
+   if request['execute']=='quit':
+    if mode=='unlink-qmp':os.unlink(qmp)
+    sys.exit(0)
 '''
 
 
@@ -80,6 +85,35 @@ class CompanionTests(unittest.TestCase):
         with patch.object(companion, 'MIN_SECONDS', 0.01):
             return companion.run(self.state, self.usb, seconds=0.2, **kwargs)
 
+    def test_listener_remains_ready_when_phone_connects_before_first_poll(self):
+        self.prepare()
+        real_popen = companion.subprocess.Popen
+        def accepted_before_poll(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            if args[0][0] != str(self.binary):
+                return process
+            # The fixture holds both the listener and an accepted Unix socket
+            # before the runner starts inspecting the passive socket table.
+            self.assertTrue(process.stdout.readline().startswith(b'SIZE_LIMIT='))
+            return process
+        with patch.dict(os.environ, COMPANION_FIXTURE_MODE='accepted'), \
+                patch.object(companion.subprocess, 'Popen', side_effect=accepted_before_poll):
+            record = self.run_short()
+        self.assertTrue(record['usb_listener_ready'])
+        self.assertFalse(record['usb_enumerated'])
+        self.assertEqual(record['status'], 'stopped')
+        self.assertFalse(Path('/proc').joinpath(str(record['pid'])).exists())
+
+    def test_child_removing_its_own_qmp_socket_is_successful_cleanup(self):
+        self.prepare()
+        with patch.dict(os.environ, COMPANION_FIXTURE_MODE='unlink-qmp'):
+            record = self.run_short()
+        self.assertEqual(record['status'], 'stopped')
+        self.assertEqual(record['qmp_cleanup'], 'already absent')
+        self.assertTrue(record['originals_unchanged'])
+        self.assertFalse((self.state / 'qmp.sock').exists())
+        self.assertFalse((self.state / 'live.json').exists())
+
     def test_preparation_uses_detected_backing_format_and_preserves_original(self):
         manifest = self.prepare()
         info = companion.image_info(self.img, self.state / 'disk.qcow2')
@@ -90,6 +124,59 @@ class CompanionTests(unittest.TestCase):
         self.assertEqual(self.state.stat().st_mode & 0o777, 0o700)
         self.assertNotEqual((self.state / 'seed.iso').stat().st_ino, self.seed.stat().st_ino)
         companion.load(self.state)
+
+    def test_historical_profile_pins_option_roms_and_matches_retained_hardware(self):
+        for name in companion.HARDWARE_PROFILES['historical']:
+            if not (self.data / name).exists():
+                (self.data / name).write_bytes(('fixture-' + name).encode())
+        manifest = companion.prepare(self.disk, self.seed, self.binary, self.data,
+                                     self.state, self.img, hardware_profile='historical')
+        companion.load(self.state)
+        args = companion.argv_for(self.state, manifest, self.usb, self.state / 'runs', 32225)
+        self.assertEqual(args[args.index('-cpu') + 1], 'qemu64')
+        self.assertEqual(args[args.index('-m') + 1], '3G')
+        self.assertEqual(args[args.index('-smp') + 1], '4')
+        self.assertIn('-usb', args)
+        self.assertNotIn('-nodefaults', args)
+        self.assertIn('virtio-net-pci,netdev=isolated', args)
+        self.assertIn(',cache=unsafe', args[args.index('-drive') + 1])
+        for name in ('vgabios-stdvga.bin', 'efi-virtio.rom'):
+            self.assertEqual(manifest['originals'][name]['sha256'],
+                             companion.session.sha256(self.data / name))
+            private = self.state / 'resources' / name
+            self.assertEqual(private.read_bytes(), (self.data / name).read_bytes())
+            private.write_bytes(private.read_bytes() + b'changed')
+            with self.assertRaises(companion.CompanionError):
+                companion.load(self.state)
+            private.write_bytes((self.data / name).read_bytes())
+        self.assertEqual(self.before, companion.session.file_identity(self.disk))
+
+    def test_existing_profileless_manifest_keeps_the_original_isolated_command(self):
+        manifest = self.prepare()
+        expected = companion.argv_for(self.state, manifest, self.usb, self.state / 'runs')
+        manifest.pop('hardware_profile')
+        companion.session.write_json(self.state / 'manifest.json', manifest)
+        _, loaded = companion.load(self.state)
+        self.assertEqual(companion.argv_for(self.state, loaded, self.usb, self.state / 'runs'), expected)
+        self.assertEqual(expected[expected.index('-cpu') + 1], 'max')
+        self.assertIn('-nodefaults', expected)
+
+    def test_profile_cannot_be_changed_without_a_complete_matching_resource_set(self):
+        manifest = self.prepare()
+        manifest['hardware_profile'] = 'historical'
+        companion.session.write_json(self.state / 'manifest.json', manifest)
+        with self.assertRaises(companion.CompanionError):
+            companion.load(self.state)
+
+    def test_missing_historical_rom_and_unknown_profile_refuse_before_creation(self):
+        with self.assertRaises(OSError):
+            companion.prepare(self.disk, self.seed, self.binary, self.data,
+                              self.state, self.img, hardware_profile='historical')
+        self.assertFalse(self.state.exists())
+        with self.assertRaises(companion.CompanionError):
+            companion.prepare(self.disk, self.seed, self.binary, self.data,
+                              self.state, self.img, hardware_profile='unknown')
+        self.assertFalse(self.state.exists())
 
     def test_manifest_read_is_bounded(self):
         self.prepare()

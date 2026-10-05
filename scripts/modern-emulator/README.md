@@ -16,11 +16,12 @@ publication worktrees remain separate. The new branch is `modern-ios`.
   despite QEMU's newest-first one-shot callbacks. The production scheduling/encoder/reset regression
   passes ASan and UBSan; the retained base fails that same test. The A13 IPI
   regression also passes. Migration and snapshot fidelity are not established.
-- The retained FIFO candidate advances the iOS 14.0/18A5351d GUI through stock
-  Setup. The user-approved beta agreement was accepted; the latest completed
-  observation reached final Welcome to iPhone with 37 captures, then stopped
-  cleanly at its bound. The final swipe did not show Home. A complete copied
-  state is continuing input diagnosis; Home and IPA execution are unverified.
+- The iOS 14.0/18A5351d guest reaches interactive SpringBoard Home, reproduced
+  on three retained boots; Settings opened by touch. Signed per-report deltas,
+  60 Hz sampling and stationary frames form an empirical working configuration.
+  The wake/swipe order also affects the result, so the comparisons do not isolate
+  one cause or establish Apple wire units. A fresh copied state is continuing
+  app navigation. IPA installation and modern iOS GUI remain unverified.
 - Strict firmware selection prepared unchanged iPhone17,3/d47ap iOS27.0/24A437
   kernel, device tree, SPTM, TXM and stock restore trustcache with hashes.
   Explicit optional extraction also prepares the matched restore ramdisk;
@@ -39,9 +40,10 @@ publication worktrees remain separate. The new branch is `modern-ios`.
   unchanged-SPTM execution hit unsupported `MSR S3_1_C15_C9_4, XZR`; it did not
   boot the kernel or iOS. Modern interrupt/storage/display/touch devices remain
   unfinished.
-- Runtime/diagnostics pass 52 tests, including a real loopback RFB handshake,
+- Runtime/diagnostics passed a 96-case review with a real loopback RFB handshake,
   signal-aware guest reaping, conservative dead-session recovery, and recorder
-  run/PID binding. An interruption is never reported as guest success.
+  run/PID binding. Later companion fixes have their own regression gate.
+  An interruption is never reported as guest success.
 - IPA preflight validates the uploaded device arm64 app and stages unchanged
   bytes. Its development profile expired in December 2025. Normal installation
   requires a newly signed build accepted by the guest.
@@ -88,7 +90,7 @@ remain available. Historical GUI/IPA qualification is not inherited.
 ```sh
 python3 modern-emulator/tools/runtime/session.py prepare \
   --bundle Inferno/gui-runtime --state modern-emulator/runtime/NEW_STATE \
-  --binary modern-emulator/bin/qemu-system-aarch64-input
+  --binary modern-emulator/bin/qemu-system-aarch64-touch-v2
 python3 modern-emulator/tools/runtime/session.py run \
   --state modern-emulator/runtime/NEW_STATE --seconds 900
 ```
@@ -136,6 +138,76 @@ Startup reliability remains unresolved: one restart of the earlier integration
 bundle hit a guest SEP panic. This build currently has no GTK backend; use QMP
 screenshots or VNC, or install GTK development dependencies and rebuild before
 selecting `--display gtk`.
+
+The retained Home recipe is F6, bottom-edge swipe, F6 while awake, another
+swipe. Inspect each resulting screen; delayed input can let the guest sleep.
+The verified Home bundle is `modern-emulator/runtime/ios14-home`. Use `fork`
+to continue its progress in a new bundle. The `touch-v2` executable pin is a
+private tested artifact; fresh builds must have their own executable pin.
+White Settings rows are not modal-alert evidence, and a named screenshot does
+not qualify an app launch. Home-to-app transitions require visual confirmation.
+
+## Normal USB through a private companion
+
+The phone's emulated USB device attaches to a separate x86 QEMU guest. Prepare
+a new companion state from a stopped disk containing a USB-capable Linux kernel
+and libimobiledevice tools. The runner creates a private QCOW2 overlay, copies
+the seed/BIOS resources, and pins the source disk metadata and executable hashes.
+It does not restore the phone, pair it, or install an app.
+
+```sh
+python3 modern-emulator/tools/runtime/companion.py prepare \
+  --disk /path/to/stopped/companion.qcow2 --seed /path/to/seed.iso \
+  --binary /path/to/qemu-system-x86_64-with-usb-tcp \
+  --qemu-data Inferno/integration/pc-bios \
+  --state modern-emulator/runtime/NEW_COMPANION
+```
+
+For a hardware comparison with the retained local `run-companion.sh`, add
+`--hardware-profile historical` when preparing a **new** companion state. That
+profile selects QEMU's `qemu64` CPU, 3 GiB RAM, four CPUs, inherited standard VGA
+and chipset USB, plus the dedicated EHCI controller. It also retains the old
+launcher's `cache=unsafe` disk mode, so overlay durability across a host crash is
+not assured. The standard VGA and virtio network option ROMs are copied and
+hashed with the BIOS resources. The profile is pinned in the manifest; it cannot
+be switched at run time. Existing states and the default `isolated` profile keep
+their `max`/2 GiB/two CPU/no-default-devices command. The historical comparison
+has not yet established Linux boot or USB service acceptance in this runner.
+
+In one terminal, start a separately forked phone state with `--usb`. It reserves
+`PHONE_STATE/usb.sock` and waits up to 30 seconds for the companion listener;
+the phone CPU starts after passive readiness succeeds. Within that wait, start
+the companion in a second terminal using the exact endpoint:
+
+```sh
+python3 modern-emulator/tools/runtime/session.py run \
+  --state modern-emulator/runtime/PHONE_STATE --seconds 900 --usb
+python3 modern-emulator/tools/runtime/companion.py run \
+  --state modern-emulator/runtime/NEW_COMPANION \
+  --usb-socket modern-emulator/runtime/PHONE_STATE/usb.sock \
+  --seconds 900 --ssh-port 32225
+```
+
+The companion uses TCG, restricted user networking and an optional SSH forward
+bound to `127.0.0.1`; `--ssh-port 0` disables forwarding. Its duration is bounded
+to 30–1800 seconds, with 512 MiB overlay and 8 MiB log caps. Credentials and
+pairing records remain private. Stop the phone with `session.py control … quit`
+before ending the companion; its own runner stops and reaps it at the bound.
+
+Check the companion's running kernel, EHCI controller and Apple USB interfaces,
+then `idevice_id -l` and `ideviceinfo -s -k ProductVersion` inside that guest.
+A listening or connected socket establishes transport only. USB enumeration,
+a successful lockdownd response and any installation service acceptance require
+separate observations. Ordinary app installation additionally needs a current
+signed IPA accepted by the device; the uploaded development profile is expired.
+
+A companion socket can become ready while its BIOS is still starting. A future
+Linux readiness gate should start the companion without the remote USB device,
+verify its USB-capable kernel and EHCI controller through a bounded read-only
+query, then add the remote device through QMP when the phone's waiting marker
+exists. These stages must share the companion's original time bound, with the
+phone retaining its 30-second listener wait. Deferred attachment is a design
+step; the current runner attaches its remote USB device at startup.
 
 ## Modern RAM preparation
 

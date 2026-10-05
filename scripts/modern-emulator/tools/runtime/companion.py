@@ -13,6 +13,7 @@ from pathlib import Path
 import resource
 import selectors
 import shutil
+import socket
 import stat
 import subprocess
 import time
@@ -25,11 +26,22 @@ _spec.loader.exec_module(session)
 CompanionError = session.SessionError
 
 RESOURCES = ('bios-256k.bin', 'kvmvapic.bin')
+HARDWARE_PROFILES = {
+    'isolated': RESOURCES,
+    'historical': (*RESOURCES, 'vgabios-stdvga.bin', 'efi-virtio.rom'),
+}
 MAX_IMAGE_BYTES = 512 << 20
 MAX_LOG_BYTES = 8 << 20
 MIN_FREE_BYTES = 128 << 20
 MIN_SECONDS = 30
 MAX_SECONDS = 1800
+
+
+def resources_for(profile):
+    try:
+        return HARDWARE_PROFILES[profile]
+    except (KeyError, TypeError):
+        raise CompanionError('Unknown companion hardware profile') from None
 
 
 def private_directory(path):
@@ -97,7 +109,9 @@ def verify_pins(manifest):
             raise CompanionError('An original companion asset hash changed')
 
 
-def prepare(disk, seed, binary, qemu_data, state, qemu_img='/usr/bin/qemu-img'):
+def prepare(disk, seed, binary, qemu_data, state, qemu_img='/usr/bin/qemu-img',
+            hardware_profile='isolated'):
+    resources = resources_for(hardware_profile)
     disk, seed, binary, qemu_data, state, qemu_img = map(
         session.checked_path, (disk, seed, binary, qemu_data, state, qemu_img))
     if state.exists() or state.is_symlink():
@@ -105,7 +119,7 @@ def prepare(disk, seed, binary, qemu_data, state, qemu_img='/usr/bin/qemu-img'):
     if not os.access(binary, os.X_OK) or not os.access(qemu_img, os.X_OK):
         raise CompanionError('QEMU and qemu-img must be executable')
     assets = {'disk': disk, 'seed': seed, 'binary': binary, 'qemu_img': qemu_img,
-              **{name: qemu_data / name for name in RESOURCES}}
+              **{name: qemu_data / name for name in resources}}
     session.reject_open_writers(list(assets.values()))
     originals = {role: pin(path, role != 'disk') for role, path in assets.items()}
     info = image_info(qemu_img, disk)
@@ -113,7 +127,7 @@ def prepare(disk, seed, binary, qemu_data, state, qemu_img='/usr/bin/qemu-img'):
         raise CompanionError('The original companion must have no backing chain')
     if originals['seed']['identity']['size'] > 4 << 20:
         raise CompanionError('Cloud seed exceeds 4 MiB')
-    if any(originals[name]['identity']['size'] > 1 << 20 for name in RESOURCES):
+    if any(originals[name]['identity']['size'] > 1 << 20 for name in resources):
         raise CompanionError('BIOS resource exceeds 1 MiB')
     if shutil.disk_usage(state.parent).free < MIN_FREE_BYTES:
         raise CompanionError('Insufficient free space for companion preparation')
@@ -124,13 +138,14 @@ def prepare(disk, seed, binary, qemu_data, state, qemu_img='/usr/bin/qemu-img'):
                        check=True, capture_output=True, timeout=10)
         copy_expected(seed, state / 'seed.iso', originals['seed']['identity']['size'])
         (state / 'resources').mkdir(mode=0o700)
-        for name in RESOURCES:
+        for name in resources:
             copy_expected(qemu_data / name, state / 'resources' / name,
                           originals[name]['identity']['size'])
         private = {'seed.iso': session.sha256(state / 'seed.iso'),
                    **{f'resources/{name}': session.sha256(state / 'resources' / name)
-                      for name in RESOURCES}}
+                      for name in resources}}
         manifest = {'schema': 1, 'state': str(state), 'originals': originals,
+                    'hardware_profile': hardware_profile,
                     'backing_format': info['format'], 'virtual_size': info['virtual-size'],
                     'private_hashes': private, 'disk_preservation': 'metadata; no new full disk hash',
                     'network': 'restrict=on; optional loopback-only SSH forward',
@@ -155,7 +170,10 @@ def load(state):
     manifest = json.loads(raw)
     if manifest.get('schema') != 1 or manifest.get('state') != str(state):
         raise CompanionError('Companion manifest does not match this state')
-    if set(manifest['private_hashes']) != {'seed.iso', *('resources/' + n for n in RESOURCES)}:
+    resources = resources_for(manifest.get('hardware_profile', 'isolated'))
+    if set(manifest['originals']) != {'disk', 'seed', 'binary', 'qemu_img', *resources}:
+        raise CompanionError('Unexpected original companion resource set')
+    if set(manifest['private_hashes']) != {'seed.iso', *('resources/' + n for n in resources)}:
         raise CompanionError('Unexpected private companion resource set')
     verify_pins(manifest)
     for relative, digest in manifest['private_hashes'].items():
@@ -185,13 +203,25 @@ def argv_for(state, manifest, usb, run_dir, ssh_port=32222):
     network = 'user,id=isolated,restrict=on'
     if ssh_port:
         network += f',hostfwd=tcp:127.0.0.1:{ssh_port}-:22'
+    profile = manifest.get('hardware_profile', 'isolated')
+    resources_for(profile)
+    historical = profile == 'historical'
+    # run-companion.sh's q35 defaults are qemu64 and standard VGA in this
+    # source generation. Retain its integrated USB and four-core/3G profile
+    # as an explicit comparison; default isolated states keep their old argv.
+    hardware = (['-usb'] if historical else ['-nodefaults'])
+    drive = f'file={state / "disk.qcow2"},if=virtio,format=qcow2'
+    if historical:
+        drive += ',cache=unsafe'
+    nic = 'virtio-net-pci,netdev=isolated' + ('' if historical else ',romfile=')
     return [manifest['originals']['binary']['path'], '-L', str(state / 'resources'),
-            '-M', 'q35', '-m', '2G', '-smp', '2', '-accel', 'tcg,thread=multi',
-            '-cpu', 'max', '-nodefaults', '-display', 'none', '-monitor', 'none',
+            '-M', 'q35', '-m', '3G' if historical else '2G', '-smp', '4' if historical else '2',
+            '-accel', 'tcg,thread=multi', '-cpu', 'qemu64' if historical else 'max',
+            *hardware, '-display', 'none', '-monitor', 'none',
             '-serial', 'stdio', '-qmp', f'unix:{state / "qmp.sock"},server=on,wait=off',
-            '-drive', f'file={state / "disk.qcow2"},if=virtio,format=qcow2',
+            '-drive', drive,
             '-drive', f'file={state / "seed.iso"},if=virtio,format=raw,readonly=on',
-            '-netdev', network, '-device', 'virtio-net-pci,netdev=isolated,romfile=',
+            '-netdev', network, '-device', nic,
             '-device', 'usb-ehci,id=ehci', '-device',
             f'usb-tcp-remote,bus=ehci.0,conn-type=unix,conn-addr={usb}']
 
@@ -258,6 +288,7 @@ def run(state, usb, seconds=600, ssh_port=32222):
         run_dir.mkdir(mode=0o700)
         command = argv_for(state, manifest, usb, run_dir, ssh_port)
         record = {'command': command, 'run': str(run_dir), 'seconds_limit': seconds,
+                  'hardware_profile': manifest.get('hardware_profile', 'isolated'),
                   'usb_endpoint': str(usb), 'ssh_loopback_port': ssh_port,
                   'usb_listener_ready': False, 'usb_enumerated': False,
                   'installed_apps': False, 'status': 'starting',
@@ -305,7 +336,14 @@ def run(state, usb, seconds=600, ssh_port=32222):
                             qmp_identity = (qi.st_dev, qi.st_ino)
                         if not record['usb_listener_ready'] and endpoint._capture():
                             entries = endpoint._entries()
-                            if len(entries) == 1 and entries[0][1] == 1 and entries[0][0] & 0x10000:
+                            # The phone may connect before this runner's first
+                            # poll. Linux then lists the listener and its
+                            # accepted stream with the same pathname. Preserve
+                            # the one-listener check without mistaking that
+                            # ordinary accepted stream for startup failure.
+                            listeners = [item for item in entries if item[0] & 0x10000]
+                            if (len(listeners) == 1 and
+                                    all(item[1] == socket.SOCK_STREAM for item in entries)):
                                 endpoint._capture()
                                 record['usb_listener_ready'] = True
                                 session.write_json(run_dir / 'usb-ready.json',
@@ -400,6 +438,12 @@ def run(state, usb, seconds=600, ssh_port=32222):
                                 qi = (state / 'qmp.sock').lstat()
                                 if stat.S_ISSOCK(qi.st_mode) and (qi.st_dev, qi.st_ino) == qmp_identity:
                                     (state / 'qmp.sock').unlink()
+                                    record['qmp_cleanup'] = 'removed captured socket'
+                            except FileNotFoundError:
+                                # Real QEMU removes its own Unix listener on
+                                # clean exit. The reaped child and absent path
+                                # already satisfy this cleanup step.
+                                record['qmp_cleanup'] = 'already absent'
                             except OSError:
                                 record.update(status='error', qmp_cleanup='metadata unavailable; preserved')
                         (state / 'live.json').unlink(missing_ok=True)
@@ -417,6 +461,8 @@ def main():
     for name in ('disk', 'seed', 'binary', 'qemu-data', 'state'):
         prep.add_argument('--' + name, required=True, type=Path)
     prep.add_argument('--qemu-img', type=Path, default=Path('/usr/bin/qemu-img'))
+    prep.add_argument('--hardware-profile', choices=tuple(HARDWARE_PROFILES),
+                      default='isolated', help='pin hardware/resources; historical matches the retained local launcher')
     runner = modes.add_parser('run')
     runner.add_argument('--state', required=True, type=Path)
     runner.add_argument('--usb-socket', required=True, type=Path)
@@ -425,7 +471,8 @@ def main():
     args = parser.parse_args()
     try:
         if args.mode == 'prepare':
-            result = prepare(args.disk, args.seed, args.binary, args.qemu_data, args.state, args.qemu_img)
+            result = prepare(args.disk, args.seed, args.binary, args.qemu_data, args.state,
+                             args.qemu_img, args.hardware_profile)
             print(json.dumps({'prepared': result['state'], 'backing_format': result['backing_format']}))
             return 0
         result = run(args.state, args.usb_socket, args.seconds, args.ssh_port)
