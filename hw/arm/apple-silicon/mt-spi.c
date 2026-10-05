@@ -1029,10 +1029,27 @@ static int64_t apple_mt_spi_period_ns(AppleMTSPIState *s)
 static void apple_mt_spi_timer_tick(void *opaque)
 {
     AppleMTSPIState *s = opaque;
+    const AppleMTSPITouchUpdate *pending;
+    bool moved;
 
     QEMU_LOCK_GUARD(&s->lock);
 
-    if (s->prev_x != s->x || s->prev_y != s->y || s->report_stationary) {
+    if (s->velocity_mode == 1 || s->velocity_mode == 2) {
+        /* Compare against the latest report, including a captured update
+         * waiting for the FIFO drain. Host-event history both repeats an old
+         * move on later ticks and misses a move followed by a duplicate event.
+         * Keep the original comparison for legacy wire behavior. */
+        pending = g_queue_peek_tail(&s->touch_updates);
+        if (pending && pending->generation == s->touch_generation) {
+            moved = pending->x != s->x || pending->y != s->y;
+        } else {
+            moved = s->rep_valid &&
+                    (s->rep_x != s->x || s->rep_y != s->y);
+        }
+    } else {
+        moved = s->prev_x != s->x || s->prev_y != s->y;
+    }
+    if (moved || s->report_stationary) {
         apple_mt_spi_schedule_touch_update(s, PATH_STAGE_TOUCHING);
     }
 

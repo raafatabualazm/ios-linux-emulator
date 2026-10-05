@@ -2,7 +2,7 @@
 """Exercise actual MT input, scheduling, encoding, drain and reset under sanitizers.
 
 The C fixture models QEMU's newest-first one-shot BH list and uses real GLib
-queues; it stubs locking/IRQ/timer/CRC plumbing. It calls production scheduling,
+queues; it stubs locking/IRQ/CRC plumbing and records timer requests. It calls production scheduling,
 mouse input and QEMU axis scaling. Packet fields are checked independently
 against coordinates at event creation, including sensor edges and calibration.
 This is a device component check, not a guest GUI acceptance test.
@@ -73,7 +73,8 @@ def main():
 typedef struct { uint8_t *data; uint32_t capacity, len, read_pos; } AppleMTSPIBuffer;
 typedef struct AppleMTSPILLPacket { AppleMTSPIBuffer buf; uint8_t type; struct AppleMTSPILLPacket *next; } AppleMTSPILLPacket;
 typedef struct { AppleMTSPILLPacket *first; } FWQueue;
-typedef struct { int lock, irq, *timer, *end_timer; FWQueue pending_fw; AppleMTSPIBuffer tx,rx,pending_hbpp; uint8_t frame; int16_t x,y,prev_x,prev_y; int32_t btn_state,prev_btn_state; uint64_t prev_ts,touch_generation; GQueue touch_updates; bool touch_bh_pending; uint32_t display_width,display_height; uint32_t velocity_mode,sample_hz,report_stationary,range_stages; int16_t rep_x,rep_y; bool rep_valid; } AppleMTSPIState;
+typedef struct { int64_t expiry; bool pending; } TestTimer;
+typedef struct { int lock, irq; TestTimer *timer, *end_timer; FWQueue pending_fw; AppleMTSPIBuffer tx,rx,pending_hbpp; uint8_t frame; int16_t x,y,prev_x,prev_y; int32_t btn_state,prev_btn_state; uint64_t prev_ts,touch_generation; GQueue touch_updates; bool touch_bh_pending; uint32_t display_width,display_height; uint32_t velocity_mode,sample_hz,report_stationary,range_stages; int16_t rep_x,rep_y; bool rep_valid; } AppleMTSPIState;
 typedef AppleMTSPIState Object;
 typedef int ResetType;
 #define APPLE_MT_SPI(obj) (obj)
@@ -106,8 +107,16 @@ static size_t callback_count;
 static void probe_callback(void *opaque) { assert(callback_count<2); callback_order[callback_count++]=*(int *)opaque; }
 static uint64_t virtual_time;
 static uint64_t qemu_clock_get_ns(int clock) { (void)clock; return virtual_time; }
-static void timer_del(int *timer) { (void)timer; }
-static void timer_mod(int *timer, int64_t expiry) { (void)timer; (void)expiry; }
+static void timer_del(TestTimer *timer) { if(timer) timer->pending=false; }
+static void timer_mod(TestTimer *timer, int64_t expiry) {
+    if(timer) { timer->expiry=expiry; timer->pending=true; }
+}
+static void fire_timer(TestTimer *timer, BHCallback callback, void *opaque) {
+    assert(timer->pending && timer->expiry>=(int64_t)virtual_time);
+    virtual_time=timer->expiry;
+    timer->pending=false;
+    callback(opaque);
+}
 static void apple_mt_spi_buf_free(AppleMTSPIBuffer *buf) { free(buf->data); memset(buf,0,sizeof(*buf)); }
 static void apple_mt_spi_buf_ensure_capacity(AppleMTSPIBuffer *buf, size_t count) {
     size_t required=buf->len+count;
@@ -312,7 +321,96 @@ int main(void) {
     apple_mt_spi_reset_enter(&state,0);
     state.range_stages=0;
     if(bad) return 1;
-    puts("PASS: production mouse input bounds all 32768 ABS Y values, preserves interior calibration and captured stage coordinates; FIFO/reset checks pass; default wire velocity unchanged; signed delta/units-per-second and range-stage modes pass");
+    /* Observe the production timer requests rather than calling ticks at
+     * unrelated hardcoded times. These callbacks model timer dispatch only;
+     * they do not qualify QEMU's scheduler or guest gesture interpretation. */
+    TestTimer touching={0}, ending={0};
+    state.timer=&touching; state.end_timer=&ending;
+    state.sample_hz=60; assert(apple_mt_spi_period_ns(&state)==16666666);
+    state.sample_hz=120; assert(apple_mt_spi_period_ns(&state)==8333333);
+    state.sample_hz=0; assert(apple_mt_spi_period_ns(&state)==50000000);
+    state.sample_hz=1; assert(apple_mt_spi_period_ns(&state)==100000000);
+    state.sample_hz=999; assert(apple_mt_spi_period_ns(&state)==4166666);
+    state.sample_hz=60;
+    for(uint32_t mode=1; mode<=2; mode++) {
+        state.velocity_mode=mode; state.report_stationary=0;
+        virtual_time=10000ULL*SCALE_MS;
+        apple_mt_spi_mouse_event(&state,16383,16383,0,MOUSE_EVENT_LBUTTON);
+        assert(touching.pending && touching.expiry==10033333332LL);
+        assert(!ending.pending && g_queue_get_length(&state.touch_updates)==1);
+        /* A queued MAKE already describes this position: no stationary sample
+         * even if the FIFO drain has not run yet. */
+        fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+        assert(touching.pending && touching.expiry==10049999998LL);
+        assert(g_queue_get_length(&state.touch_updates)==1);
+        /* A duplicated host pointer event must not hide a movement since the
+         * last queued report. */
+        apple_mt_spi_mouse_event(&state,16383,17383,0,MOUSE_EVENT_LBUTTON);
+        apple_mt_spi_mouse_event(&state,16383,17383,0,MOUSE_EVENT_LBUTTON);
+        fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+        assert(g_queue_get_length(&state.touch_updates)==2);
+        fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+        assert(g_queue_get_length(&state.touch_updates)==2);
+        poll_bhs(); assert(packet_count==2 && VEL(1,10)<0);
+        /* Once encoded, that report is the comparison point. Sampling a move
+         * once must not keep emitting it on subsequent timer callbacks. */
+        apple_mt_spi_mouse_event(&state,16383,18383,0,MOUSE_EVENT_LBUTTON);
+        fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+        poll_bhs(); assert(packet_count==3 && VEL(2,10)<0);
+        fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+        assert(g_queue_is_empty(&state.touch_updates) && packet_count==3);
+        /* Moving away and back before the sample produces no new report. */
+        apple_mt_spi_mouse_event(&state,16383,19383,0,MOUSE_EVENT_LBUTTON);
+        apple_mt_spi_mouse_event(&state,16383,18383,0,MOUSE_EVENT_LBUTTON);
+        fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+        assert(g_queue_is_empty(&state.touch_updates) && packet_count==3);
+        apple_mt_spi_mouse_event(&state,16383,18383,0,0);
+        assert(!touching.pending && ending.pending);
+        assert(ending.expiry==(int64_t)virtual_time+100000000LL);
+        poll_bhs(); assert(packet_count==4 && VEL(3,10)==0);
+        fire_timer(&ending,apple_mt_spi_end_timer_tick,&state);
+        poll_bhs(); assert(packet_count==5 && !state.rep_valid);
+        apple_mt_spi_reset_enter(&state,0);
+        assert(!touching.pending && !ending.pending && state.prev_ts==0);
+    }
+    /* Enabled stationary sampling emits zero deltas after MAKE and after a
+     * movement, both before and after the deferred FIFO drain. */
+    for(uint32_t mode=1; mode<=2; mode++) {
+        state.velocity_mode=mode; state.report_stationary=1;
+        virtual_time=20000ULL*SCALE_MS;
+        apple_mt_spi_mouse_event(&state,16383,16383,0,MOUSE_EVENT_LBUTTON);
+        fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+        assert(g_queue_get_length(&state.touch_updates)==2);
+        poll_bhs(); assert(packet_count==2 && VEL(0,10)==0 && VEL(1,10)==0);
+        fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+        poll_bhs(); assert(packet_count==3 && VEL(2,10)==0);
+        apple_mt_spi_mouse_event(&state,16383,17383,0,MOUSE_EVENT_LBUTTON);
+        fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+        poll_bhs(); assert(packet_count==4 && VEL(3,10)<0);
+        fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+        poll_bhs(); assert(packet_count==5 && VEL(4,10)==0);
+        /* Reset with a fresh queued movement discards it, invalidates report
+         * history and cancels the scheduled timer. */
+        apple_mt_spi_mouse_event(&state,16383,18383,0,MOUSE_EVENT_LBUTTON);
+        fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+        assert(!g_queue_is_empty(&state.touch_updates) && touching.pending);
+        apple_mt_spi_reset_enter(&state,0);
+        assert(!touching.pending && !ending.pending && !state.rep_valid);
+        poll_bhs(); assert(packet_count==0 && g_queue_is_empty(&state.touch_updates));
+    }
+    /* Legacy mode retains its host-event comparison and wire bytes, including
+     * repeated coordinates after a move when stationary sampling is disabled. */
+    state.velocity_mode=0; state.report_stationary=0; state.sample_hz=20;
+    virtual_time=30000ULL*SCALE_MS;
+    apple_mt_spi_mouse_event(&state,16383,16383,0,MOUSE_EVENT_LBUTTON);
+    assert(touching.expiry==30100000000LL);
+    fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+    assert(touching.expiry==30150000000LL);
+    poll_bhs(); assert(packet_count==2 && VEL(1,10)==0);
+    fire_timer(&touching,apple_mt_spi_timer_tick,&state);
+    poll_bhs(); assert(packet_count==3 && VEL(2,10)==0);
+    apple_mt_spi_reset_enter(&state,0);
+    puts("PASS: production mouse input bounds all 32768 ABS Y values; FIFO/reset, signed delta/units-per-second and range stages pass; timer rates and first/repeated expiry requests pass; stationary modes compare queued/encoded reports; legacy scheduling/wire behavior retained");
     return 0;
 }
 '''
