@@ -627,13 +627,6 @@ typedef struct CPUArchState {
         uint64_t rdir_el[3];
     } apple_modern_timers;
 
-    /*
-     * Darwin-VM-compatible Apple implementation register stores
-     * (apple-modern-sysregs). Read-as-written; no hardware side effects.
-     */
-    uint64_t apple_modern_opaque[APPLE_MODERN_OPAQUE_MAX];
-    uint64_t apple_modern_pmc[2];
-
     struct {
         uint64_t gxf_config_el[4];
         uint64_t gxf_enter_el[4];
@@ -1054,8 +1047,6 @@ struct ArchCPU {
     bool apple_modern_gxf;
     /* Separate opt-in Apple views of the ordinary generic timers. */
     bool apple_modern_timers;
-    /* Opt-in Darwin-compatible Apple implementation register stores. */
-    bool apple_modern_sysregs;
     /* Opt-in guarded execution, requiring the modern GXF register banks. */
     bool apple_modern_guarded;
     /* Stable alias metadata for the opt-in modern register interface. */
@@ -2571,9 +2562,6 @@ static inline int arm_feature(CPUARMState *env, int feature)
 }
 
 void arm_cpu_finalize_features(ARMCPU *cpu, Error **errp);
-
-/* Board-supplied Darwin-compatible Apple system register value (by name). */
-bool arm_apple_modern_sysreg_set(ARMCPU *cpu, const char *name, uint64_t value);
 
 /*
  * ARM v9 security states.

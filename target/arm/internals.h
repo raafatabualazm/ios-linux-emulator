@@ -359,9 +359,6 @@ void arm_cpu_register(const ARMCPUInfo *info);
 
 void register_cp_regs_for_features(ARMCPU *cpu);
 bool arm_apple_modern_timers_validate(ARMCPU *cpu, Error **errp);
-bool arm_apple_modern_sysregs_validate(ARMCPU *cpu, Error **errp);
-void arm_register_apple_modern_sysregs(ARMCPU *cpu);
-void arm_register_apple_modern_sysreg_aliases(ARMCPU *cpu);
 void arm_define_vhe_alias(ARMCPU *cpu, uint32_t src_key, uint32_t dst_key,
                           uint32_t alias_key, const char *src_name,
                           const char *dst_name, const char *alias_name);

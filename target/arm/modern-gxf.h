@@ -28,9 +28,6 @@ typedef struct AppleModernGXFState {
 
 enum { APPLE_MODERN_GXF_ALIAS_COUNT = 9 };
 
-/* Capacity of the Darwin-compatible implementation register stores. */
-#define APPLE_MODERN_OPAQUE_MAX 256
-
 /* QEMU's architecture CPU object is named ArchCPU, typedef'd as ARMCPU. */
 struct ArchCPU;
 struct Error;

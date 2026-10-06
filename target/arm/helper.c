@@ -4520,8 +4520,7 @@ void arm_define_vhe_alias(ARMCPU *cpu, uint32_t src_key, uint32_t dst_key,
 
     src_info = src_reg;
     dst_info = dst_reg;
-    if (cpu->apple_modern_gxf || cpu->apple_modern_timers ||
-        cpu->apple_modern_sysregs) {
+    if (cpu->apple_modern_gxf || cpu->apple_modern_timers) {
         /* Alias callbacks need unredirected metadata with CPU lifetime.
          * The register dictionary may move its entries during insertion.
          */
@@ -7181,9 +7180,6 @@ void register_cp_regs_for_features(ARMCPU *cpu)
     if (cpu->apple_modern_gxf) {
         arm_register_apple_modern_gxf(cpu);
     }
-    if (cpu->apple_modern_sysregs) {
-        arm_register_apple_modern_sysregs(cpu);
-    }
 
     /*
      * Register redirections and aliases must be done last,
@@ -7193,9 +7189,6 @@ void register_cp_regs_for_features(ARMCPU *cpu)
         define_arm_vh_e2h_redirects_aliases(cpu);
         if (cpu->apple_modern_gxf) {
             arm_register_apple_modern_gxf_aliases(cpu);
-        }
-        if (cpu->apple_modern_sysregs) {
-            arm_register_apple_modern_sysreg_aliases(cpu);
         }
         if (cpu->apple_modern_timers) {
             arm_define_vhe_alias(cpu,
