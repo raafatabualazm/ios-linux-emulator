@@ -20,6 +20,8 @@
 #include "hw/arm/apple-silicon/modern-board-regions.h"
 #include "hw/arm/apple-silicon/modern-amcc.h"
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
+#include "hw/intc/apple-modern-aic.h"
+#include "hw/qdev-properties.h"
 #include "hw/arm/apple-silicon/modern-boot-display.h"
 #include "hw/char/apple_uart.h"
 #include "system/address-spaces.h"
@@ -54,6 +56,12 @@ struct AppleModernMachine {
     bool img4_ignition_compat;
     bool pauth_compat;
     bool sep_trace;
+    bool aic_trace;
+    bool modern_aic;
+    DeviceState *aic;
+    uint32_t uart_irq;
+    uint32_t aic_num_irqs;
+    uint32_t aic_revision;
     bool boot_display;
     bool prepare_only, mte, initialized;
     uint64_t timebase_frequency;
@@ -272,7 +280,7 @@ static void modern_reset(void *opaque)
 }
 
 static bool uart_address(AppleModernBlob dtree, uint64_t *address,
-                         uint64_t *span, Error **errp)
+                         uint64_t *span, uint32_t *irq, Error **errp)
 {
     AppleModernBlob ranges, reg, compatible;
     uint64_t offset, size;
@@ -294,6 +302,20 @@ static bool uart_address(AppleModernBlob dtree, uint64_t *address,
     if (size < 0x3c) {
         error_setg(errp, "modern UART register span is too small");
         return false;
+    }
+    if (irq) {
+        AppleModernBlob interrupts;
+        Error *local = NULL;
+
+        *irq = UINT32_MAX;
+        if (apple_modern_adt_property(dtree, "/arm-io/uart0", "interrupts",
+                                      &interrupts, &local)) {
+            if (interrupts.size >= 4) {
+                *irq = ldl_le_p(interrupts.data);
+            }
+        } else {
+            error_free(local);
+        }
     }
     for (size_t i = 0; i < ranges.size; i += 24) {
         uint64_t child = ldq_le_p(ranges.data + i);
@@ -412,6 +434,48 @@ static bool map_amcc(AppleModernMachine *s, Error **errp)
 }
 
 /*
+ * Observation aperture for the AIC window. Opt-in (aic-trace), default off.
+ * It answers exactly the three capability registers the RAM stub answers today
+ * (revision at rev-offset 0, cap0 at 0x4, IRQ count at maxnumirq-offset 0xc)
+ * so driver initialization is unchanged, returns zero elsewhere, discards
+ * writes, and logs every access under -d unimp. The stock ADT describes the
+ * offsets and the 0x4a00 per-die stride but names no event/acknowledge
+ * register, so that location is measured here rather than inferred.
+ */
+typedef struct AppleModernAICTrace {
+    uint64_t base;
+    uint32_t num_irqs;
+} AppleModernAICTrace;
+
+static uint64_t aic_trace_read(void *opaque, hwaddr offset, unsigned size)
+{
+    AppleModernAICTrace *t = opaque;
+    uint64_t value = 0;
+
+    if (offset == 0xc || offset == 0x4) {
+        value = t->num_irqs;
+    }
+    qemu_log_mask(LOG_UNIMP, "AIC-TRACE read  +0x%06" PRIx64 " size %u -> 0x%"
+                  PRIx64 "\n", (uint64_t)offset, size, value);
+    return value;
+}
+
+static void aic_trace_write(void *opaque, hwaddr offset, uint64_t value,
+                            unsigned size)
+{
+    qemu_log_mask(LOG_UNIMP, "AIC-TRACE write +0x%06" PRIx64 " size %u value "
+                  "0x%" PRIx64 "\n", (uint64_t)offset, size, value);
+}
+
+static const MemoryRegionOps aic_trace_ops = {
+    .read = aic_trace_read,
+    .write = aic_trace_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .impl = { .min_access_size = 1, .max_access_size = 8 },
+};
+
+/*
  * Darwin-VM init_aic(): a bare-bones controller that ignores register
  * accesses and only reports the IRQ count. For aic,3 the count lives at
  * aperture offset 0xC. This is a stub, not a functional AIC; interrupts are
@@ -443,6 +507,59 @@ static bool map_aic(AppleModernMachine *s, Error **errp)
     }
     if (!arm_io_translate(dtree, offset, size, &base, errp)) {
         return false;
+    }
+    if (s->modern_aic) {
+        /*
+         * Geometry comes from the served ADT. The bank layout is the Asahi
+         * reference one and is corroborated by this tree: 4096 IRQ config
+         * words (0x4000) plus five 0x200 bitmap banks (0xa00) equals the
+         * stock extintrcfg/intmaskset/intmaskclear/hwintmon stride of 0x4a00.
+         * The measured guest driver masks at irq_config + 0x4400 and unmasks
+         * at + 0x4688, which is exactly this layout's MASK_SET/MASK_CLEAR.
+         * No event/acknowledge offset is named by the ADT; event-offset is a
+         * separate opt-in parameter and defaults to the unused aperture tail.
+         */
+        /*
+         * The ADT compatible is "aic,3". The revision register value selects
+         * the driver's internal path: reporting 3 makes XNU read the unnamed
+         * CPU register S3_3_C15_C2_0, which no reference models. aic-revision
+         * exists to measure that boundary; it is a declared compatibility
+         * interface, not a claim about silicon.
+         */
+        const uint32_t revision = s->aic_revision;
+        uint32_t extint = 0;
+
+        if (!adt_u32(dtree, "/arm-io/aic", "extint-baseaddress", &extint,
+                     errp)) {
+            return false;
+        }
+        s->aic = qdev_new(TYPE_APPLE_MODERN_AIC);
+        qdev_prop_set_uint32(s->aic, "revision", revision);
+        qdev_prop_set_uint32(s->aic, "num-irqs", num_irqs);
+        qdev_prop_set_uint32(s->aic, "max-irqs", num_irqs);
+        qdev_prop_set_uint32(s->aic, "cap0-offset", 4);
+        qdev_prop_set_uint32(s->aic, "maxnumirq-offset", 0xc);
+        qdev_prop_set_uint32(s->aic, "irq-config-offset", extint);
+        qdev_prop_set_uint32(s->aic, "event-offset", 0x2000);
+        qdev_prop_set_uint32(s->aic, "mmio-size", size);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(s->aic), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(s->aic), 0, base);
+        s->aic_num_irqs = num_irqs;
+        warn_report("apple-modern: AIC%u enabled, %u IRQs, config at 0x%x "
+                    "(opt-in modern-aic)", revision, num_irqs, extint);
+        return true;
+    }
+    if (s->aic_trace) {
+        AppleModernAICTrace *trace = g_new0(AppleModernAICTrace, 1);
+
+        trace->base = base;
+        trace->num_irqs = num_irqs;
+        memory_region_init_io(&s->aic_ram, NULL, &aic_trace_ops, trace,
+                              "apple-modern.aic-trace", size);
+        memory_region_add_subregion(get_system_memory(), base, &s->aic_ram);
+        warn_report("apple-modern: AIC trace aperture at 0x%" PRIx64 " size 0x%"
+                    PRIx64 " (observation only, not a controller)", base, size);
+        return true;
     }
     memory_region_init_ram(&s->aic_ram, NULL, "apple-modern.aic", size,
                            &error_fatal);
@@ -622,7 +739,8 @@ static void modern_init(MachineState *machine)
                                          strlen(s->boot_command_line) : 0;
     metadata_input.has_mte = s->mte;
     if (!apple_modern_boot_metadata_build(&metadata_input, &s->metadata, &error) ||
-        !uart_address(s->components.dtree, &uart, &uart_span, &error)) {
+        !uart_address(s->components.dtree, &uart, &uart_span, &s->uart_irq,
+                      &error)) {
         error_report_err(error);
         exit(EXIT_FAILURE);
     }
@@ -726,8 +844,18 @@ static void modern_init(MachineState *machine)
     qdev_realize(DEVICE(s->cpu), NULL, &error_fatal);
     qdev_connect_gpio_out(DEVICE(s->cpu), GTIMER_HYPVIRT,
                           qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_FIQ));
-    /* Serial polling only until a real modern interrupt controller is wired. */
-    apple_uart_create(uart, 15, 0, serial_hd(0), NULL);
+    if (s->aic) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(s->aic), 0,
+                           qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_IRQ));
+    }
+    /*
+     * With the opt-in controller the UART drives its own ADT interrupt line
+     * (uart0 "interrupts", 0x444 on this tree); otherwise the console stays
+     * polled, as it was before the controller existed.
+     */
+    apple_uart_create(uart, 15, 0, serial_hd(0),
+                      s->aic && s->uart_irq < s->aic_num_irqs ?
+                      qdev_get_gpio_in(s->aic, s->uart_irq) : NULL);
     qemu_register_reset(modern_reset, s);
     s->initialized = true;
 }
@@ -782,6 +910,8 @@ ASSET_PROPERTY(ramdisk, ASSET_RAMDISK)
 BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(sep_trace, sep_trace)
+BOOL_PROPERTY(aic_trace, aic_trace)
+BOOL_PROPERTY(modern_aic, modern_aic)
 BOOL_PROPERTY(boot_display, boot_display)
 BOOL_PROPERTY(prepare_only, prepare_only)
 BOOL_PROPERTY(mte, mte)
@@ -837,6 +967,7 @@ static void modern_instance_init(Object *obj)
 {
     AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
     s->prepare_only = true;
+    s->aic_revision = 3;
     s->timebase_frequency = 24000000; /* Configurable experiment value. */
     s->display_width = 1024;
     s->display_height = 768;
@@ -873,6 +1004,14 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_pauth_compat);
     object_class_property_add_bool(oc, "sep-trace", get_sep_trace,
                                    set_sep_trace);
+    object_class_property_add_bool(oc, "aic-trace", get_aic_trace,
+                                   set_aic_trace);
+    object_class_property_add_bool(oc, "modern-aic", get_modern_aic,
+                                   set_modern_aic);
+    object_class_property_add(oc, "aic-revision", "uint32",
+                              get_display_geometry, set_display_geometry,
+                              NULL, (void *)offsetof(AppleModernMachine,
+                                                     aic_revision));
     object_class_property_add_bool(oc, "img4-ignition-compat",
                                    get_img4_ignition_compat,
                                    set_img4_ignition_compat);

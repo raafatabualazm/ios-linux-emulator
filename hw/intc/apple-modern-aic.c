@@ -28,8 +28,11 @@
 #include <string.h>
 #endif
 #include "hw/intc/apple-modern-aic.h"
+#ifndef APPLE_MODERN_AIC_STANDALONE
+#include "migration/vmstate.h"
+#endif
 
-static bool ranges_overlap(uint64_t a, uint64_t a_size,
+static bool aic_ranges_overlap(uint64_t a, uint64_t a_size,
                             uint64_t b, uint64_t b_size)
 {
     return a < b + b_size && b < a + a_size;
@@ -78,7 +81,7 @@ bool apple_modern_aic_core_init(AppleModernAICCore *s,
     for (unsigned i = 0; i < 6; i++) {
         if ((registers[i] & 3) ||
             (uint64_t)registers[i] + 4 > geometry->mmio_size ||
-            ranges_overlap(registers[i], 4, geometry->irq_config_offset,
+            aic_ranges_overlap(registers[i], 4, geometry->irq_config_offset,
                            total_size)) {
             problem = "capability/control/event register is outside or overlaps IRQ banks";
             goto invalid;
@@ -378,6 +381,12 @@ static const Property apple_modern_aic_properties[] = {
     DEFINE_PROP_UINT32("mmio-size", AppleModernAICState, geometry.mmio_size, 0),
 };
 
+/* Interrupt-controller state is not migrated by this compatibility model. */
+static const VMStateDescription vmstate_apple_modern_aic = {
+    .name = TYPE_APPLE_MODERN_AIC,
+    .unmigratable = 1,
+};
+
 static void apple_modern_aic_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -385,7 +394,7 @@ static void apple_modern_aic_class_init(ObjectClass *klass, const void *data)
     dc->realize = apple_modern_aic_realize;
     device_class_set_legacy_reset(dc, apple_modern_aic_reset);
     device_class_set_props(dc, apple_modern_aic_properties);
-    dc->vmsd = &vmstate_unmigratable;
+    dc->vmsd = &vmstate_apple_modern_aic;
     dc->desc = "Scoped single-CPU Apple AIC2/AIC3 compatibility controller";
 }
 
