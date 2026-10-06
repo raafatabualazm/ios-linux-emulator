@@ -43,6 +43,31 @@ for base in lists['rs_banked']:
     if base in ('PMCR1_GL', 'AFSR1_GL'):
         opaque += [f'{base}1', f'{base}2']
 
+# Apple's implementation-defined error-status registers, which Darwin's tables
+# omit. These are named by Apple itself in published XNU source
+# (pexpert/pexpert/arm64/arm64_common.h, xnu-4570 through xnu-6153) and are read
+# by arm64_implementation_specific_error() in osfmk/arm64/sleh.c whenever the
+# kernel handles an implementation-specific error. XNU selects the E-core or
+# P-core variant from MPIDR_EL1 bit 16 (MPIDR_PNE, "pcore not ecore"), so a
+# boot CPU on the E-cluster reads the E_ forms. Without them the kernel panics
+# with "Undefined kernel instruction" inside its own error handler, which hides
+# the original error. Asahi's M1 register dump reads 0 on real hardware, i.e.
+# "no error recorded"; that is the reset value used here, not an invented one.
+# https://github.com/apple-oss-distributions/xnu/blob/xnu-6153.141.1/pexpert/pexpert/arm64/arm64_common.h
+ERROR_STATUS = {
+    'LSU_ERR_STS': (3, 3, 15, 0, 0),
+    'LSU_ERR_CTL': (3, 3, 15, 1, 0),
+    'E_LSU_ERR_STS': (3, 3, 15, 2, 0),
+    'FED_ERR_STS': (3, 4, 15, 0, 0),
+    'E_FED_ERR_STS': (3, 4, 15, 0, 2),
+    'MMU_ERR_STS': (3, 6, 15, 0, 0),
+    'E_MMU_ERR_STS': (3, 6, 15, 2, 0),
+    'L2C_ERR_STS': (3, 3, 15, 8, 0),
+    'L2C_ERR_ADR': (3, 3, 15, 9, 0),
+    'L2C_ERR_INF': (3, 3, 15, 10, 0),
+    'DPC_ERR_STS': (3, 5, 15, 0, 5),
+}
+
 
 def inject_el2(regs):
     for r in list(regs):
@@ -56,6 +81,8 @@ inject_el2(opaque)
 
 
 def decode(name):
+    if name in ERROR_STATUS:
+        return ERROR_STATUS[name]
     return tuple(int(x) for x in re.sub('[cs]', '', all_regs[name].lower()).split('_'))
 
 
@@ -78,8 +105,10 @@ OWNED_ENCODINGS = {
     (3, 6, 15, 14, 7),  # APSTS_EL12
 }
 seen, regs = set(), []
-for name in opaque:
-    if name not in all_regs or name.startswith(EXCLUDE_PREFIX):
+for name in opaque + list(ERROR_STATUS):
+    if name not in all_regs and name not in ERROR_STATUS:
+        continue
+    if name.startswith(EXCLUDE_PREFIX):
         continue
     if '_EL12' in name or '_GL12' in name:
         continue
@@ -113,10 +142,18 @@ def access(name):
     return f'PL{m.group(1) if m else 1}_RW'
 
 
+# The error-status family has no _ELn suffix; XNU reads it at EL1 and above.
+_plain_access = access
+def access(name):  # noqa: F811
+    return 'PL1_RW' if name in ERROR_STATUS else _plain_access(name)
+
+
 # VHE pairs: EL1 view, EL2 view and EL12 alias all present in Darwin's table.
 aliases = []
 names = {n for n, _ in regs}
 for name, _ in regs:
+    if name in ERROR_STATUS:
+        continue
     if name.endswith('_EL1') or name.endswith('_GL1'):
         two = name[:-1] + '2'
         twelve = name[:-1] + '12'

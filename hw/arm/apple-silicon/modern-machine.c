@@ -527,7 +527,7 @@ static bool map_aic(AppleModernMachine *s, Error **errp)
          * interface, not a claim about silicon.
          */
         const uint32_t revision = s->aic_revision;
-        uint32_t extint = 0;
+        uint32_t extint = 0, stamp_off = 0, stamp_count = 0, stamp_stride = 0;
 
         if (!adt_u32(dtree, "/arm-io/aic", "extint-baseaddress", &extint,
                      errp)) {
@@ -541,6 +541,22 @@ static bool map_aic(AppleModernMachine *s, Error **errp)
         qdev_prop_set_uint32(s->aic, "maxnumirq-offset", 0xc);
         qdev_prop_set_uint32(s->aic, "irq-config-offset", extint);
         qdev_prop_set_uint32(s->aic, "event-offset", 0x2000);
+        /*
+         * Shared timestamp block: ADT pubstampcfg0-offset with
+         * #shared-timestamps entries of pubstampstride-mask bytes. Accepted
+         * and discarded; the counters themselves are not modelled.
+         */
+        if (adt_u32(dtree, "/arm-io/aic", "pubstampcfg0-offset", &stamp_off,
+                    NULL) &&
+            adt_u32(dtree, "/arm-io/aic", "#shared-timestamps", &stamp_count,
+                    NULL) &&
+            adt_u32(dtree, "/arm-io/aic", "pubstampstride-mask", &stamp_stride,
+                    NULL) && stamp_count && stamp_stride &&
+            stamp_count <= 256 && stamp_stride <= 0x100) {
+            qdev_prop_set_uint32(s->aic, "timestamp-offset", stamp_off);
+            qdev_prop_set_uint32(s->aic, "timestamp-size",
+                                 stamp_count * stamp_stride);
+        }
         qdev_prop_set_uint32(s->aic, "mmio-size", size);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(s->aic), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(s->aic), 0, base);

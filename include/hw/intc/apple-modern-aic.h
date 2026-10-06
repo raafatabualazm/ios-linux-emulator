@@ -28,6 +28,13 @@ typedef struct AppleModernAICGeometry {
     uint32_t maxnumirq_offset;
     uint32_t irq_config_offset;
     uint32_t event_offset;
+    /*
+     * Shared timestamp block (ADT pubstampcfg0-offset, #shared-timestamps and
+     * pubstampstride-mask). Reads return zero and writes are discarded: the
+     * timestamp counters are not modelled. A zero count disables the window.
+     */
+    uint32_t timestamp_offset;
+    uint32_t timestamp_size;
     uint32_t mmio_size;
 } AppleModernAICGeometry;
 

@@ -197,7 +197,11 @@ bool apple_modern_aic_core_read(AppleModernAICCore *s, uint64_t offset,
     if (!value || !valid_access(s, offset, size)) {
         return false;
     }
-    if (offset == APPLE_MODERN_AIC_VERSION_OFFSET) {
+    if (s->geometry.timestamp_size &&
+        offset >= s->geometry.timestamp_offset &&
+        offset - s->geometry.timestamp_offset < s->geometry.timestamp_size) {
+        *value = 0; /* Shared timestamp counters are not modelled. */
+    } else if (offset == APPLE_MODERN_AIC_VERSION_OFFSET) {
         *value = s->geometry.revision;
     } else if (offset == s->geometry.cap0_offset) {
         *value = s->geometry.num_irqs; /* last die = 0 */
@@ -234,6 +238,11 @@ bool apple_modern_aic_core_write(AppleModernAICCore *s, uint64_t offset,
 
     if (!valid_access(s, offset, size)) {
         return false;
+    }
+    if (s->geometry.timestamp_size &&
+        offset >= s->geometry.timestamp_offset &&
+        offset - s->geometry.timestamp_offset < s->geometry.timestamp_size) {
+        return true; /* Shared timestamp counters are not modelled. */
     }
     if (offset == APPLE_MODERN_AIC_RESET_OFFSET) {
         if (value & ~UINT32_C(1)) {
@@ -378,6 +387,10 @@ static const Property apple_modern_aic_properties[] = {
     DEFINE_PROP_UINT32("irq-config-offset", AppleModernAICState,
                        geometry.irq_config_offset, 0x2000),
     DEFINE_PROP_UINT32("event-offset", AppleModernAICState, geometry.event_offset, 0),
+    DEFINE_PROP_UINT32("timestamp-offset", AppleModernAICState,
+                       geometry.timestamp_offset, 0),
+    DEFINE_PROP_UINT32("timestamp-size", AppleModernAICState,
+                       geometry.timestamp_size, 0),
     DEFINE_PROP_UINT32("mmio-size", AppleModernAICState, geometry.mmio_size, 0),
 };
 
