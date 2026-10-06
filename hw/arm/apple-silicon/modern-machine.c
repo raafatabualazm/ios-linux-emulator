@@ -19,6 +19,7 @@
 #include "hw/arm/apple-silicon/modern-boot-metadata.h"
 #include "hw/arm/apple-silicon/modern-board-regions.h"
 #include "hw/arm/apple-silicon/modern-amcc.h"
+#include "hw/arm/apple-silicon/modern-kc-patch.h"
 #include "hw/char/apple_uart.h"
 #include "system/address-spaces.h"
 #include "system/reset.h"
@@ -47,6 +48,7 @@ struct AppleModernMachine {
     MemoryRegion aic_ram, sep_ram;
     AppleModernAMCC amcc;
     bool has_amcc;
+    bool img4_ignition_compat;
     bool prepare_only, mte, initialized;
     uint64_t timebase_frequency;
 };
@@ -523,6 +525,23 @@ static void modern_init(MachineState *machine)
         error_report_err(error);
         exit(EXIT_FAILURE);
     }
+    if (s->img4_ignition_compat) {
+        /*
+         * Declared, opt-in guest-kernel compatibility edit on the private
+         * in-memory boot kernel cache only. See modern-kc-patch.h. The copy is
+         * the one load_prepared_memory() writes into guest RAM at every reset.
+         */
+        uint8_t *bootkc = (uint8_t *)s->blobs[ASSET_BOOTKC].data;
+        if (!apple_modern_kc_ignition_compat(bootkc,
+                                             s->blobs[ASSET_BOOTKC].size,
+                                             &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: applied opt-in img4-ignition-compat patch "
+                    "to the in-memory kernel cache (compatibility, not Apple "
+                    "fidelity)");
+    }
     AppleModernAddressRange exclusion = { uart, uart_span };
     if (!apple_modern_board_regions_build(s->components.dtree,
                                           s->components.dram_base,
@@ -642,6 +661,7 @@ ASSET_PROPERTY(ramdisk, ASSET_RAMDISK)
     static void set_##name(Object *obj, bool value, Error **errp) \
     { AppleModernMachine *s = APPLE_MODERN_MACHINE(obj); \
       if (check_mutable(s, errp)) { s->field = value; } }
+BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
 BOOL_PROPERTY(prepare_only, prepare_only)
 BOOL_PROPERTY(mte, mte)
 #undef BOOL_PROPERTY
@@ -702,6 +722,9 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "ramdisk", get_ramdisk, set_ramdisk);
     object_class_property_add_str(oc, "boot-command-line", get_boot_command_line,
                                   set_boot_command_line);
+    object_class_property_add_bool(oc, "img4-ignition-compat",
+                                   get_img4_ignition_compat,
+                                   set_img4_ignition_compat);
     object_class_property_add_bool(oc, "prepare-only", get_prepare_only, set_prepare_only);
     object_class_property_add_bool(oc, "mte", get_mte, set_mte);
     object_class_property_add(oc, "timebase-frequency", "uint64",

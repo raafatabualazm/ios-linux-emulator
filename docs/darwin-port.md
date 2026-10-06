@@ -130,6 +130,53 @@ Private evidence lives under `modern-emulator/evidence/features-20261006/`:
 `darwin-sptm-sprr-v1`. Firmware, tickets, IPAs,
 complete guest stores and raw logs remain outside versioned source.
 
+## Past ignition to the restore environment — October 6, 2026 (opt-in)
+
+The one modification the Darwin reference applies to boot this ramdisk is a
+kernel-cache edit to the AppleImage4 ignition-blob sysctl handler
+(`_darwin_trap_ignition_get_blob`): without ignition/SEP infrastructure the
+handler never returns and userspace `libignition` stalls before launchd (this
+was the earlier "ignition stall", diagnosed in
+`features-20261006/ignition-stall-diagnosis/`; the parallel
+`ACMTRM: waitForSEPEndpoint` timeouts are a separate, non-fatal kernel retry
+that the reference prints too).
+
+`hw/arm/apple-silicon/modern-kc-patch.c` ports that edit
+(qemu-sptm 2867d847 `patch_img4_deadlock`) as the board property
+**`img4-ignition-compat`, default off**. It is a DECLARED COMPATIBILITY
+measure, not Apple fidelity: it rewrites that one handler's first three
+instructions to `pacibsp; movz x0,#0; retab` (return 0). It is applied only to
+the board's private in-memory boot-kernel-cache copy — the firmware file on
+disk is never written (verified by hash) — every offset is recomputed from the
+image and bounds-checked, and the run prints a warning when it is used. With it
+off, the board behaves as before (stops at the ignition banner).
+
+With `img4-ignition-compat=on`, the unchanged iOS 27 SPTM/TXM/XNU boot now
+matches the reference: `hello from launchd.1` → Darwin Bootstrapper →
+`Restore environment starting` → the restore boot-tasks (exclaves-boot,
+commit-boot-mode, restore-datapartition, init-with-data-volume,
+fixup-mobile-tmp) → launchd spawns `restored_external` (pid 3) through xpcproxy,
+AMFI admits it, and it runs. This is the restore-OS ceiling, the same endpoint
+the Darwin reference reaches; it is NOT SpringBoard (the 243 MB restore ramdisk
+has no full iOS userland). `restored_external` then fails to find logd /
+notification_center / logger, which are not in the minimal restore LaunchDaemons.
+
+Pin: `modern-emulator/bin/qemu-system-aarch64-modern-boot-v2`
+(SHA-256 `4a2da6bf6a50fdc7ce3a77825ec5419f751c7415ebbc1e4f8d1b5d6544ca0f71`);
+the five QEMU gates and the SPRR/APSTS component tests pass on it. Evidence:
+`features-20261006/{img4-ignition-compat,modern-boot-restore-milestone-v2,modern-boot-probe/p14-ignition-compat}/`.
+
+### Inventoried guest modifications and stubs (compatibility, not fidelity)
+
+- `img4-ignition-compat` (opt-in, off by default): the one guest-kernel edit
+  above. Needed only to pass the AppleImage4 ignition-blob handler.
+- AMCC, AIC3 `num_irqs`, SEP InvalidateHmac: zero/stub device models; no
+  enforcement, no interrupt delivery, no SEP service.
+- Apple implementation register stores, CTRR/CTXR/APCTL: read-as-written
+  compatibility stores with Darwin's reset values; no hardware effect.
+- APSTS readiness, SME vector-length limit, guarded-EL0 return: CPU-model
+  compatibility choices described above.
+
 ## Modern boot progress — October 6, 2026 (modern-boot branch)
 
 With the Darwin-prepared device tree (dt_fixup.py output, kept outside source), the

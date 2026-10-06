@@ -8797,6 +8797,7 @@ static void arm_cpu_do_interrupt_aarch64(CPUState *cs)
                       (unsigned)(env->exception.syndrome >> ARM_EL_EC_SHIFT));
     }
 
+
     if (modern_gl) {
         addr = env->modern_gxf.vbar_gl[new_el];
         if (cur_el == 0) {

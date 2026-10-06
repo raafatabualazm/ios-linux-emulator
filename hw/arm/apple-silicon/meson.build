@@ -10,6 +10,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'dt.c',
     'mem.c',
     'modern-amcc.c',
+    'modern-kc-patch.c',
     'modern-boot-layout.c',
     'modern-boot-metadata.c',
     'modern-board-regions.c',
