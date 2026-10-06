@@ -166,10 +166,31 @@ Pin: `modern-emulator/bin/qemu-system-aarch64-modern-boot-v2`
 the five QEMU gates and the SPRR/APSTS component tests pass on it. Evidence:
 `features-20261006/{img4-ignition-compat,modern-boot-restore-milestone-v2,modern-boot-probe/p14-ignition-compat}/`.
 
+## Interactive restore-environment shell — October 6, 2026
+
+With `img4-ignition-compat=on,pauth-compat=on` and a Linux-built minimal ramdisk
+(launchd, xpcproxy, bash, sh, /usr/lib, user database, Darwin's
+`com.jprx.bash.plist`, ad-hoc signed with a generated trustcache) the unchanged
+iOS 27 SPTM/TXM/XNU reach an interactive root `bash-5.3#` on the serial console
+(pin `modern-boot-v3`, SHA-256
+`34824226fab8d7cd24eaa1cf0ac0d0f18f7fab42cd3e3d1f06077a596bded2fc`). See
+`modern-emulator/evidence/features-20261006/ios27-restore-shell/README.md`.
+
+`pauth-compat` (CPU property `apple-modern-pauth-compat`, board property
+`pauth-compat`, both default off) ports the reference's `QEMU_SPTM_DISABLE_PAC`: PAC sign
+leaves the pointer unchanged and authenticate always succeeds, ID registers
+unchanged. It is needed because, once a second process exists, SPTM takes a
+Prefetch Abort in its GENTER path on a pointer whose authentication bits are still
+attached and then spins on UNDEFINED reads of the unimplemented LLC error registers.
+It is a declared bypass: PAC is not modeled in this mode. The default (real
+architectural PAC) is unchanged and its guarded/SPRR gates still pass.
+
 ### Inventoried guest modifications and stubs (compatibility, not fidelity)
 
 - `img4-ignition-compat` (opt-in, off by default): the one guest-kernel edit
   above. Needed only to pass the AppleImage4 ignition-blob handler.
+- `pauth-compat` (opt-in, off by default): PAC sign/authenticate become no-ops.
+  Needed once a second process exists; bypasses pointer authentication.
 - AMCC, AIC3 `num_irqs`, SEP InvalidateHmac: zero/stub device models; no
   enforcement, no interrupt delivery, no SEP service.
 - Apple implementation register stores, CTRR/CTXR/APCTL: read-as-written

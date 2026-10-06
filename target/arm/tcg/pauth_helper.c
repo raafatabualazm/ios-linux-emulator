@@ -338,6 +338,10 @@ static uint64_t pauth_addpac(CPUARMState *env, uint64_t ptr, uint64_t modifier,
     uint64_t pac, ext_ptr, ext, test;
     int bot_bit, top_bit;
 
+    if (cpu->apple_modern_pauth_compat) {
+        return ptr; /* Declared compat: signing leaves the pointer as is. */
+    }
+
     /* If tagged pointers are in use, use ptr<55>, otherwise ptr<63>.  */
     if (param.tbi) {
         ext = sextract64(ptr, 55, 1);
@@ -421,6 +425,9 @@ static uint64_t pauth_auth(CPUARMState *env, uint64_t ptr, uint64_t modifier,
     uint64_t pac, orig_ptr, cmp_mask;
 
     orig_ptr = pauth_original_ptr(ptr, param);
+    if (cpu->apple_modern_pauth_compat) {
+        return orig_ptr; /* Declared compat: authentication always succeeds. */
+    }
     pac = pauth_computepac(env, orig_ptr, modifier, *key);
     bot_bit = 64 - param.tsz;
     top_bit = 64 - 8 * param.tbi;

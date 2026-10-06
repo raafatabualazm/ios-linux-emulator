@@ -1063,6 +1063,14 @@ struct ArchCPU {
     bool apple_modern_apsts;
     /* Darwin-compatible read-as-written implementation registers. */
     bool apple_modern_sysregs;
+    /*
+     * Declared compatibility measure, default off: pointer-authentication
+     * sign/authenticate become no-ops (ID registers unchanged). Mirrors the
+     * qemu-sptm reference's QEMU_SPTM_DISABLE_PAC, which exists because the
+     * simplified register model cannot reproduce Apple's kernel-key behaviour
+     * once several processes reprogram the per-process key registers.
+     */
+    bool apple_modern_pauth_compat;
     /* Stable alias metadata for the opt-in modern register interface. */
     GPtrArray *modern_vhe_snapshots;
     /* CPU has security extension */

@@ -1446,6 +1446,12 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
         !arm_apple_modern_sysregs_validate(cpu, errp)) {
         return;
     }
+    if (cpu->apple_modern_pauth_compat &&
+        (!cpu->apple_modern_gxf || !cpu->prop_pauth || cpu->prop_pauth_noop)) {
+        error_setg(errp, "apple-modern-pauth-compat requires apple-modern-gxf "
+                   "and an active (not no-op) pointer-authentication CPU");
+        return;
+    }
 
 #ifdef CONFIG_TCG
     /* Use pc-relative instructions in system-mode */
@@ -2038,6 +2044,7 @@ static const Property arm_cpu_properties[] = {
     DEFINE_PROP_BOOL("apple-modern-sprr", ARMCPU, apple_modern_sprr, false),
     DEFINE_PROP_BOOL("apple-modern-apsts", ARMCPU, apple_modern_apsts, false),
     DEFINE_PROP_BOOL("apple-modern-sysregs", ARMCPU, apple_modern_sysregs, false),
+    DEFINE_PROP_BOOL("apple-modern-pauth-compat", ARMCPU, apple_modern_pauth_compat, false),
     DEFINE_PROP_UINT64("midr", ARMCPU, midr, 0),
     DEFINE_PROP_UINT64("mp-affinity", ARMCPU,
                         mp_affinity, ARM64_AFFINITY_INVALID),

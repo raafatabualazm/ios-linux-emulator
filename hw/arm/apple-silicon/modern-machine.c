@@ -49,6 +49,7 @@ struct AppleModernMachine {
     AppleModernAMCC amcc;
     bool has_amcc;
     bool img4_ignition_compat;
+    bool pauth_compat;
     bool prepare_only, mte, initialized;
     uint64_t timebase_frequency;
 };
@@ -582,6 +583,13 @@ static void modern_init(MachineState *machine)
                               &error_fatal);
     object_property_set_bool(OBJECT(s->cpu), "apple-modern-apsts", true,
                               &error_fatal);
+    if (s->pauth_compat) {
+        object_property_set_bool(OBJECT(s->cpu), "apple-modern-pauth-compat",
+                                 true, &error_fatal);
+        warn_report("apple-modern: pointer authentication sign/authenticate "
+                    "are no-ops (opt-in pauth-compat; compatibility, not "
+                    "Apple fidelity)");
+    }
     object_property_set_bool(OBJECT(s->cpu), "apple-modern-sysregs", true,
                               &error_fatal);
     object_property_set_uint(OBJECT(s->cpu), "cntfrq", s->timebase_frequency,
@@ -662,6 +670,7 @@ ASSET_PROPERTY(ramdisk, ASSET_RAMDISK)
     { AppleModernMachine *s = APPLE_MODERN_MACHINE(obj); \
       if (check_mutable(s, errp)) { s->field = value; } }
 BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
+BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(prepare_only, prepare_only)
 BOOL_PROPERTY(mte, mte)
 #undef BOOL_PROPERTY
@@ -722,6 +731,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "ramdisk", get_ramdisk, set_ramdisk);
     object_class_property_add_str(oc, "boot-command-line", get_boot_command_line,
                                   set_boot_command_line);
+    object_class_property_add_bool(oc, "pauth-compat", get_pauth_compat,
+                                   set_pauth_compat);
     object_class_property_add_bool(oc, "img4-ignition-compat",
                                    get_img4_ignition_compat,
                                    set_img4_ignition_compat);
