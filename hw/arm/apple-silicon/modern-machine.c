@@ -11,6 +11,7 @@
 #include "qapi/visitor.h"
 #include "qemu/module.h"
 #include "qemu/error-report.h"
+#include "qemu/log.h"
 #include "qemu/units.h"
 #include "hw/boards.h"
 #include "hw/core/cpu.h"
@@ -46,10 +47,13 @@ struct AppleModernMachine {
     MemoryRegion ram, tag_memory, tag_ram;
     MemoryRegion cpu_register_ram[APPLE_MODERN_CPU_REGISTER_WINDOWS];
     MemoryRegion aic_ram, sep_ram;
+    MemoryRegion sep_trace_mr[2];
+    unsigned sep_trace_count;
     AppleModernAMCC amcc;
     bool has_amcc;
     bool img4_ignition_compat;
     bool pauth_compat;
+    bool sep_trace;
     bool boot_display;
     bool prepare_only, mte, initialized;
     uint64_t timebase_frequency;
@@ -448,6 +452,97 @@ static bool map_aic(AppleModernMachine *s, Error **errp)
 }
 
 /*
+/*
+ * Observation aperture for the SEP ASC windows named by /arm-io/sep "reg".
+ * Opt-in (sep-trace) and default off. It is NOT a device: reads return zero
+ * and writes are discarded; every access is logged under -d unimp so the
+ * offsets the guest driver actually touches can be measured before any
+ * register layout is implemented. The modern wrapper is "iop-sep,ascwrap-v6"
+ * and no v6 register map is documented in either source tree.
+ */
+typedef struct AppleModernSEPTrace {
+    uint64_t base;
+    unsigned index;
+} AppleModernSEPTrace;
+
+static uint64_t sep_trace_read(void *opaque, hwaddr offset, unsigned size)
+{
+    AppleModernSEPTrace *t = opaque;
+
+    qemu_log_mask(LOG_UNIMP, "SEP-TRACE win%u read  0x%" PRIx64 " +0x%05"
+                  PRIx64 " size %u\n", t->index, t->base, (uint64_t)offset,
+                  size);
+    return 0;
+}
+
+static void sep_trace_write(void *opaque, hwaddr offset, uint64_t value,
+                            unsigned size)
+{
+    AppleModernSEPTrace *t = opaque;
+
+    qemu_log_mask(LOG_UNIMP, "SEP-TRACE win%u write 0x%" PRIx64 " +0x%05"
+                  PRIx64 " size %u value 0x%" PRIx64 "\n", t->index, t->base,
+                  (uint64_t)offset, size, value);
+}
+
+static const MemoryRegionOps sep_trace_ops = {
+    .read = sep_trace_read,
+    .write = sep_trace_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .impl = { .min_access_size = 1, .max_access_size = 8 },
+};
+
+/* Map each /arm-io/sep "reg" window as a logging aperture. */
+static bool map_sep_trace(AppleModernMachine *s, Error **errp)
+{
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    AppleModernBlob reg;
+    Error *local = NULL;
+
+    if (!apple_modern_adt_property(dtree, "/arm-io/sep", "reg", &reg, &local)) {
+        error_free(local);
+        return true;
+    }
+    if (!reg.size || reg.size % 16) {
+        error_setg(errp, "unsupported modern SEP reg schema");
+        return false;
+    }
+    for (size_t i = 0; i + 16 <= reg.size; i += 16) {
+        uint64_t offset = ldq_le_p(reg.data + i);
+        uint64_t size = ldq_le_p(reg.data + i + 8);
+        AppleModernSEPTrace *trace;
+        uint64_t base;
+        char name[32];
+
+        if (s->sep_trace_count >= ARRAY_SIZE(s->sep_trace_mr)) {
+            break;
+        }
+        if (!size || size > 0x1000000) {
+            error_setg(errp, "modern SEP register window is out of range");
+            return false;
+        }
+        if (!arm_io_translate(dtree, offset, size, &base, errp)) {
+            return false;
+        }
+        trace = g_new0(AppleModernSEPTrace, 1);
+        trace->base = base;
+        trace->index = s->sep_trace_count;
+        snprintf(name, sizeof(name), "apple-modern.sep-trace%u",
+                 s->sep_trace_count);
+        memory_region_init_io(&s->sep_trace_mr[s->sep_trace_count],
+                              NULL, &sep_trace_ops, trace, name, size);
+        memory_region_add_subregion(get_system_memory(), base,
+                                    &s->sep_trace_mr[s->sep_trace_count]);
+        warn_report("apple-modern: SEP trace window %u at 0x%" PRIx64
+                    " size 0x%" PRIx64 " (observation only, not a device)",
+                    s->sep_trace_count, base, size);
+        s->sep_trace_count++;
+    }
+    return true;
+}
+
+/*
  * Darwin-VM init_sep(): the InvalidateHmac reg-block is mapped as ignored
  * RAM. The served ADT sets sio-hmac1-disable-mask = -1 so InvalidateHmac is
  * effectively disabled as long as these registers can be read and written.
@@ -578,7 +673,8 @@ static void modern_init(MachineState *machine)
         memory_region_add_subregion(get_system_memory(), r->physical_address,
                                     &s->cpu_register_ram[i]);
     }
-    if (!map_amcc(s, &error) || !map_aic(s, &error) || !map_sep(s, &error)) {
+    if (!map_amcc(s, &error) || !map_aic(s, &error) || !map_sep(s, &error) ||
+        (s->sep_trace && !map_sep_trace(s, &error))) {
         error_report_err(error);
         exit(EXIT_FAILURE);
     }
@@ -685,6 +781,7 @@ ASSET_PROPERTY(ramdisk, ASSET_RAMDISK)
       if (check_mutable(s, errp)) { s->field = value; } }
 BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
+BOOL_PROPERTY(sep_trace, sep_trace)
 BOOL_PROPERTY(boot_display, boot_display)
 BOOL_PROPERTY(prepare_only, prepare_only)
 BOOL_PROPERTY(mte, mte)
@@ -774,6 +871,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                   set_boot_command_line);
     object_class_property_add_bool(oc, "pauth-compat", get_pauth_compat,
                                    set_pauth_compat);
+    object_class_property_add_bool(oc, "sep-trace", get_sep_trace,
+                                   set_sep_trace);
     object_class_property_add_bool(oc, "img4-ignition-compat",
                                    get_img4_ignition_compat,
                                    set_img4_ignition_compat);
