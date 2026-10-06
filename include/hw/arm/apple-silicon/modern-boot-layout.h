@@ -23,6 +23,9 @@ void error_free(Error *error);
 #define APPLE_MODERN_DT_SLACK UINT64_C(0x10000)
 #define APPLE_MODERN_BOOTARGS_SIZE 1152
 #define APPLE_MODERN_MAX_RAMDISK_SIZE (UINT64_C(4) << 30)
+#define APPLE_MODERN_MAX_FRAMEBUFFER_DIMENSION 4096U
+#define APPLE_MODERN_MAX_FRAMEBUFFER_SIZE (UINT64_C(64) << 20)
+#define APPLE_MODERN_FRAMEBUFFER_ALIGNMENT (UINT64_C(2) << 20)
 
 typedef enum AppleModernImage {
     APPLE_MODERN_BOOTKC,
@@ -43,6 +46,12 @@ typedef struct AppleModernBootInput {
     AppleModernBlob ramdisk;
     uint64_t dram_base;
     uint64_t dram_size;
+    /* Optional 32-bit XRGB boot console; all zero disables the reservation.
+     * A zero stride with nonzero width/height selects width * 4 bytes.
+     */
+    uint32_t framebuffer_width;
+    uint32_t framebuffer_height;
+    uint32_t framebuffer_stride;
 } AppleModernBootInput;
 
 typedef struct AppleModernBootRegion {
@@ -74,6 +83,8 @@ typedef struct AppleModernBootLayout {
     uint64_t top_of_kernel_data;
     uint64_t ramdisk_physical;
     uint64_t ramdisk_size;
+    uint64_t framebuffer_physical;
+    uint64_t framebuffer_size;
     uint64_t image_virtual_base[3];
     uint64_t image_entry_virtual[3];
     /* Existing catalog bytes follow this ordinary iBoot offsets header. */
@@ -91,8 +102,12 @@ typedef struct AppleModernBootLayout {
  * selects a CPU, or starts guest execution. Does not verify signatures.
  *
  * A nonempty version-1 trustcache is required. Optional ramdisk bytes are
- * reserved unchanged after BootArgs; no trustcache is fabricated. DeviceTree
- * reserves 64 KiB of bounded slack for
+ * reserved unchanged after BootArgs; no trustcache is fabricated.
+ * An optional framebuffer is rounded to 2 MiB and carved out of the DRAM tail
+ * as PurpleGfxMem, outside the boot-data area. top_of_kernel_data is unchanged.
+ * The metadata consumer retargets it after MTE's usable-memory adjustment and
+ * excludes it from boot_args.memSize. It is never an image-copy source.
+ * DeviceTree reserves 64 KiB of bounded slack for
  * the consumer's normal boot metadata; the original ADT is not altered here.
  * The consumer must serialize/check its working ADT before copying anything
  * and must implement CPU/platform devices before using this execution plan.

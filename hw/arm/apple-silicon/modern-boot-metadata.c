@@ -51,7 +51,7 @@ typedef struct Tree {
     NormalProp normal[MAX_NORMAL_PROPS];
     size_t normal_count;
     const AppleModernBootLayout *layout;
-    unsigned chosen_count, map_count;
+    unsigned chosen_count, map_count, vram_count;
     const char *probe_path, *probe_name;
     AppleModernBlob probe_value;
     unsigned probe_nodes, probe_properties;
@@ -139,6 +139,10 @@ static bool property(Tree *tree, const char *name, const void *bytes,
 static bool normal_property(const Tree *tree, const char *path,
                             const char *name)
 {
+    if (tree->layout && tree->layout->framebuffer_size &&
+        !strcmp(path, "/vram")) {
+        return !strcmp(name, "reg");
+    }
     if (!strcmp(path, "/chosen")) {
         return !strcmp(name, "dram-base") || !strcmp(name, "dram-size");
     }
@@ -154,6 +158,12 @@ static bool normal_property(const Tree *tree, const char *path,
 
 static bool emit_normal(Tree *tree, const char *path, Error **errp)
 {
+    if (tree->layout->framebuffer_size && !strcmp(path, "/vram")) {
+        uint8_t bytes[16];
+        put64(bytes, tree->layout->framebuffer_physical);
+        put64(bytes + 8, tree->layout->framebuffer_size);
+        return property(tree, "reg", bytes, sizeof(bytes), errp);
+    }
     if (!strcmp(path, "/chosen")) {
         uint8_t bytes[8];
         put64(bytes, tree->layout->dram_base);
@@ -181,7 +191,7 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
     uint32_t count, children, replaced = 0;
     size_t start, end, output_header = tree->used;
     char name[128] = "", path[512];
-    bool chosen, map;
+    bool chosen, map, vram;
     if (depth > 32 || ++tree->nodes > 8192 ||
         !span(tree->cursor, 8, tree->input.size)) {
         return fail(errp, "ADT node depth/count/bounds exceeded");
@@ -236,9 +246,12 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
     }
     chosen = !strcmp(path, "/chosen");
     map = !strcmp(path, "/chosen/memory-map");
+    vram = tree->layout && tree->layout->framebuffer_size &&
+           !strcmp(path, "/vram");
     if ((chosen && ++tree->chosen_count > 1) ||
-        (map && ++tree->map_count > 1)) {
-        return fail(errp, "ambiguous ADT chosen/memory-map path");
+        (map && ++tree->map_count > 1) ||
+        (vram && ++tree->vram_count > 1)) {
+        return fail(errp, "ambiguous ADT chosen/memory-map/vram path");
     }
     if (tree->probe_path && !strcmp(path, tree->probe_path)) {
         tree->probe_nodes++;
@@ -270,7 +283,7 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
         cursor += size;
     }
     if (tree->output) {
-        size_t added = chosen ? 2 : map ? tree->normal_count : 0;
+        size_t added = chosen ? 2 : map ? tree->normal_count : vram ? 1 : 0;
         if (count - replaced + added > 4096) {
             return fail(errp, "generated ADT node property count exceeds bound");
         }
@@ -407,6 +420,7 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     size_t capacity;
     const AppleModernBootInput *components;
     uint64_t mem_size, dtree_virtual;
+    AppleModernBootVideo video;
     if (!output) {
         return fail(errp, "missing metadata output");
     }
@@ -445,6 +459,56 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     if (!apple_modern_boot_layout_build(components, &prepared.layout, errp)) {
         return false;
     }
+    mem_size = input->has_mte ? prepared.layout.dram_size / 32 * 31 :
+                               prepared.layout.dram_size;
+    if (prepared.layout.framebuffer_size) {
+        /*
+         * Normal iBoot framebuffer handoff: reserve the final managed DRAM
+         * tail and reduce memSize, without adding untyped bootstrap pages
+         * below topOfKernelData. Reference: d0lb33/qemu-sptm b0f7bc6,
+         * hw/arm/xnuboot_sptm.c setup_framebuffer().
+         */
+        uint64_t framebuffer_size = prepared.layout.framebuffer_size;
+        if (mem_size % APPLE_MODERN_FRAMEBUFFER_ALIGNMENT ||
+            framebuffer_size >= mem_size ||
+            prepared.layout.top_of_kernel_data - prepared.layout.dram_base >
+            mem_size - framebuffer_size) {
+            return fail(errp, "framebuffer overlaps boot data or unaligned usable DRAM");
+        }
+        mem_size -= framebuffer_size;
+        prepared.layout.framebuffer_physical = prepared.layout.dram_base +
+                                               mem_size;
+        for (size_t i = 0; i < prepared.layout.region_count; i++) {
+            AppleModernBootRegion *r = &prepared.layout.regions[i];
+            if (!strcmp(r->name, "PurpleGfxMem")) {
+                r->physical_address = prepared.layout.framebuffer_physical;
+            }
+        }
+    }
+    video = input->video;
+    if (prepared.layout.framebuffer_size) {
+        AppleModernBootVideo derived = {
+            .base_address = prepared.layout.framebuffer_physical,
+            /* XNU PE_create_console selects its text console when zero. */
+            .display = 0,
+            .row_bytes = components->framebuffer_stride ?
+                         components->framebuffer_stride :
+                         (uint64_t)components->framebuffer_width * 4,
+            .width = components->framebuffer_width,
+            .height = components->framebuffer_height,
+            .depth = 32,
+        };
+        if ((video.base_address || video.display || video.row_bytes ||
+             video.width || video.height || video.depth) &&
+            (video.base_address != derived.base_address ||
+             video.display != derived.display ||
+             video.row_bytes != derived.row_bytes ||
+             video.width != derived.width || video.height != derived.height ||
+             video.depth != derived.depth)) {
+            return fail(errp, "explicit Video conflicts with reserved framebuffer");
+        }
+        video = derived;
+    }
     capacity = input->dtree_capacity_limit ? input->dtree_capacity_limit :
                prepared.layout.dtree_capacity;
     if (!capacity || capacity > prepared.layout.dtree_capacity ||
@@ -477,13 +541,11 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     memcpy(prepared.trustcache, prepared.layout.trustcache_offsets_header, 8);
     memcpy(prepared.trustcache + 8, components->trustcache.data,
            components->trustcache.size);
-    mem_size = input->has_mte ? prepared.layout.dram_size / 32 * 31 :
-                               prepared.layout.dram_size;
     dtree_virtual = prepared.layout.virtual_base +
                     prepared.layout.dtree_physical - prepared.layout.dram_base;
     if (prepared.layout.top_of_kernel_data - prepared.layout.dram_base >
         mem_size) {
-        fail(errp, "metadata/ramdisk exceeds usable DRAM");
+        fail(errp, "metadata/ramdisk/framebuffer exceeds usable DRAM");
         goto failed;
     }
     /* ARM64 boot_args ABI: explicit LE offsets, independent of host packing. */
@@ -493,12 +555,12 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     put64(prepared.bootargs + 16, prepared.layout.dram_base);
     put64(prepared.bootargs + 24, mem_size);
     put64(prepared.bootargs + 32, prepared.layout.top_of_kernel_data);
-    put64(prepared.bootargs + 40, input->video.base_address);
-    put64(prepared.bootargs + 48, input->video.display);
-    put64(prepared.bootargs + 56, input->video.row_bytes);
-    put64(prepared.bootargs + 64, input->video.width);
-    put64(prepared.bootargs + 72, input->video.height);
-    put64(prepared.bootargs + 80, input->video.depth);
+    put64(prepared.bootargs + 40, video.base_address);
+    put64(prepared.bootargs + 48, video.display);
+    put64(prepared.bootargs + 56, video.row_bytes);
+    put64(prepared.bootargs + 64, video.width);
+    put64(prepared.bootargs + 72, video.height);
+    put64(prepared.bootargs + 80, video.depth);
     put64(prepared.bootargs + 96, dtree_virtual);
     put32(prepared.bootargs + 104, prepared.dtree_size);
     if (input->command_line_length) {

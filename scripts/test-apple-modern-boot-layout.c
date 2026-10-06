@@ -167,18 +167,98 @@ static void dump_layout(const AppleModernBootLayout *out)
     }
 }
 
+static void verify_framebuffer_layout(const AppleModernBootInput *in,
+                                      const AppleModernBootLayout *baseline)
+{
+    AppleModernBootInput changed = *in;
+    AppleModernBootLayout out, repeated;
+    Error *error = NULL;
+    changed.framebuffer_width = 17;
+    changed.framebuffer_height = 3;
+    assert(apple_modern_boot_layout_build(&changed, &out, &error));
+    assert(!error && out.framebuffer_physical ==
+           in->dram_base + in->dram_size - APPLE_MODERN_FRAMEBUFFER_ALIGNMENT &&
+           out.framebuffer_size == APPLE_MODERN_FRAMEBUFFER_ALIGNMENT &&
+           out.top_of_kernel_data == baseline->top_of_kernel_data &&
+           out.region_count == baseline->region_count + 1 &&
+           out.copy_count == baseline->copy_count &&
+           out.sptm_entry_physical == baseline->sptm_entry_physical &&
+           out.bootargs_physical == baseline->bootargs_physical &&
+           out.dtree_physical == baseline->dtree_physical);
+    assert(!memcmp(out.regions, baseline->regions,
+                   baseline->region_count * sizeof(*out.regions)));
+    assert(!memcmp(out.copies, baseline->copies,
+                   baseline->copy_count * sizeof(*out.copies)));
+    const AppleModernBootRegion *framebuffer = &out.regions[out.region_count - 1];
+    assert(!strcmp(framebuffer->name, "PurpleGfxMem") &&
+           framebuffer->physical_address == out.framebuffer_physical &&
+           framebuffer->size == out.framebuffer_size);
+    checks++;
+    assert(apple_modern_boot_layout_build(&changed, &repeated, &error));
+    assert(!memcmp(&out, &repeated, sizeof(out))); checks++;
+    changed.ramdisk = (AppleModernBlob){in->bootkc.data, 1};
+    assert(apple_modern_boot_layout_build(&changed, &out, &error));
+    assert(out.ramdisk_physical == baseline->top_of_kernel_data &&
+           out.framebuffer_physical ==
+           in->dram_base + in->dram_size - APPLE_MODERN_FRAMEBUFFER_ALIGNMENT &&
+           out.region_count == baseline->region_count + 2 &&
+           out.copy_count == baseline->copy_count + 1 &&
+           out.top_of_kernel_data == baseline->top_of_kernel_data + PAGE);
+    checks++;
+    changed = *in; changed.framebuffer_width = 4096;
+    changed.framebuffer_height = 4096;
+    assert(apple_modern_boot_layout_build(&changed, &out, &error));
+    assert(out.framebuffer_size == APPLE_MODERN_MAX_FRAMEBUFFER_SIZE); checks++;
+    changed = *in; changed.framebuffer_width = 7;
+    changed.framebuffer_height = 8; changed.framebuffer_stride = 256;
+    assert(apple_modern_boot_layout_build(&changed, &out, &error));
+    assert(out.framebuffer_size == APPLE_MODERN_FRAMEBUFFER_ALIGNMENT); checks++;
+    changed = *in; changed.framebuffer_width = 17;
+    rejected("framebuffer missing height", &changed);
+    changed = *in; changed.framebuffer_height = 3;
+    rejected("framebuffer missing width", &changed);
+    changed = *in; changed.framebuffer_stride = 64;
+    rejected("framebuffer stride without dimensions", &changed);
+    changed = *in; changed.framebuffer_width = 4097;
+    changed.framebuffer_height = 1;
+    rejected("framebuffer width above bound", &changed);
+    changed.framebuffer_width = 1; changed.framebuffer_height = 4097;
+    rejected("framebuffer height above bound", &changed);
+    changed.framebuffer_width = 17; changed.framebuffer_height = 3;
+    changed.framebuffer_stride = 64;
+    rejected("framebuffer stride shorter than row", &changed);
+    changed.framebuffer_stride = 71;
+    rejected("framebuffer stride not pixel aligned", &changed);
+    changed.framebuffer_width = 1; changed.framebuffer_height = 4096;
+    changed.framebuffer_stride = UINT32_C(1) << 20;
+    rejected("framebuffer byte count must not wrap at 32 bits", &changed);
+    changed.framebuffer_stride = UINT32_MAX - 3;
+    rejected("framebuffer oversized stride product", &changed);
+    changed = *in; changed.framebuffer_width = changed.framebuffer_height = 1;
+    changed.dram_size = (baseline->top_of_kernel_data - baseline->dram_base +
+                        APPLE_MODERN_FRAMEBUFFER_ALIGNMENT - 1) &
+                       ~(APPLE_MODERN_FRAMEBUFFER_ALIGNMENT - 1);
+    rejected("framebuffer exceeds remaining DRAM", &changed);
+    changed = *in; changed.framebuffer_width = changed.framebuffer_height = 1;
+    changed.dram_size -= PAGE;
+    rejected("framebuffer unaligned managed DRAM tail", &changed);
+}
+
 int main(int argc, char **argv)
 {
     AppleModernBootInput in = fixture(), changed;
     AppleModernBootLayout out, repeated;
     Error *err = NULL;
+    setvbuf(stdout, NULL, _IONBF, 0);
     if (!apple_modern_boot_layout_build(&in, &out, &err)) {
         fprintf(stderr, "%s\n", err ? err->message : "failure without error");
         return 1;
     }
     assert(!err && out.region_count == 19 && out.copy_count == 24);
+    assert(!out.framebuffer_physical && !out.framebuffer_size);
     assert(out.sptm_entry_physical && out.bootargs_physical);
     checks++;
+    verify_framebuffer_layout(&in, &out);
     changed = in; changed.bootkc.size = 31; rejected("truncated Mach-O", &changed);
     mutate32("wrong ABI", &in, in.bootkc, 8, 0);
     mutate32("wrong file type", &in, in.bootkc, 12, 2);

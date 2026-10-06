@@ -27,6 +27,7 @@ typedef struct ReferenceArgs {
 _Static_assert(sizeof(ReferenceArgs) == 1152, "ARM64 boot_args ABI size");
 _Static_assert(offsetof(ReferenceArgs, command) == 108, "command ABI offset");
 _Static_assert(offsetof(ReferenceArgs, flags) == 1136, "flags ABI offset");
+_Static_assert(offsetof(ReferenceArgs, video) == 40, "Boot_Video ABI offset");
 
 static uint64_t get64(const uint8_t *p)
 {
@@ -113,10 +114,21 @@ static void verify_metadata(const AppleModernBootMetadataInput *input,
     args.revision = args.version = 2;
     args.virt = layout->virtual_base; args.phys = layout->dram_base;
     args.memory = input->has_mte ? layout->dram_size / 32 * 31 : layout->dram_size;
+    args.memory -= layout->framebuffer_size;
     args.top = layout->top_of_kernel_data;
     args.video[0] = input->video.base_address; args.video[1] = input->video.display;
     args.video[2] = input->video.row_bytes; args.video[3] = input->video.width;
     args.video[4] = input->video.height; args.video[5] = input->video.depth;
+    if (input->components->framebuffer_width) {
+        args.video[0] = layout->framebuffer_physical;
+        args.video[1] = 0;
+        args.video[2] = input->components->framebuffer_stride ?
+                        input->components->framebuffer_stride :
+                        (uint64_t)input->components->framebuffer_width * 4;
+        args.video[3] = input->components->framebuffer_width;
+        args.video[4] = input->components->framebuffer_height;
+        args.video[5] = 32;
+    }
     args.dtree = layout->virtual_base + layout->dtree_physical - layout->dram_base;
     args.dtree_length = output->dtree_size;
     if (input->command_line_length) {
@@ -170,6 +182,131 @@ static void dump_file(const char *directory, const char *name,
     assert(fwrite(data, 1, size, f) == size && !fclose(f));
 }
 
+static void verify_framebuffer_metadata(
+    const AppleModernBootMetadataInput *input,
+    const AppleModernBootMetadata *baseline)
+{
+    AppleModernBootInput changed = *input->components;
+    AppleModernBootMetadataInput configured = *input, bad;
+    AppleModernBootMetadata output = {0}, repeated = {0};
+    AppleModernBlob view;
+    Error *error = NULL;
+    configured.components = &changed;
+    /* Existing explicit ABI callers retain their values when disabled. */
+    configured.video = (AppleModernBootVideo){0x1234, 1, 128, 32, 24, 32};
+    assert(apple_modern_boot_metadata_build(&configured, &output, &error));
+    verify_metadata(&configured, &output);
+    apple_modern_boot_metadata_clear(&output);
+    configured.video = (AppleModernBootVideo){0};
+    changed.framebuffer_width = 17;
+    changed.framebuffer_height = 3;
+    assert(apple_modern_boot_metadata_build(&configured, &output, &error));
+    uint64_t framebuffer_base = baseline->layout.dram_base +
+        (input->has_mte ? baseline->layout.dram_size / 32 * 31 :
+                          baseline->layout.dram_size) -
+        APPLE_MODERN_FRAMEBUFFER_ALIGNMENT;
+    assert(!error && output.layout.framebuffer_physical ==
+           framebuffer_base &&
+           output.layout.framebuffer_size == APPLE_MODERN_FRAMEBUFFER_ALIGNMENT &&
+           output.layout.top_of_kernel_data ==
+           baseline->layout.top_of_kernel_data);
+    verify_metadata(&configured, &output);
+    const uint64_t expected_video[] = {
+        framebuffer_base, 0, 68, 17, 3, 32,
+    };
+    for (size_t i = 0; i < 6; i++) {
+        assert(get64(output.bootargs + 40 + i * 8) == expected_video[i]);
+    }
+    checks++;
+    /* No graphics driver node is synthesized into the original tree. */
+    assert(!apple_modern_adt_property(
+        (AppleModernBlob){output.dtree, output.dtree_size},
+        "/vram", "reg", &view, &error));
+    assert(error && !view.data && !view.size);
+    error_free(error); error = NULL; checks++;
+    assert(apple_modern_boot_metadata_build(&configured, &repeated, &error));
+    assert(output.dtree != repeated.dtree &&
+           output.dtree_size == repeated.dtree_size &&
+           !memcmp(output.dtree, repeated.dtree, output.dtree_size) &&
+           !memcmp(output.bootargs, repeated.bootargs, sizeof(output.bootargs)));
+    apple_modern_boot_metadata_clear(&repeated); checks++;
+    /* Every explicit Video field must agree with the same reservation. */
+    configured.video = (AppleModernBootVideo){expected_video[0], 0, 68, 17, 3, 32};
+    assert(apple_modern_boot_metadata_build(&configured, &repeated, &error));
+    verify_metadata(&configured, &repeated);
+    apple_modern_boot_metadata_clear(&repeated);
+    bad = configured; bad.video.base_address += PAGE;
+    rejected_metadata("framebuffer explicit base conflict", &bad);
+    bad = configured; bad.video.display = 1;
+    rejected_metadata("framebuffer explicit console mode conflict", &bad);
+    bad = configured; bad.video.row_bytes += 4;
+    rejected_metadata("framebuffer explicit stride conflict", &bad);
+    bad = configured; bad.video.width++;
+    rejected_metadata("framebuffer explicit width conflict", &bad);
+    bad = configured; bad.video.height++;
+    rejected_metadata("framebuffer explicit height conflict", &bad);
+    bad = configured; bad.video.depth = 24;
+    rejected_metadata("framebuffer explicit format conflict", &bad);
+    configured.video = (AppleModernBootVideo){0};
+    uint64_t saved_dram_size = changed.dram_size;
+    /* Full DRAM accommodates this reservation; the MTE-adjusted range does not. */
+    changed.dram_size = UINT64_C(128) << 20;
+    changed.framebuffer_width = 4096; changed.framebuffer_height = 896;
+    AppleModernBootLayout physical_layout;
+    assert(apple_modern_boot_layout_build(&changed, &physical_layout, &error));
+    assert(!error && physical_layout.top_of_kernel_data <=
+           physical_layout.framebuffer_physical);
+    rejected_metadata("framebuffer outside MTE usable RAM", &configured);
+    changed.dram_size = saved_dram_size;
+    changed.framebuffer_width = 17;
+    apple_modern_boot_metadata_clear(&output);
+    changed.framebuffer_height = 4096;
+    changed.framebuffer_stride = 1024;
+    changed.ramdisk = (AppleModernBlob){changed.bootkc.data, 1};
+    assert(apple_modern_boot_metadata_build(&configured, &output, &error));
+    assert(output.layout.framebuffer_physical ==
+           framebuffer_base - APPLE_MODERN_FRAMEBUFFER_ALIGNMENT &&
+           output.layout.framebuffer_size == 2 * APPLE_MODERN_FRAMEBUFFER_ALIGNMENT &&
+           get64(output.bootargs + 56) == 1024 &&
+           output.layout.top_of_kernel_data ==
+           baseline->layout.top_of_kernel_data + PAGE);
+    verify_metadata(&configured, &output);
+    apple_modern_boot_metadata_clear(&output);
+    changed.ramdisk = (AppleModernBlob){0};
+    /* An existing /vram node keeps unrelated properties, and receives reg. */
+    uint8_t *dt = (uint8_t *)changed.dtree.data;
+    size_t vram_begin = changed.dtree.size, cursor = vram_begin;
+    put32(dt + 4, 4);
+    put32(dt + cursor, 3); put32(dt + cursor + 4, 0); cursor += 8;
+    prop(dt, &cursor, "name", "vram");
+    prop(dt, &cursor, "compatible", "unchanged boot video");
+    size_t vram_without_reg = cursor;
+    prop(dt, &cursor, "reg", "old firmware address");
+    changed.dtree.size = cursor;
+    assert(apple_modern_boot_metadata_build(&configured, &output, &error));
+    verify_metadata(&configured, &output);
+    view = prop_view(&output, "/vram", "reg");
+    assert(view.size == 16 &&
+           get64(view.data) == output.layout.framebuffer_physical &&
+           get64(view.data + 8) == output.layout.framebuffer_size);
+    same_property(&changed, &output, "/vram", "compatible"); checks++;
+    apple_modern_boot_metadata_clear(&output);
+    put32(dt + vram_begin, 2); changed.dtree.size = vram_without_reg;
+    assert(apple_modern_boot_metadata_build(&configured, &output, &error));
+    view = prop_view(&output, "/vram", "reg");
+    assert(view.size == 16 &&
+           get64(view.data) == output.layout.framebuffer_physical &&
+           get64(view.data + 8) == output.layout.framebuffer_size);
+    same_property(&changed, &output, "/vram", "compatible"); checks++;
+    apple_modern_boot_metadata_clear(&output);
+    size_t vram_bytes = changed.dtree.size - vram_begin;
+    memcpy(dt + changed.dtree.size, dt + vram_begin, vram_bytes);
+    changed.dtree.size += vram_bytes; put32(dt + 4, 5);
+    rejected_metadata("framebuffer duplicate vram path", &configured);
+    /* Restore the shared fixture's original root child count. */
+    put32(dt + 4, 3);
+}
+
 int main(int argc, char **argv)
 {
     AppleModernBootInput components = metadata_fixture(), changed;
@@ -183,11 +320,13 @@ int main(int argc, char **argv)
     uint8_t *ramdisk = calloc(1, 37);
     uint8_t *alias_storage = calloc(1, sizeof(AppleModernBootMetadata));
     char long_command[1024];
+    setvbuf(stdout, NULL, _IONBF, 0);
     assert(original_dt && ramdisk && alias_storage);
     ramdisk[0] = 1; ramdisk[1] = 2; ramdisk[2] = 3;
     memcpy(original_dt, components.dtree.data, components.dtree.size);
     assert(apple_modern_boot_metadata_build(&input, &output, &error));
     assert(!error); verify_metadata(&input, &output);
+    verify_framebuffer_metadata(&input, &output);
     same_property(&components, &output, "/", "unchanged-root");
     same_property(&components, &output, "/arm-io/sgx", "compatible");
     same_property(&components, &output, "/cpus/cpu0", "state");

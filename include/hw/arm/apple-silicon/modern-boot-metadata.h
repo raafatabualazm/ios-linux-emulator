@@ -16,6 +16,10 @@ typedef struct AppleModernBootMetadataInput {
     const char *command_line;
     size_t command_line_length;
     bool has_mte;
+    /* Without a framebuffer reservation this retains the explicit ABI values.
+     * Otherwise zero selects the derived text-console geometry; a nonzero
+     * explicit description must exactly match that reserved framebuffer.
+     */
     AppleModernBootVideo video;
     uint64_t boot_flags;
     /* Zero selects the computed reservation; a smaller budget is allowed. */
@@ -34,7 +38,10 @@ typedef struct AppleModernBootMetadata {
 
 /*
  * Revalidate components/layout and serialize owned normal boot metadata.
- * Keep all original ADT devices and unrelated properties. No guest-memory
+ * Keep all original ADT devices and unrelated properties. An enabled boot
+ * framebuffer updates an existing /vram/reg and PurpleGfxMem to its reserved
+ * address/size, after any MTE adjustment, and excludes it from boot_args.memSize.
+ * No guest-memory
  * writes, executable/security patches, signature checks or guest execution.
  * Optional ramdisk matching/provenance must be established by the caller.
  * Output must be fresh or previously cleared. Disjoint failures clear output;

@@ -3,9 +3,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * This is not a complete T8140 platform. Its default prepares memory and halts
- * the CPU. The guarded CPU compatibility profile is enabled, while remaining
- * platform devices are separate implementation gates. No executable bytes or
- * guest policy are patched here.
+ * the CPU. Platform devices are separate implementation gates. Existing
+ * ignition/PAC compatibility modes are explicitly opt-in; see their helpers.
  */
 #include "qemu/osdep.h"
 #include "qapi/error.h"
@@ -20,6 +19,7 @@
 #include "hw/arm/apple-silicon/modern-board-regions.h"
 #include "hw/arm/apple-silicon/modern-amcc.h"
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
+#include "hw/arm/apple-silicon/modern-boot-display.h"
 #include "hw/char/apple_uart.h"
 #include "system/address-spaces.h"
 #include "system/reset.h"
@@ -50,8 +50,10 @@ struct AppleModernMachine {
     bool has_amcc;
     bool img4_ignition_compat;
     bool pauth_compat;
+    bool boot_display;
     bool prepare_only, mte, initialized;
     uint64_t timebase_frequency;
+    uint32_t display_width, display_height, display_stride;
 };
 
 static bool read_asset(const char *path, AppleModernBlob *blob,
@@ -515,6 +517,9 @@ static void modern_init(MachineState *machine)
         .txm = s->blobs[ASSET_TXM], .dtree = s->blobs[ASSET_DTREE],
         .trustcache = s->blobs[ASSET_TC], .ramdisk = s->blobs[ASSET_RAMDISK],
         .dram_base = UINT64_C(1) << 40, .dram_size = machine->ram_size,
+        .framebuffer_width = s->boot_display ? s->display_width : 0,
+        .framebuffer_height = s->boot_display ? s->display_height : 0,
+        .framebuffer_stride = s->boot_display ? s->display_stride : 0,
     };
     metadata_input.components = &s->components;
     metadata_input.command_line = s->boot_command_line;
@@ -557,6 +562,15 @@ static void modern_init(MachineState *machine)
                            machine->ram_size, &error_fatal);
     memory_region_add_subregion(get_system_memory(), s->components.dram_base,
                                 &s->ram);
+    if (s->boot_display && !apple_modern_boot_display_create(
+            &s->ram, s->metadata.layout.framebuffer_physical -
+                     s->components.dram_base,
+            s->display_width, s->display_height,
+            s->display_stride ? s->display_stride : s->display_width * 4,
+            serial_hd(0), &error)) {
+        error_report_err(error);
+        exit(EXIT_FAILURE);
+    }
     for (size_t i = 0; i < s->board_regions.count; i++) {
         AppleModernBoardRegion *r = &s->board_regions.windows[i];
         memory_region_init_ram(&s->cpu_register_ram[i], NULL, r->name,
@@ -671,9 +685,34 @@ ASSET_PROPERTY(ramdisk, ASSET_RAMDISK)
       if (check_mutable(s, errp)) { s->field = value; } }
 BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
+BOOL_PROPERTY(boot_display, boot_display)
 BOOL_PROPERTY(prepare_only, prepare_only)
 BOOL_PROPERTY(mte, mte)
 #undef BOOL_PROPERTY
+
+static void get_display_geometry(Object *obj, Visitor *visitor, const char *name,
+                                 void *opaque, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    size_t offset = (size_t)opaque;
+    uint32_t *field = (uint32_t *)((uint8_t *)s + offset);
+    uint32_t value = *field;
+
+    visit_type_uint32(visitor, name, &value, errp);
+}
+
+static void set_display_geometry(Object *obj, Visitor *visitor, const char *name,
+                                 void *opaque, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    size_t offset = (size_t)opaque;
+    uint32_t *field = (uint32_t *)((uint8_t *)s + offset);
+    uint32_t value;
+
+    if (check_mutable(s, errp) && visit_type_uint32(visitor, name, &value, errp)) {
+        *field = value; /* Cross-field bounds are validated by the layout. */
+    }
+}
 
 static void get_frequency(Object *obj, Visitor *visitor, const char *name,
                            void *opaque, Error **errp)
@@ -702,6 +741,8 @@ static void modern_instance_init(Object *obj)
     AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
     s->prepare_only = true;
     s->timebase_frequency = 24000000; /* Configurable experiment value. */
+    s->display_width = 1024;
+    s->display_height = 768;
 }
 
 static void modern_finalize(Object *obj)
@@ -718,7 +759,7 @@ static void modern_finalize(Object *obj)
 static void modern_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
-    mc->desc = "Modern Apple boot experiment (RAM/registers/UART; no GUI)";
+    mc->desc = "Modern Apple boot experiment (optional boot framebuffer)";
     mc->init = modern_init;
     mc->max_cpus = 1;
     mc->default_ram_size = 8 * GiB;
@@ -737,6 +778,20 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    get_img4_ignition_compat,
                                    set_img4_ignition_compat);
     object_class_property_add_bool(oc, "prepare-only", get_prepare_only, set_prepare_only);
+    object_class_property_add_bool(oc, "boot-display", get_boot_display,
+                                   set_boot_display);
+    object_class_property_add(oc, "boot-display-width", "uint32",
+                              get_display_geometry, set_display_geometry,
+                              NULL, (void *)offsetof(AppleModernMachine,
+                                                     display_width));
+    object_class_property_add(oc, "boot-display-height", "uint32",
+                              get_display_geometry, set_display_geometry,
+                              NULL, (void *)offsetof(AppleModernMachine,
+                                                     display_height));
+    object_class_property_add(oc, "boot-display-stride", "uint32",
+                              get_display_geometry, set_display_geometry,
+                              NULL, (void *)offsetof(AppleModernMachine,
+                                                     display_stride));
     object_class_property_add_bool(oc, "mte", get_mte, set_mte);
     object_class_property_add(oc, "timebase-frequency", "uint64",
                               get_frequency, set_frequency, NULL, NULL);

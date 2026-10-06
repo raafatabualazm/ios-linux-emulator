@@ -441,16 +441,39 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
     Image images[3] = {0};
     DTree tree = { .blob = in->dtree };
     uint64_t tc_size, before, index, cursor, sptm_base, start;
+    uint64_t framebuffer_size = 0;
     Image *bkc = &images[0], *sptm = &images[1], *txm = &images[2];
     if ((!in->ramdisk.data != !in->ramdisk.size) ||
         in->ramdisk.size > APPLE_MODERN_MAX_RAMDISK_SIZE) {
         return fail(errp, "missing or oversized optional ramdisk bytes");
+    }
+    if (in->framebuffer_width || in->framebuffer_height ||
+        in->framebuffer_stride) {
+        uint64_t stride = in->framebuffer_stride ? in->framebuffer_stride :
+                          (uint64_t)in->framebuffer_width * 4;
+        if (!in->framebuffer_width || !in->framebuffer_height ||
+            in->framebuffer_width > APPLE_MODERN_MAX_FRAMEBUFFER_DIMENSION ||
+            in->framebuffer_height > APPLE_MODERN_MAX_FRAMEBUFFER_DIMENSION ||
+            stride < (uint64_t)in->framebuffer_width * 4 || stride % 4) {
+            return fail(errp, "invalid XRGB framebuffer geometry/stride");
+        }
+        /* Geometry bounds make this uint64_t product and rounding safe. */
+        framebuffer_size = (stride * in->framebuffer_height +
+                            APPLE_MODERN_FRAMEBUFFER_ALIGNMENT - 1) &
+                           ~(APPLE_MODERN_FRAMEBUFFER_ALIGNMENT - 1);
+        if (framebuffer_size > APPLE_MODERN_MAX_FRAMEBUFFER_SIZE) {
+            return fail(errp, "framebuffer reservation exceeds 64 MiB");
+        }
     }
     if (!in->dram_size || in->dram_base != (UINT64_C(1) << 40) ||
         in->dram_size > VIRTUAL_INDEX_MASK + 1 ||
         in->dram_size % APPLE_MODERN_PAGE_SIZE ||
         in->dram_size > UINT64_MAX - in->dram_base) {
         return fail(errp, "unsupported/unaligned/overflowing T8140 DRAM");
+    }
+    if (framebuffer_size &&
+        in->dram_size % APPLE_MODERN_FRAMEBUFFER_ALIGNMENT) {
+        return fail(errp, "framebuffer requires a 2 MiB-aligned DRAM tail");
     }
     if (!parse_image(in->bootkc, 12, bkc, errp) ||
         !parse_image(in->sptm, 2, sptm, errp) ||
@@ -597,6 +620,20 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
             .memory_size = rounded,
         };
         cursor += rounded;
+    }
+    if (framebuffer_size) {
+        uint64_t framebuffer_base;
+        if (framebuffer_size > out->dram_size ||
+            cursor - out->dram_base > out->dram_size - framebuffer_size) {
+            return fail(errp, "framebuffer carveout overlaps boot data");
+        }
+        framebuffer_base = out->dram_base + out->dram_size - framebuffer_size;
+        if (!region(out, "PurpleGfxMem", framebuffer_base,
+                    framebuffer_size, errp)) {
+            return false;
+        }
+        out->framebuffer_physical = framebuffer_base;
+        out->framebuffer_size = framebuffer_size;
     }
     out->top_of_kernel_data = cursor;
     out->sptm_entry_physical = sptm_base + sptm->entry - sptm->low;
