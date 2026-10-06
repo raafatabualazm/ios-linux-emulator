@@ -2170,6 +2170,115 @@ static const ARMCPRegInfo generic_timer_cp_reginfo[] = {
 };
 
 /*
+ * Apple timer compatibility from Darwin-VM/qemu-sptm 2867d847d347.
+ *
+ * Darwin's helper.c maps these eight views to the ordinary generic timers;
+ * dumpregs.py stores VOFF, KCTL and RDIR without implementing their hardware
+ * effects. Keep that simplified model explicit and opt-in. In particular,
+ * AGTCNTVOFF does not change CNTVOFF_EL2, and the Apple KCTL/RDIR values do
+ * not replace the architectural access checks or counter frequency.
+ *
+ * Shared timer state belongs to the architectural register definitions above.
+ * Mark Apple views as aliases so they cannot independently reset or migrate
+ * the same state. Counter/TVAL views already have no raw state.
+ */
+static const ARMCPRegInfo apple_modern_timer_cp_reginfo[] = {
+    { .name = "AGTCNTP_CTL_EL0", .state = ARM_CP_STATE_AA64,
+      .opc0 = 3, .opc1 = 1, .crn = 15, .crm = 13, .opc2 = 4,
+      .type = ARM_CP_IO | ARM_CP_ALIAS, .access = PL0_RW,
+      .accessfn = gt_ptimer_access,
+      .nv2_redirect_offset = 0x180 | NV2_REDIR_NV1,
+      .fieldoffset = offsetof(CPUARMState, cp15.c14_timer[GTIMER_PHYS].ctl),
+      .readfn = gt_phys_redir_ctl_read, .raw_readfn = raw_read,
+      .writefn = gt_phys_redir_ctl_write, .raw_writefn = raw_write,
+    },
+    { .name = "AGTCNTV_CTL_EL0", .state = ARM_CP_STATE_AA64,
+      .opc0 = 3, .opc1 = 1, .crn = 15, .crm = 0, .opc2 = 5,
+      .type = ARM_CP_IO | ARM_CP_ALIAS, .access = PL0_RW,
+      .accessfn = gt_vtimer_access,
+      .nv2_redirect_offset = 0x170 | NV2_REDIR_NV1,
+      .fieldoffset = offsetof(CPUARMState, cp15.c14_timer[GTIMER_VIRT].ctl),
+      .readfn = gt_virt_redir_ctl_read, .raw_readfn = raw_read,
+      .writefn = gt_virt_redir_ctl_write, .raw_writefn = raw_write,
+    },
+    { .name = "AGTCNTP_TVAL_EL0", .state = ARM_CP_STATE_AA64,
+      .opc0 = 3, .opc1 = 1, .crn = 15, .crm = 11, .opc2 = 4,
+      .type = ARM_CP_NO_RAW | ARM_CP_IO | ARM_CP_ALIAS, .access = PL0_RW,
+      .accessfn = gt_ptimer_access,
+      .readfn = gt_phys_redir_tval_read, .writefn = gt_phys_redir_tval_write,
+    },
+    { .name = "AGTCNTV_TVAL_EL0", .state = ARM_CP_STATE_AA64,
+      .opc0 = 3, .opc1 = 1, .crn = 15, .crm = 15, .opc2 = 4,
+      .type = ARM_CP_NO_RAW | ARM_CP_IO | ARM_CP_ALIAS, .access = PL0_RW,
+      .accessfn = gt_vtimer_access,
+      .readfn = gt_virt_redir_tval_read, .writefn = gt_virt_redir_tval_write,
+    },
+    { .name = "ACNTPCT_EL0", .state = ARM_CP_STATE_AA64,
+      .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 10, .opc2 = 5,
+      .access = PL0_R, .type = ARM_CP_NO_RAW | ARM_CP_IO | ARM_CP_ALIAS,
+      .accessfn = gt_pct_access, .readfn = gt_cnt_read,
+    },
+    { .name = "AGTCNTPCT_EL0", .state = ARM_CP_STATE_AA64,
+      .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 11, .opc2 = 6,
+      .access = PL0_R, .type = ARM_CP_NO_RAW | ARM_CP_IO | ARM_CP_ALIAS,
+      .accessfn = gt_pct_access, .readfn = gt_cnt_read,
+    },
+    { .name = "ACNTVCT_EL0", .state = ARM_CP_STATE_AA64,
+      .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 10, .opc2 = 6,
+      .access = PL0_R, .type = ARM_CP_NO_RAW | ARM_CP_IO | ARM_CP_ALIAS,
+      .accessfn = gt_vct_access, .readfn = gt_virt_cnt_read,
+    },
+    { .name = "AGTCNTVCT_EL0", .state = ARM_CP_STATE_AA64,
+      .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 11, .opc2 = 7,
+      .access = PL0_R, .type = ARM_CP_NO_RAW | ARM_CP_IO | ARM_CP_ALIAS,
+      .accessfn = gt_vct_access, .readfn = gt_virt_cnt_read,
+    },
+    { .name = "AGTCNTVOFF_EL2", .state = ARM_CP_STATE_AA64,
+      .opc0 = 3, .opc1 = 1, .crn = 15, .crm = 9, .opc2 = 4,
+      .access = PL2_RW, .resetvalue = 0,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_timers.voff_el2),
+    },
+    { .name = "AGTCNTKCTL_EL1", .state = ARM_CP_STATE_AA64,
+      .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 9, .opc2 = 6,
+      .access = PL1_RW, .resetvalue = 0,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_timers.kctl_el1),
+    },
+    { .name = "AGTCNTRDIR_EL1", .state = ARM_CP_STATE_AA64,
+      .opc0 = 3, .opc1 = 1, .crn = 15, .crm = 1, .opc2 = 5,
+      .access = PL1_RW, .resetvalue = 0,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_timers.rdir_el[1]),
+    },
+    { .name = "AGTCNTRDIR_EL2", .state = ARM_CP_STATE_AA64,
+      .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 14, .opc2 = 5,
+      .access = PL2_RW, .resetvalue = 0,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_timers.rdir_el[2]),
+    },
+};
+
+bool arm_apple_modern_timers_validate(ARMCPU *cpu, Error **errp)
+{
+    CPUARMState *env = &cpu->env;
+
+    if (!cpu->apple_modern_timers) {
+        return true;
+    }
+    if (!tcg_enabled() || !arm_feature(env, ARM_FEATURE_AARCH64) ||
+        !arm_feature(env, ARM_FEATURE_GENERIC_TIMER) || !cpu->has_el2 ||
+        !arm_feature(env, ARM_FEATURE_EL2) || cpu->has_el3 ||
+        !cpu_isar_feature(aa64_vh, cpu)) {
+        error_setg(errp, "apple-modern-timers requires AArch64 TCG, generic "
+                   "timers, EL2/VHE and has_el3=false");
+        return false;
+    }
+    if (arm_feature(env, ARM_FEATURE_GXF)) {
+        error_setg(errp, "apple-modern-timers cannot be combined with "
+                   "legacy Apple GXF");
+        return false;
+    }
+    return true;
+}
+
+/*
  * FEAT_ECV adds extra views of CNTVCT_EL0 and CNTPCT_EL0 which
  * are "self-synchronizing". For QEMU all sysregs are self-synchronizing,
  * so our implementations here are identical to the normal registers.
@@ -2695,7 +2804,11 @@ static void vmsa_tcr_ttbr_el2_write(CPUARMState *env, const ARMCPRegInfo *ri,
     if (extract64(raw_read(env, ri) ^ value, 48, 16) &&
         (arm_hcr_el2_eff(env) & HCR_E2H)) {
         uint32_t mask = ARMMMUIdxBit_E20_0;
-        if (arm_is_guarded(env)) {
+        if (env_archcpu(env)->apple_modern_guarded) {
+            /* Modern EL/GL share the architectural TCR/TTBR banks. */
+            mask |= ARMMMUIdxBit_E20_2 | ARMMMUIdxBit_E20_2_PAN |
+                    ARMMMUIdxBit_GE20_2 | ARMMMUIdxBit_GE20_2_PAN;
+        } else if (arm_is_guarded(env)) {
             mask |= ARMMMUIdxBit_GE20_2 | ARMMMUIdxBit_GE20_2_PAN;
         } else {
             mask |= ARMMMUIdxBit_E20_2 | ARMMMUIdxBit_E20_2_PAN;
@@ -4407,7 +4520,8 @@ void arm_define_vhe_alias(ARMCPU *cpu, uint32_t src_key, uint32_t dst_key,
 
     src_info = src_reg;
     dst_info = dst_reg;
-    if (cpu->apple_modern_gxf) {
+    if (cpu->apple_modern_gxf || cpu->apple_modern_timers ||
+        cpu->apple_modern_sysregs) {
         /* Alias callbacks need unredirected metadata with CPU lifetime.
          * The register dictionary may move its entries during insertion.
          */
@@ -6560,6 +6674,9 @@ void register_cp_regs_for_features(ARMCPU *cpu)
     }
     if (arm_feature(env, ARM_FEATURE_GENERIC_TIMER)) {
         define_arm_cp_regs(cpu, generic_timer_cp_reginfo);
+        if (cpu->apple_modern_timers) {
+            define_arm_cp_regs(cpu, apple_modern_timer_cp_reginfo);
+        }
     }
     if (cpu_isar_feature(aa64_ecv_traps, cpu)) {
         define_arm_cp_regs(cpu, gen_timer_ecv_cp_reginfo);
@@ -7064,6 +7181,9 @@ void register_cp_regs_for_features(ARMCPU *cpu)
     if (cpu->apple_modern_gxf) {
         arm_register_apple_modern_gxf(cpu);
     }
+    if (cpu->apple_modern_sysregs) {
+        arm_register_apple_modern_sysregs(cpu);
+    }
 
     /*
      * Register redirections and aliases must be done last,
@@ -7073,6 +7193,16 @@ void register_cp_regs_for_features(ARMCPU *cpu)
         define_arm_vh_e2h_redirects_aliases(cpu);
         if (cpu->apple_modern_gxf) {
             arm_register_apple_modern_gxf_aliases(cpu);
+        }
+        if (cpu->apple_modern_sysregs) {
+            arm_register_apple_modern_sysreg_aliases(cpu);
+        }
+        if (cpu->apple_modern_timers) {
+            arm_define_vhe_alias(cpu,
+                ENCODE_AA64_CP_REG(CP_REG_ARM64_SYSREG_CP, 15, 1, 3, 1, 5),
+                ENCODE_AA64_CP_REG(CP_REG_ARM64_SYSREG_CP, 15, 14, 3, 4, 5),
+                ENCODE_AA64_CP_REG(CP_REG_ARM64_SYSREG_CP, 15, 14, 3, 4, 6),
+                "AGTCNTRDIR_EL1", "AGTCNTRDIR_EL2", "AGTCNTRDIR_EL12");
         }
     }
 }
@@ -8636,13 +8766,22 @@ static void arm_cpu_do_interrupt_aarch64(CPUState *cs)
     unsigned int new_el = env->exception.target_el;
     vaddr addr = env->cp15.vbar_el[new_el];
     bool genter = false;
+    bool modern_gl = arm_is_modern_guarded(env);
+    bool modern_genter = cpu->apple_modern_guarded &&
+                         cs->exception_index == EXCP_GENTER;
+    bool modern_bank = modern_gl || modern_genter;
     unsigned int new_mode = aarch64_pstate_mode(new_el, true);
     unsigned int old_mode;
     unsigned int cur_el = arm_current_el(env);
     int rt;
 
-    if (arm_is_guarded(env)) {
+    if (modern_gl) {
+        addr = env->modern_gxf.vbar_gl[new_el];
+    } else if (arm_is_guarded(env)) {
         addr = env->gxf.vbar_gl[new_el];
+    }
+    if (cpu->apple_modern_guarded) {
+        env->modern_gxf.aspsr_gl[new_el] = env->modern_gxf.currentg;
     }
 
     if (tcg_enabled()) {
@@ -8709,7 +8848,9 @@ static void arm_cpu_do_interrupt_aarch64(CPUState *cs)
             addr += 0x180;
         }
 
-        if (arm_is_guarded(env)) {
+        if (modern_bank) {
+            env->modern_gxf.far_gl[new_el] = env->exception.vaddress;
+        } else if (arm_is_guarded(env)) {
             env->gxf.far_gl[new_el] = env->exception.vaddress;
             qemu_log_mask(CPU_LOG_INT, "...with FAR_GL 0x%" PRIx64 "\n",
                         env->gxf.far_gl[new_el]);
@@ -8764,7 +8905,9 @@ static void arm_cpu_do_interrupt_aarch64(CPUState *cs)
             break;
         }
 
-        if (arm_is_guarded(env)) {
+        if (modern_bank) {
+            env->modern_gxf.esr_gl[new_el] = env->exception.syndrome;
+        } else if (arm_is_guarded(env)) {
             env->gxf.esr_gl[new_el] = env->exception.syndrome;
         } else {
             env->cp15.esr_el[new_el] = env->exception.syndrome;
@@ -8782,14 +8925,21 @@ static void arm_cpu_do_interrupt_aarch64(CPUState *cs)
         addr += 0x100;
         break;
     case EXCP_GENTER:
-        addr = env->gxf.gxf_enter_el[new_el];
+        if (modern_genter) {
+            addr = env->modern_gxf.entry_el[new_el];
+            env->modern_gxf.esr_gl[new_el] = env->exception.syndrome;
+        } else {
+            addr = env->gxf.gxf_enter_el[new_el];
+        }
         genter = true;
         break;
     case EXCP_VSERR:
         addr += 0x180;
         /* Construct the SError syndrome from IDS and ISS fields. */
         env->exception.syndrome = syn_serror(env->cp15.vsesr_el2 & 0x1ffffff);
-        if (arm_is_guarded(env)) {
+        if (modern_bank) {
+            env->modern_gxf.esr_gl[new_el] = env->exception.syndrome;
+        } else if (arm_is_guarded(env)) {
             env->gxf.esr_gl[new_el] = env->exception.syndrome;
         } else {
             env->cp15.esr_el[new_el] = env->exception.syndrome;
@@ -8803,7 +8953,9 @@ static void arm_cpu_do_interrupt_aarch64(CPUState *cs)
         old_mode = pstate_read(env);
         aarch64_save_sp(env, arm_current_el(env));
 
-        if (genter || arm_is_guarded(env)) {
+        if (modern_bank) {
+            env->modern_gxf.elr_gl[new_el] = env->pc;
+        } else if (genter || arm_is_guarded(env)) {
             env->gxf.elr_gl[new_el] = env->pc;
         } else {
             env->elr_el[new_el] = env->pc;
@@ -8831,14 +8983,19 @@ static void arm_cpu_do_interrupt_aarch64(CPUState *cs)
         env->condexec_bits = 0;
     }
 
-    if (genter || arm_is_guarded(env)) {
+    if (modern_bank) {
+        env->modern_gxf.spsr_gl[new_el] = old_mode;
+    } else if (genter || arm_is_guarded(env)) {
         env->gxf.spsr_gl[new_el] = old_mode;
     } else {
         env->banked_spsr[aarch64_banked_spsr_index(new_el)] = old_mode;
     }
 
     qemu_log_mask(CPU_LOG_INT, "...with SPSR 0x%x\n", old_mode);
-    if (genter || arm_is_guarded(env)) {
+    if (modern_bank) {
+        qemu_log_mask(CPU_LOG_INT, "...with ELR_GL 0x%" PRIx64 "\n",
+                      env->modern_gxf.elr_gl[new_el]);
+    } else if (genter || arm_is_guarded(env)) {
         qemu_log_mask(CPU_LOG_INT, "...with ELR_GL 0x%" PRIx64 "\n",
                     env->gxf.elr_gl[new_el]);
     } else {
@@ -8887,7 +9044,12 @@ static void arm_cpu_do_interrupt_aarch64(CPUState *cs)
     }
 
     pstate_write(env, PSTATE_DAIF | new_mode);
-    env->gxf.gxf_status_el[new_el] |= genter;
+    if (modern_genter) {
+        /* Save the ordinary SP above before selecting the guarded bank. */
+        env->modern_gxf.currentg = 1;
+    } else {
+        env->gxf.gxf_status_el[new_el] |= genter;
+    }
     env->aarch64 = true;
     aarch64_restore_sp(env, new_el);
 
@@ -9445,7 +9607,7 @@ ARMMMUIdx arm_mmu_idx_el(CPUARMState *env, int el)
         assert_not_reached();
     }
 
-    if (arm_is_guarded(env) && (el > 0)) {
+    if (arm_is_any_guarded(env) && (el > 0)) {
         idx |= ARM_MMU_IDX_A_GXF;
     }
 

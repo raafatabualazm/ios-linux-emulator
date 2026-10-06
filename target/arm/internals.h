@@ -358,6 +358,10 @@ static inline int r14_bank_number(int mode)
 void arm_cpu_register(const ARMCPUInfo *info);
 
 void register_cp_regs_for_features(ARMCPU *cpu);
+bool arm_apple_modern_timers_validate(ARMCPU *cpu, Error **errp);
+bool arm_apple_modern_sysregs_validate(ARMCPU *cpu, Error **errp);
+void arm_register_apple_modern_sysregs(ARMCPU *cpu);
+void arm_register_apple_modern_sysreg_aliases(ARMCPU *cpu);
 void arm_define_vhe_alias(ARMCPU *cpu, uint32_t src_key, uint32_t dst_key,
                           uint32_t alias_key, const char *src_name,
                           const char *dst_name, const char *alias_name);
@@ -496,6 +500,18 @@ static inline bool arm_is_guarded(CPUARMState *env)
            (env->gxf.gxf_status_el[arm_current_el(env)] & 1);
 }
 
+/* Modern CURRENTG is independent of the legacy per-EL GXF status. */
+static inline bool arm_is_modern_guarded(CPUARMState *env)
+{
+    return env_archcpu(env)->apple_modern_guarded &&
+           (env->modern_gxf.currentg & 1);
+}
+
+static inline bool arm_is_any_guarded(CPUARMState *env)
+{
+    return arm_is_modern_guarded(env) || arm_is_guarded(env);
+}
+
 /* Return true if the processor has SPRR enabled */
 static inline bool arm_is_sprr_enabled(CPUARMState *env)
 {
@@ -529,7 +545,9 @@ static inline bool arm_cpu_data_is_big_endian(CPUARMState *env)
 static inline void aarch64_save_sp(CPUARMState *env, int el)
 {
     if (env->pstate & PSTATE_SP) {
-        if (arm_is_guarded(env)) {
+        if (arm_is_modern_guarded(env)) {
+            env->modern_gxf.sp_gl[el] = env->xregs[31];
+        } else if (arm_is_guarded(env)) {
             env->gxf.sp_gl[el] = env->xregs[31];
         } else {
             env->sp_el[el] = env->xregs[31];
@@ -542,7 +560,9 @@ static inline void aarch64_save_sp(CPUARMState *env, int el)
 static inline void aarch64_restore_sp(CPUARMState *env, int el)
 {
     if (env->pstate & PSTATE_SP) {
-        if (arm_is_guarded(env)) {
+        if (arm_is_modern_guarded(env)) {
+            env->xregs[31] = env->modern_gxf.sp_gl[el];
+        } else if (arm_is_guarded(env)) {
             env->xregs[31] = env->gxf.sp_gl[el];
         } else {
             env->xregs[31] = env->sp_el[el];

@@ -5,6 +5,8 @@ The CPU stays stopped throughout: this checks normal loading, metadata and
 system_reset only. It does not qualify SPTM execution, iOS boot, GUI or IPAs.
 An optional decoded restore ramdisk is checked without mounting its filesystem.
 Firmware RAM dumps are transient; retained reports contain hashes and counts.
+QMP can use bounded child pipes with --qmp-stdio. The optional register reset
+pattern gate uses only owned loader devices and compatibility register RAM.
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import socket
 import struct
 import subprocess
@@ -31,6 +34,7 @@ INDEX_MASK = (1 << 36) - 1
 COMMAND_LINE = "--audit-modern-command-line -v"
 ASSETS = ("bootkc", "sptm", "txm", "dtree", "restore-trustcache")
 MAX_LOG = 1024 * 1024
+MAX_QMP_FRAME = 65536
 sys.dont_write_bytecode = True
 
 
@@ -153,30 +157,76 @@ def expected_layout(blobs: dict[str, bytes]) -> dict:
 
 
 class QMP:
-    def __init__(self, path: Path, guard):
-        self.sock = socket.socket(socket.AF_UNIX)
-        self.sock.settimeout(3)
-        self.stream = None
+    def __init__(self, path: Path | None, guard, process=None):
+        self.sock = None
+        self.input_stream = self.output_stream = None
+        self.buffer = bytearray()
         self.events = []
         self.sequence = 0
         self.guard = guard
         try:
-            self.sock.connect(str(path))
-            self.stream = self.sock.makefile("rwb")
-            require("QMP" in self.receive(), "Valid QMP greeting")
+            if process is None:
+                require(path is not None, "QMP Unix endpoint supplied")
+                self.sock = socket.socket(socket.AF_UNIX)
+                self.sock.settimeout(3)
+                self.sock.connect(str(path))
+                self.read_fd = self.write_fd = self.sock.fileno()
+            else:
+                require(path is None and process.stdin is not None and
+                        process.stdout is not None, "QMP child stdio pipes supplied")
+                self.input_stream = process.stdin
+                self.output_stream = process.stdout
+                self.write_fd = self.input_stream.fileno()
+                self.read_fd = self.output_stream.fileno()
+            os.set_blocking(self.read_fd, False)
+            os.set_blocking(self.write_fd, False)
+            require("QMP" in self.receive(time.monotonic() + 15),
+                    "Valid QMP greeting")
             self.request("qmp_capabilities")
         except BaseException:
             self.close()
             raise
 
-    def receive(self) -> dict:
-        self.sock.settimeout(min(3, self.guard()))
-        line = self.stream.readline(65537)
-        require(bool(line) and len(line) <= 65536 and line.endswith(b"\n"),
-                "Bounded complete QMP response")
-        value = json.loads(line)
-        require(isinstance(value, dict), "QMP response object")
-        return value
+    def receive(self, deadline: float) -> dict:
+        while True:
+            self.guard()
+            newline = self.buffer.find(b"\n")
+            if newline >= 0:
+                require(newline + 1 <= MAX_QMP_FRAME, "QMP response frame bound")
+                line = bytes(self.buffer[:newline + 1])
+                del self.buffer[:newline + 1]
+                value = json.loads(line)
+                require(isinstance(value, dict), "QMP response object")
+                return value
+            require(len(self.buffer) < MAX_QMP_FRAME, "QMP incomplete frame bound")
+            remaining = min(deadline - time.monotonic(), self.guard())
+            require(remaining > 0, "QMP response deadline")
+            readable, _, _ = select.select([self.read_fd], [], [], min(0.1, remaining))
+            if not readable:
+                continue
+            try:
+                data = os.read(self.read_fd,
+                               min(4096, MAX_QMP_FRAME - len(self.buffer)))
+            except (BlockingIOError, InterruptedError):
+                continue
+            require(bool(data), "Complete QMP response before child/endpoint EOF")
+            self.buffer.extend(data)
+
+    def send(self, data: bytes, deadline: float) -> None:
+        require(0 < len(data) <= MAX_QMP_FRAME, "QMP request frame bound")
+        offset = 0
+        while offset < len(data):
+            remaining = min(deadline - time.monotonic(), self.guard())
+            require(remaining > 0, "QMP request write deadline")
+            _, writable, _ = select.select([], [self.write_fd], [], min(0.1, remaining))
+            if not writable:
+                continue
+            try:
+                written = os.write(self.write_fd, data[offset:])
+            except (BlockingIOError, InterruptedError):
+                continue
+            require(written > 0, "QMP request write completed")
+            offset += written
 
     def request(self, command: str, arguments: dict | None = None):
         self.guard()
@@ -184,11 +234,10 @@ class QMP:
         request = {"execute": command, "id": self.sequence}
         if arguments is not None:
             request["arguments"] = arguments
-        self.stream.write(json.dumps(request).encode() + b"\n")
-        self.stream.flush()
         deadline = time.monotonic() + 3
+        self.send(json.dumps(request).encode() + b"\n", deadline)
         while time.monotonic() < deadline:
-            value = self.receive()
+            value = self.receive(deadline)
             if "event" in value:
                 self.events.append(value["event"])
                 require(len(self.events) <= 64, "QMP event count bound")
@@ -200,11 +249,11 @@ class QMP:
         raise RuntimeError("QMP request deadline")
 
     def close(self):
-        try:
-            if self.stream is not None:
-                self.stream.close()
-        finally:
+        if self.sock is not None:
             self.sock.close()
+        for stream in (self.input_stream, self.output_stream):
+            if stream is not None:
+                stream.close()
 
 
 def parse_registers(text: str) -> dict:
@@ -279,6 +328,19 @@ def audit(qmp: QMP, scratch: Path, blobs: dict, layout: dict, parse_adt) -> dict
         for name, value in props.items():
             require(prepared[path][name]["value"] == value, "Normal ADT property value: " + name)
     require("/arm-io/sgx" in prepared, "Original graphics node retained")
+    cpu_windows = []
+    for property_name in ("cpu-impl-reg", "cpm-impl-reg"):
+        value = original["/cpus/cpu0"][property_name]["value"]
+        require(len(value) == 16, "One stock CPU register-window tuple")
+        address, size = struct.unpack("<QQ", value)
+        require(address > 0 and 0 < size <= 1024 * 1024 and
+                address + size <= (1 << 64) - 1,
+                "Bounded stock CPU register-window span")
+        loaded = memory(address, size)
+        require(loaded == bytes(size), "Complete zeroed CPU register window: " + property_name)
+        cpu_windows.append({"property": property_name, "physical_address": hex(address),
+                            "logical_bytes_verified": size,
+                            "sha256": hashlib.sha256(loaded).hexdigest(), "all_zero": True})
     wrapped = struct.pack("<II", 1, 8) + blobs["restore-trustcache"]
     tc_address, tc_size = layout["regions"]["TrustCache"]
     require(memory(tc_address, len(wrapped)) == wrapped, "Unchanged stock trustcache with offsets header")
@@ -340,10 +402,82 @@ def audit(qmp: QMP, scratch: Path, blobs: dict, layout: dict, parse_adt) -> dict
             "segment_samples_verified": segment_samples, "zero_bss_samples_verified": bss_samples,
             "physical_memory_reads": reads, "physical_memory_bytes_read": total,
             "physical_memory_byte_limit": inspection_limit,
+            "cpu_register_windows": cpu_windows,
+            "cpu_register_window_bytes_verified": sum(w["logical_bytes_verified"] for w in cpu_windows),
+            "cpu_register_ram_reset_pattern_write_qualified": False,
             "ramdisk": ramdisk_observation}
 
 
-def run(binary: Path, components: Path, output: Path, ramdisk: Path | None = None) -> dict:
+def audit_register_reset_pattern(qmp: QMP, scratch: Path, windows: list[dict],
+                                 guard) -> dict:
+    """Use standard loader devices to write only compatibility RAM, never PC/code.
+
+    Startup loaders initially write zero, leaving the normal oracle unchanged.
+    Each loader has data/data-len/addr and deliberately no cpu-num or file.
+    Standard QOM unrealize/change-data/realize then reset proves the test
+    inspected nonzero mapped RAM. Unrealizing every loader and resetting again
+    distinguishes actual clearing from RAM only observed zero at construction.
+    """
+    loaders = []
+    expected = {}
+    for index, window in enumerate(windows):
+        size = window["logical_bytes_verified"]
+        require(size >= 16, "CPU register window fits separated test patterns")
+        data = bytearray(size)
+        for at, offset in enumerate((0, size - 8)):
+            name = f"audit-register-pattern-{index}-{at}"
+            pattern = 0x0123456789ABCDEF ^ (index << 32) ^ at
+            path = "/machine/peripheral/" + name
+            require(qmp.request("qom-get", {"path": path, "property": "realized"}) is True,
+                    "Owned startup loader is realized")
+            qmp.request("qom-set", {"path": path, "property": "realized", "value": False})
+            qmp.request("qom-set", {"path": path, "property": "data", "value": pattern})
+            qmp.request("qom-set", {"path": path, "property": "realized", "value": True})
+            data[offset:offset + 8] = struct.pack("<Q", pattern)
+            loaders.append(name)
+        expected[window["property"]] = bytes(data)
+
+    def reset() -> None:
+        before = len(qmp.events)
+        qmp.request("system_reset")
+        deadline = time.monotonic() + 5
+        while "RESET" not in qmp.events[before:]:
+            require(time.monotonic() < deadline, "Register pattern reset completion")
+            qmp.request("query-status")
+            time.sleep(0.01)
+        require(qmp.request("query-status")["running"] is False,
+                "Register pattern test keeps every CPU stopped")
+
+    def inspect(window: dict, wanted: bytes) -> dict:
+        guard()
+        path = scratch / "register-pattern-inspection.bin"
+        path.unlink(missing_ok=True)
+        qmp.request("pmemsave", {"val": int(window["physical_address"], 16),
+                    "size": window["logical_bytes_verified"], "filename": str(path)})
+        require(path.stat().st_size == len(wanted), "Complete register pattern RAM dump")
+        actual = path.read_bytes()
+        path.unlink()
+        require(actual == wanted, "Full register RAM pattern/reset bytes: " + window["property"])
+        return {"property": window["property"], "bytes_verified": len(actual),
+                "sha256": hashlib.sha256(actual).hexdigest()}
+
+    reset()
+    loaded = [inspect(w, expected[w["property"]]) for w in windows]
+    for name in loaders:
+        path = "/machine/peripheral/" + name
+        qmp.request("qom-set", {"path": path, "property": "realized", "value": False})
+        require(qmp.request("qom-get", {"path": path, "property": "realized"}) is False,
+                "Pattern loader unrealized before zero-reset qualification")
+    reset()
+    cleared = [inspect(w, bytes(w["logical_bytes_verified"])) for w in windows]
+    return {"passed": True, "startup_loader_devices_unrealized": len(loaders),
+            "loader_cpu_num_or_file_supplied": False, "guest_execution": False,
+            "nonzero_pattern_full_window_observations": loaded,
+            "zero_after_loader_unrealize_and_reset": cleared}
+
+
+def run(binary: Path, components: Path, output: Path, ramdisk: Path | None = None,
+        qmp_stdio: bool = False, check_register_reset_pattern: bool = False) -> dict:
     asset_paths = {name: components / name for name in ASSETS}
     if ramdisk is not None:
         asset_paths["ramdisk"] = ramdisk
@@ -357,6 +491,10 @@ def run(binary: Path, components: Path, output: Path, ramdisk: Path | None = Non
     report = {"scope": "Whole apple-modern machine: stopped RAM preparation and reset only",
               "binary": str(binary), "binary_sha256": digest(binary)["sha256"],
               "components": str(components), "ramdisk": str(ramdisk) if ramdisk else None,
+              "qmp_transport": "stdio" if qmp_stdio else "unix",
+              "register_reset_pattern_requested": check_register_reset_pattern,
+              "register_reset_pattern": None,
+              "cpu_register_ram_reset_pattern_write_qualified": False,
               "component_hashes_before": before,
               "passed": False, "stage": "startup", "observations": [], "modern_guest_boot": False,
               "guest_execution": False, "gui_verified": False, "ipa_executed": False}
@@ -374,26 +512,45 @@ def run(binary: Path, components: Path, output: Path, ramdisk: Path | None = Non
                 machine += ",ramdisk=" + str(ramdisk)
             argv = [str(binary), "-M", machine, "-m", "8G", "-smp", "1",
                     "-nodefaults", "-display", "none", "-serial", "none",
-                    "-monitor", "none", "-S", "-qmp", "unix:" + str(endpoint) + ",server=on,wait=off"]
+                    "-monitor", "none", "-S", "-qmp",
+                    "stdio" if qmp_stdio else "unix:" + str(endpoint) + ",server=on,wait=off"]
+            if check_register_reset_pattern:
+                nodes, _ = oracle.parse_adt(blobs["dtree"])
+                for index, name in enumerate(("cpu-impl-reg", "cpm-impl-reg")):
+                    value = nodes["/cpus/cpu0"][name]["value"]
+                    require(len(value) == 16, "Startup test loader uses one stock register-window tuple")
+                    address, size = struct.unpack("<QQ", value)
+                    require(address > 0 and 16 <= size <= 1024 * 1024 and
+                            address + size <= (1 << 64) - 1,
+                            "Startup test loader stays in bounded register RAM")
+                    for at, offset in enumerate((0, size - 8)):
+                        argv.extend(["-device", "loader,id=audit-register-pattern-" +
+                                     f"{index}-{at},addr={address + offset},data=0,data-len=8"])
             report["argv"] = argv
             log_path = output / "emulator.log"
             with log_path.open("xb") as log:
-                process = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT)
+                process = subprocess.Popen(argv,
+                    stdin=subprocess.PIPE if qmp_stdio else subprocess.DEVNULL,
+                    stdout=subprocess.PIPE if qmp_stdio else log,
+                    stderr=log if qmp_stdio else subprocess.STDOUT, bufsize=0)
                 def resource_guard() -> float:
                     remaining = 45 - (time.monotonic() - started)
                     require(remaining > 0 and log_path.stat().st_size <= MAX_LOG,
                             "QEMU integration time/log bounds")
                     return remaining
 
-                deadline = time.monotonic() + 15
-                while qmp is None:
-                    require(process.poll() is None, "QEMU startup exited; inspect emulator.log")
-                    require(time.monotonic() < deadline and log_path.stat().st_size <= MAX_LOG,
-                            "QEMU startup resource bounds")
-                    try:
-                        qmp = QMP(endpoint, resource_guard)
-                    except (FileNotFoundError, ConnectionRefusedError):
-                        time.sleep(0.02)
+                if qmp_stdio:
+                    qmp = QMP(None, resource_guard, process)
+                else:
+                    deadline = time.monotonic() + 15
+                    while qmp is None:
+                        require(process.poll() is None, "QEMU startup exited; inspect emulator.log")
+                        require(time.monotonic() < deadline and log_path.stat().st_size <= MAX_LOG,
+                                "QEMU startup resource bounds")
+                        try:
+                            qmp = QMP(endpoint, resource_guard)
+                        except (FileNotFoundError, ConnectionRefusedError):
+                            time.sleep(0.02)
                 report["stage"] = "machine-properties"
                 require(qmp.request("qom-get", {"path": "/machine", "property": "prepare-only"}) is True,
                         "Machine default is prepare-only")
@@ -403,7 +560,10 @@ def run(binary: Path, components: Path, output: Path, ramdisk: Path | None = Non
                         "Configurable experimental timebase default")
                 require(qmp.request("qom-get", {"path": "/machine", "property": "boot-command-line"}) == COMMAND_LINE,
                         "Ordinary custom boot command line supplied through machine property")
-                require(len(qmp.request("query-cpus-fast")) == 1, "One CPU created")
+                cpus = qmp.request("query-cpus-fast")
+                require(len(cpus) == 1 and isinstance(cpus[0].get("qom-path"), str),
+                        "One CPU with its actual QOM path created")
+                cpu_path = cpus[0]["qom-path"]
                 for iteration in range(2):
                     report["stage"] = "reset" if iteration else "initial-registers"
                     require(time.monotonic() - started < 45 and log_path.stat().st_size <= MAX_LOG,
@@ -418,6 +578,11 @@ def run(binary: Path, components: Path, output: Path, ramdisk: Path | None = Non
                             time.sleep(0.01)
                     status = qmp.request("query-status")
                     require(status["running"] is False, "CPU remains stopped; no guest execution requested")
+                    cpu_properties = {}
+                    for name in ("apple-modern-gxf", "apple-modern-timers", "apple-modern-guarded"):
+                        value = qmp.request("qom-get", {"path": cpu_path, "property": name})
+                        require(value is True, "Modern CPU property enabled: " + name)
+                        cpu_properties[name] = value
                     registers = qmp.request("human-monitor-command", {"command-line": "info registers"})
                     values = parse_registers(registers)
                     require(values["PC"] == layout["entry"] and values["X00"] == layout["args"] and
@@ -427,13 +592,23 @@ def run(binary: Path, components: Path, output: Path, ramdisk: Path | None = Non
                     observation = audit(qmp, scratch, blobs, layout, oracle.parse_adt)
                     observation.update({"after_system_reset": bool(iteration), "running": False,
                                         "entry_physical": hex(values["PC"]),
-                                        "bootargs_physical": hex(values["X00"]), "reset_el": "EL2h"})
+                                        "bootargs_physical": hex(values["X00"]), "reset_el": "EL2h",
+                                        "cpu_qom_path": cpu_path, "cpu_properties": cpu_properties})
                     report["observations"].append(observation)
                 require(report["observations"][0]["bootargs_sha256"] == report["observations"][1]["bootargs_sha256"] and
                         report["observations"][0]["prepared_dtree_sha256"] == report["observations"][1]["prepared_dtree_sha256"],
                         "Metadata repeats byte-exactly across system_reset")
                 require(report["observations"][0]["ramdisk"] == report["observations"][1]["ramdisk"],
                         "Optional ramdisk copy and descriptor repeat across system_reset")
+                require(report["observations"][0]["cpu_register_windows"] ==
+                        report["observations"][1]["cpu_register_windows"],
+                        "Complete CPU register RAM remains zero across system_reset")
+                if check_register_reset_pattern:
+                    report["stage"] = "register-reset-pattern"
+                    report["register_reset_pattern"] = audit_register_reset_pattern(
+                        qmp, scratch, report["observations"][0]["cpu_register_windows"],
+                        resource_guard)
+                    report["cpu_register_ram_reset_pattern_write_qualified"] = True
                 qmp.request("quit")
                 require(process.wait(timeout=5) == 0, "Clean requested QEMU shutdown")
             report["passed"] = True
@@ -459,6 +634,9 @@ def run(binary: Path, components: Path, output: Path, ramdisk: Path | None = Non
                     process.wait(timeout=3)
             report["exit_code"] = process.returncode
             report["child_reaped"] = process.poll() is not None
+            for stream in (process.stdin, process.stdout):
+                if stream is not None:
+                    stream.close()
         try:
             after = {name: digest(path) for name, path in asset_paths.items()}
             report["component_hashes_after"] = after
@@ -480,6 +658,10 @@ def main() -> int:
                         help="Directory containing bootkc, sptm, txm, dtree and restore-trustcache")
     parser.add_argument("--ramdisk", type=Path,
                         help="Optional regular decoded ramdisk; checks RAM bytes, not filesystem boot")
+    parser.add_argument("--qmp-stdio", action="store_true",
+                        help="Use bounded child stdin/stdout pipes for QMP instead of a Unix socket")
+    parser.add_argument("--check-register-reset-pattern", action="store_true",
+                        help="Also check nonzero CPU register RAM using owned startup loader QOM unrealize/reset")
     parser.add_argument("--output-dir", type=Path,
                         help="New private directory for report and bounded log; RAM dumps are deleted")
     args = parser.parse_args()
@@ -506,10 +688,12 @@ def main() -> int:
         if args.output_dir:
             output = args.output_dir.resolve()
             output.mkdir(parents=True, exist_ok=False, mode=0o700)
-            report = run(binary, components, output, ramdisk)
+            report = run(binary, components, output, ramdisk, args.qmp_stdio,
+                         args.check_register_reset_pattern)
         else:
             with tempfile.TemporaryDirectory(prefix="modern-machine-report-") as directory:
-                report = run(binary, components, Path(directory), ramdisk)
+                report = run(binary, components, Path(directory), ramdisk, args.qmp_stdio,
+                             args.check_register_reset_pattern)
     finally:
         os.umask(previous_umask)
     print(json.dumps({key: report.get(key) for key in

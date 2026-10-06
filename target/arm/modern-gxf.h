@@ -2,7 +2,8 @@
  * Experimental modern Apple GXF register state.
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * This is a register interface, not an implementation of guarded execution.
+ * The register interface and the optional guarded execution profile are
+ * separate from the older A13 GXF model. Memory protection is not modelled.
  */
 #ifndef ARM_MODERN_GXF_H
 #define ARM_MODERN_GXF_H
@@ -26,6 +27,9 @@ typedef struct AppleModernGXFState {
 } AppleModernGXFState;
 
 enum { APPLE_MODERN_GXF_ALIAS_COUNT = 9 };
+
+/* Capacity of the Darwin-compatible implementation register stores. */
+#define APPLE_MODERN_OPAQUE_MAX 256
 
 /* QEMU's architecture CPU object is named ArchCPU, typedef'd as ARMCPU. */
 struct ArchCPU;

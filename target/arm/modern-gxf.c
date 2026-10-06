@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * Register encodings are recorded in the pinned Darwin-VM reference. Only
- * register storage and ordinary VHE aliases are implemented here. No entry,
- * exit, memory-protection, authentication or guest policy is approximated.
+ * register storage and ordinary VHE aliases are implemented here. The
+ * separate apple-modern-guarded profile enables CPU entry/exit handling;
+ * modern memory protection and authentication remain unqualified.
  */
 #include "qemu/osdep.h"
 #include "cpu.h"
@@ -18,6 +19,10 @@ bool arm_apple_modern_gxf_validate(ARMCPU *cpu, Error **errp)
 {
     CPUARMState *env = &cpu->env;
 
+    if (cpu->apple_modern_guarded && !cpu->apple_modern_gxf) {
+        error_setg(errp, "apple-modern-guarded requires apple-modern-gxf");
+        return false;
+    }
     if (!cpu->apple_modern_gxf) {
         return true;
     }

@@ -121,10 +121,14 @@ static int get_a64_user_mem_index(DisasContext *s, bool unpriv)
         switch (useridx) {
         case ARMMMUIdx_E10_1:
         case ARMMMUIdx_E10_1_PAN:
+        case ARMMMUIdx_GE10_1:
+        case ARMMMUIdx_GE10_1_PAN:
             useridx = ARMMMUIdx_E10_0;
             break;
         case ARMMMUIdx_E20_2:
         case ARMMMUIdx_E20_2_PAN:
+        case ARMMMUIdx_GE20_2:
+        case ARMMMUIdx_GE20_2_PAN:
             useridx = ARMMMUIdx_E20_0;
             break;
         default:
@@ -1861,7 +1865,9 @@ static bool trans_ERET(DisasContext *s, arg_ERET *a)
     dst = tcg_temp_new_i64();
     if (s->guarded) {
         tcg_gen_ld_i64(dst, tcg_env,
-                   offsetof(CPUARMState, gxf.elr_gl[s->current_el]));
+            s->gxf_active && !arm_dc_feature(s, ARM_FEATURE_GXF) ?
+            offsetof(CPUARMState, modern_gxf.elr_gl[s->current_el]) :
+            offsetof(CPUARMState, gxf.elr_gl[s->current_el]));
     } else {
         tcg_gen_ld_i64(dst, tcg_env,
                     offsetof(CPUARMState, elr_el[s->current_el]));
@@ -1893,7 +1899,9 @@ static bool trans_ERETA(DisasContext *s, arg_reta *a)
     dst = tcg_temp_new_i64();
     if (s->guarded) {
         tcg_gen_ld_i64(dst, tcg_env,
-                   offsetof(CPUARMState, gxf.elr_gl[s->current_el]));
+            s->gxf_active && !arm_dc_feature(s, ARM_FEATURE_GXF) ?
+            offsetof(CPUARMState, modern_gxf.elr_gl[s->current_el]) :
+            offsetof(CPUARMState, gxf.elr_gl[s->current_el]));
     } else {
         tcg_gen_ld_i64(dst, tcg_env,
                     offsetof(CPUARMState, elr_el[s->current_el]));
@@ -10158,9 +10166,14 @@ static bool disas_apple_insn(DisasContext *s, uint32_t insn)
                 }
                 gen_a64_update_pc(s, 0);
                 gen_ss_advance(s);
-                gen_exception_insn(s, 4, EXCP_GENTER, syn_aa64_genter(rd));
+                gen_exception_insn(s, 4, EXCP_GENTER,
+                    arm_dc_feature(s, ARM_FEATURE_GXF) ?
+                    syn_aa64_genter(rd) : rd);
                 return true;
             case 0: // GEXIT
+                if (!arm_dc_feature(s, ARM_FEATURE_GXF) && rd != 0) {
+                    return false;
+                }
                 if (!s->guarded) {
                     qemu_log_mask(LOG_UNIMP, "%s: used GEXIT while not guarded.\n", __func__);
                     return false;
@@ -10205,7 +10218,8 @@ static void aarch64_tr_init_disas_context(DisasContextBase *dcbase,
     dc->isar = &arm_cpu->isar;
     dc->condjmp = 0;
     dc->pc_save = dc->base.pc_first;
-    dc->gxf_active = arm_feature(env, ARM_FEATURE_GXF);
+    dc->gxf_active = arm_feature(env, ARM_FEATURE_GXF) ||
+                     arm_cpu->apple_modern_guarded;
     dc->aarch64 = true;
     dc->thumb = false;
     dc->sctlr_b = 0;
@@ -10239,8 +10253,9 @@ static void aarch64_tr_init_disas_context(DisasContextBase *dcbase,
     dc->ata[1] = EX_TBFLAG_A64(tb_flags, ATA0);
     dc->mte_active[0] = EX_TBFLAG_A64(tb_flags, MTE_ACTIVE);
     dc->mte_active[1] = EX_TBFLAG_A64(tb_flags, MTE0_ACTIVE);
-    tcg_debug_assert(arm_is_guarded(env) == arm_mmu_idx_is_guarded(dc->mmu_idx));
-    dc->guarded = dc->gxf_active && arm_is_guarded(env);
+    tcg_debug_assert(arm_is_any_guarded(env) ==
+                     arm_mmu_idx_is_guarded(dc->mmu_idx));
+    dc->guarded = dc->gxf_active && arm_mmu_idx_is_guarded(dc->mmu_idx);
     dc->pstate_sm = EX_TBFLAG_A64(tb_flags, PSTATE_SM);
     dc->pstate_za = EX_TBFLAG_A64(tb_flags, PSTATE_ZA);
     dc->sme_trap_nonstreaming = EX_TBFLAG_A64(tb_flags, SME_TRAP_NONSTREAMING);

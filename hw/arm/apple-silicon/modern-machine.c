@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * This is not a complete T8140 platform. Its default prepares memory and halts
- * the CPU. Guarded execution and the remaining platform devices are separate
- * implementation gates. No executable bytes or guest policy are patched here.
+ * the CPU. The guarded CPU compatibility profile is enabled, while remaining
+ * platform devices are separate implementation gates. No executable bytes or
+ * guest policy are patched here.
  */
 #include "qemu/osdep.h"
 #include "qapi/error.h"
@@ -16,6 +17,8 @@
 #include "hw/core/cpu.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/apple-silicon/modern-boot-metadata.h"
+#include "hw/arm/apple-silicon/modern-board-regions.h"
+#include "hw/arm/apple-silicon/modern-amcc.h"
 #include "hw/char/apple_uart.h"
 #include "system/address-spaces.h"
 #include "system/reset.h"
@@ -37,8 +40,11 @@ struct AppleModernMachine {
     AppleModernBlob blobs[ASSET_COUNT];
     AppleModernBootInput components;
     AppleModernBootMetadata metadata;
+    AppleModernBoardRegions board_regions;
     ARMCPU *cpu;
     MemoryRegion ram, tag_memory, tag_ram;
+    MemoryRegion cpu_register_ram[APPLE_MODERN_CPU_REGISTER_WINDOWS];
+    AppleModernAMCC amcc;
     bool prepare_only, mte, initialized;
     uint64_t timebase_frequency;
 };
@@ -133,6 +139,105 @@ static void load_prepared_memory(AppleModernMachine *s)
     write_memory(layout->dtree_physical, s->metadata.dtree, s->metadata.dtree_size);
     write_memory(layout->bootargs_physical, s->metadata.bootargs,
                  sizeof(s->metadata.bootargs));
+    for (size_t i = 0; i < s->board_regions.count; i++) {
+        AppleModernBoardRegion *r = &s->board_regions.windows[i];
+        if (address_space_set(&address_space_memory, r->physical_address, 0,
+                              r->size, MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+            error_report("apple-modern register window reset failed");
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
+/*
+ * Port of Darwin-VM's apple_regs_init(): the CTRR/CTXR bounds and the MTE tag
+ * offset are read back by SPTM and compared against the regions it stashed
+ * from the device tree. Values come from the prepared (served) ADT, not from
+ * hardware-observed ones. The ADT region lookup is by name in
+ * /chosen/memory-map; first = start page, last = start of the final 4K page.
+ */
+static bool adt_region(AppleModernMachine *s, const char *name,
+                       uint64_t *first, uint64_t *last)
+{
+    AppleModernBlob tree = { s->metadata.dtree, s->metadata.dtree_size };
+    AppleModernBlob value;
+    Error *err = NULL;
+    uint64_t base, size;
+
+    if (!apple_modern_adt_property(tree, "/chosen/memory-map", name, &value,
+                                   &err)) {
+        error_report_err(err);
+        return false;
+    }
+    if (value.size < 16) {
+        error_report("apple-modern memory-map region %s is too small", name);
+        return false;
+    }
+    base = ldq_le_p(value.data);
+    size = ldq_le_p(value.data + 8);
+    if (!size) {
+        error_report("apple-modern memory-map region %s is empty", name);
+        return false;
+    }
+    *first = base;
+    *last = base + size - 0x1000;
+    return true;
+}
+
+static void apply_adt_cpu_registers(AppleModernMachine *s)
+{
+    static const struct {
+        const char *lwr, *upr, *first_region, *last_region;
+    } windows[] = {
+        { "CTRR_A_LWR_EL2", "CTRR_A_UPR_EL2", "BootKC-rx", "BootKC-rs" },
+        { "ACC_CTRR_C_LWR_EL2", "ACC_CTRR_C_UPR_EL2", "DeviceTree", "SPTM-rx" },
+        /*
+         * Not in Darwin-VM: the iOS 27 SPTM also checks ACC-CTRR-D. Its panic
+         * message names the stashed bounds as [TXM-ro start, DeviceTree start
+         * - 1], i.e. TXM-ro through the end of BootKC-rs (inferred, not from
+         * hardware observation).
+         */
+        { "ACC_CTRR_D_LWR_EL2", "ACC_CTRR_D_UPR_EL2", "TXM-ro", "BootKC-rs" },
+        { "ACC_CTXR_A_LWR_EL2", "ACC_CTXR_A_UPR_EL2", "SPTM-rx", "SPTM-rx" },
+        { "ACC_CTXR_B_LWR_EL2", "ACC_CTXR_B_UPR_EL2", "CL4-dummypage",
+          "CL4-dummypage" },
+        { "ACC_CTXR_C_LWR_EL2", "ACC_CTXR_C_UPR_EL2", "TXM-rx", "TXM-bx" },
+        { "ACC_CTXR_D_LWR_EL2", "ACC_CTXR_D_UPR_EL2", "BootKC-rx", "BootKC-bx" },
+    };
+    uint64_t ram = s->components.dram_size;
+
+    for (size_t i = 0; i < ARRAY_SIZE(windows); i++) {
+        uint64_t first, last, ignored;
+
+        if (!adt_region(s, windows[i].first_region, &first, &ignored) ||
+            !adt_region(s, windows[i].last_region, &ignored, &last)) {
+            exit(EXIT_FAILURE);
+        }
+        if (!strcmp(windows[i].lwr, "ACC_CTRR_C_LWR_EL2")) {
+            /* Darwin mirrors bank C into the AMCC aperture. */
+            apple_modern_amcc_set_bounds(&s->amcc, APPLE_MODERN_AMCC_BANK_C,
+                                         first, last);
+        } else if (!strcmp(windows[i].lwr, "ACC_CTRR_D_LWR_EL2")) {
+            /*
+             * Not in Darwin-VM: the iOS 27 SPTM compares the AMCC and ACC
+             * CTRR-D regions ("init_pre_late_io_reservation"), so the same
+             * bounds are mirrored (the SPTM reads them as 32-bit offsets
+             * from the DRAM base, which the low half of this value yields).
+             */
+            apple_modern_amcc_set_bounds(&s->amcc, APPLE_MODERN_AMCC_BANK_D,
+                                         first, last);
+        }
+        if (!arm_apple_modern_sysreg_set(s->cpu, windows[i].lwr, first) ||
+            !arm_apple_modern_sysreg_set(s->cpu, windows[i].upr, last)) {
+            error_report("apple-modern missing system register %s",
+                         windows[i].lwr);
+            exit(EXIT_FAILURE);
+        }
+    }
+    /* Last 1/32nd of memory, moved forward by another 1/32nd (Darwin). */
+    arm_apple_modern_sysreg_set(s->cpu, "TAG_OFFSET_EL2",
+                                BIT_ULL(63) | (s->components.dram_base + ram -
+                                               (2 * ram) / 32));
 }
 
 static void modern_reset(void *opaque)
@@ -144,15 +249,23 @@ static void modern_reset(void *opaque)
     cpu_reset(cs);
     assert(arm_highest_el(env) == 2);
     load_prepared_memory(s);
+    apple_modern_amcc_reset(&s->amcc);
+    apply_adt_cpu_registers(s);
     env->pc = s->metadata.layout.sptm_entry_physical;
     env->xregs[0] = s->metadata.layout.bootargs_physical;
     env->cp15.cpacr_el1 |= 3U << 20; /* Ordinary FP/SIMD enable. */
     env->cp15.cptr_el[2] &= ~(1U << 10); /* CPTR_EL2.TFP. */
+    /*
+     * As in Darwin-VM's reset: with HCR_EL2.E2H the EL2 trap register uses the
+     * CPACR layout, so FPEN must also be set there for EL2 FP/SIMD.
+     */
+    env->cp15.cptr_el[2] |= 3U << 20;
     cs->halted = s->prepare_only;
     arm_rebuild_hflags(env);
 }
 
-static bool uart_address(AppleModernBlob dtree, uint64_t *address, Error **errp)
+static bool uart_address(AppleModernBlob dtree, uint64_t *address,
+                         uint64_t *span, Error **errp)
 {
     AppleModernBlob ranges, reg, compatible;
     uint64_t offset, size;
@@ -184,6 +297,7 @@ static bool uart_address(AppleModernBlob dtree, uint64_t *address, Error **errp)
             parent <= UINT64_MAX - (offset - child) &&
             parent + (offset - child) <= UINT64_MAX - size) {
             *address = parent + (offset - child);
+            *span = size;
             return true;
         }
     }
@@ -195,7 +309,7 @@ static void modern_init(MachineState *machine)
 {
     AppleModernMachine *s = APPLE_MODERN_MACHINE(machine);
     AppleModernBootMetadataInput metadata_input = {0};
-    uint64_t uart;
+    uint64_t uart, uart_span;
     size_t asset_budget = GiB;
     Error *error = NULL;
 
@@ -232,7 +346,16 @@ static void modern_init(MachineState *machine)
                                          strlen(s->boot_command_line) : 0;
     metadata_input.has_mte = s->mte;
     if (!apple_modern_boot_metadata_build(&metadata_input, &s->metadata, &error) ||
-        !uart_address(s->components.dtree, &uart, &error)) {
+        !uart_address(s->components.dtree, &uart, &uart_span, &error)) {
+        error_report_err(error);
+        exit(EXIT_FAILURE);
+    }
+    AppleModernAddressRange exclusion = { uart, uart_span };
+    if (!apple_modern_board_regions_build(s->components.dtree,
+                                          s->components.dram_base,
+                                          s->components.dram_size,
+                                          &exclusion, 1, &s->board_regions,
+                                          &error)) {
         error_report_err(error);
         exit(EXIT_FAILURE);
     }
@@ -241,6 +364,14 @@ static void modern_init(MachineState *machine)
                            machine->ram_size, &error_fatal);
     memory_region_add_subregion(get_system_memory(), s->components.dram_base,
                                 &s->ram);
+    for (size_t i = 0; i < s->board_regions.count; i++) {
+        AppleModernBoardRegion *r = &s->board_regions.windows[i];
+        memory_region_init_ram(&s->cpu_register_ram[i], NULL, r->name,
+                               r->size, &error_fatal);
+        memory_region_add_subregion(get_system_memory(), r->physical_address,
+                                    &s->cpu_register_ram[i]);
+    }
+    apple_modern_amcc_init(&s->amcc, get_system_memory());
     s->cpu = ARM_CPU(object_new(machine->cpu_type));
     object_property_add_child(OBJECT(s), "cpu", OBJECT(s->cpu));
     object_unref(OBJECT(s->cpu));
@@ -248,6 +379,12 @@ static void modern_init(MachineState *machine)
     object_property_set_bool(OBJECT(s->cpu), "has_el3", false, &error_fatal);
     object_property_set_bool(OBJECT(s->cpu), "pauth-noop", false, &error_fatal);
     object_property_set_bool(OBJECT(s->cpu), "apple-modern-gxf", true, &error_fatal);
+    object_property_set_bool(OBJECT(s->cpu), "apple-modern-timers", true,
+                              &error_fatal);
+    object_property_set_bool(OBJECT(s->cpu), "apple-modern-guarded", true,
+                              &error_fatal);
+    object_property_set_bool(OBJECT(s->cpu), "apple-modern-sysregs", true,
+                              &error_fatal);
     object_property_set_uint(OBJECT(s->cpu), "cntfrq", s->timebase_frequency,
                              &error_fatal);
     object_property_set_link(OBJECT(s->cpu), "memory", OBJECT(get_system_memory()),

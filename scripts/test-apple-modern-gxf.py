@@ -109,7 +109,8 @@ typedef struct Table {
 } Table;
 typedef struct ArchCPU {
     CPUARMState env;
-    bool apple_modern_gxf, has_el2, has_el3, prop_pauth_noop, prop_pauth, vh;
+    bool apple_modern_gxf, apple_modern_timers, apple_modern_guarded;
+    bool has_el2, has_el3, prop_pauth_noop, prop_pauth, vh;
     GPtrArray *modern_vhe_snapshots;
     Table table;
     Table *cp_regs;
@@ -193,6 +194,9 @@ int main(void) {
     changed=cpu; changed.apple_modern_gxf=false; changed.prop_pauth_noop=true;
     changed.env.features|=ARM_FEATURE_GXF;
     CHECK(arm_apple_modern_gxf_validate(&changed,&err) && !err);
+    changed=cpu; changed.apple_modern_guarded=true;
+    CHECK(arm_apple_modern_gxf_validate(&changed,&err) && !err);
+    changed.apple_modern_gxf=false; reject(&changed);
     changed=cpu; changed.prop_pauth_noop=true; reject(&changed);
     changed=cpu; changed.prop_pauth=false; reject(&changed);
     changed=cpu; changed.has_el3=true; reject(&changed);
@@ -303,8 +307,9 @@ def main():
         (helper, "arm_define_vhe_alias"), (cpu, "cp_reg_reset"),
     ])
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    env = dict(os.environ, ASAN_OPTIONS="detect_leaks=1:abort_on_error=1",
-               UBSAN_OPTIONS="halt_on_error=1")
+    env = dict(os.environ)
+    env.setdefault("ASAN_OPTIONS", "detect_leaks=1:abort_on_error=1")
+    env.setdefault("UBSAN_OPTIONS", "halt_on_error=1")
     with tempfile.TemporaryDirectory(prefix="inferno-modern-gxf-") as scratch:
         path = Path(scratch)
         source = path / "registers.c"

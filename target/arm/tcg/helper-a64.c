@@ -640,7 +640,9 @@ void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
     int new_el;
     bool return_to_aa64;
 
-    if (arm_is_guarded(env)) {
+    if (arm_is_modern_guarded(env)) {
+        spsr = env->modern_gxf.spsr_gl[cur_el];
+    } else if (arm_is_guarded(env)) {
         spsr = env->gxf.spsr_gl[cur_el];
     } else {
         spsr = env->banked_spsr[spsr_idx];
@@ -665,6 +667,11 @@ void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
 
     new_el = el_from_spsr(spsr);
     if (new_el == -1) {
+        goto illegal_return;
+    }
+    if (arm_is_modern_guarded(env) &&
+        (!return_to_aa64 || new_el == 0)) {
+        /* This profile supports guarded execution only at AArch64 EL1/2. */
         goto illegal_return;
     }
     if (new_el > cur_el || (new_el == 2 && !arm_is_el2_enabled(env))) {
@@ -797,6 +804,42 @@ void HELPER(gexit)(CPUARMState *env)
 {
     int cur_el = arm_current_el(env);
     uint32_t spsr = env->gxf.spsr_gl[cur_el];
+
+    if (env_archcpu(env)->apple_modern_guarded) {
+        uint64_t aspsr;
+
+        if (!arm_is_modern_guarded(env) || cur_el == 0 || cur_el > 2) {
+            raise_exception_ra(env, EXCP_UDEF, syn_uncategorized(),
+                               cur_el, GETPC());
+        }
+        spsr = env->modern_gxf.spsr_gl[cur_el];
+        aspsr = env->modern_gxf.aspsr_gl[cur_el];
+        if ((spsr & PSTATE_nRW) || el_from_spsr(spsr) != cur_el ||
+            aspsr > 1) {
+            raise_exception_ra(env, EXCP_UDEF, syn_uncategorized(),
+                               cur_el, GETPC());
+        }
+
+        /* Save GL SP while CURRENTG still selects its bank. */
+        aarch64_save_sp(env, cur_el);
+        arm_clear_exclusive(env);
+        if (arm_generate_debug_exceptions(env)) {
+            spsr &= ~PSTATE_SS;
+        }
+        spsr &= aarch64_pstate_valid_mask(&env_archcpu(env)->isar);
+        pstate_write(env, spsr);
+        env->modern_gxf.currentg = aspsr;
+        if (!arm_singlestep_active(env)) {
+            env->pstate &= ~PSTATE_SS;
+        }
+        aarch64_restore_sp(env, cur_el);
+        env->pc = env->modern_gxf.elr_gl[cur_el];
+        helper_rebuild_hflags_a64(env, cur_el);
+        qemu_log_mask(CPU_LOG_INT, "Modern guarded execution exit GL%d "
+                      "to %s%d PC 0x%" PRIx64 "\n", cur_el,
+                      aspsr ? "GL" : "EL", cur_el, env->pc);
+        return;
+    }
 
     aarch64_save_sp(env, cur_el);
 

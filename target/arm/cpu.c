@@ -1439,7 +1439,9 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
     CPUARMState *env = &cpu->env;
     Error *local_err = NULL;
 
-    if (!arm_apple_modern_gxf_validate(cpu, errp)) {
+    if (!arm_apple_modern_gxf_validate(cpu, errp) ||
+        !arm_apple_modern_timers_validate(cpu, errp) ||
+        !arm_apple_modern_sysregs_validate(cpu, errp)) {
         return;
     }
 
@@ -2029,6 +2031,9 @@ static ObjectClass *arm_cpu_class_by_name(const char *cpu_model)
 
 static const Property arm_cpu_properties[] = {
     DEFINE_PROP_BOOL("apple-modern-gxf", ARMCPU, apple_modern_gxf, false),
+    DEFINE_PROP_BOOL("apple-modern-timers", ARMCPU, apple_modern_timers, false),
+    DEFINE_PROP_BOOL("apple-modern-guarded", ARMCPU, apple_modern_guarded, false),
+    DEFINE_PROP_BOOL("apple-modern-sysregs", ARMCPU, apple_modern_sysregs, false),
     DEFINE_PROP_UINT64("midr", ARMCPU, midr, 0),
     DEFINE_PROP_UINT64("mp-affinity", ARMCPU,
                         mp_affinity, ARM64_AFFINITY_INVALID),
