@@ -1105,6 +1105,18 @@ static int modern_sprr_regime_prot(CPUARMState *env, ARMMMUIdx mmu_idx,
                    mmu_idx == ARMMMUIdx_Stage1_GE1 ||
                    mmu_idx == ARMMMUIdx_Stage1_GE1_PAN;
 
+    /*
+     * Guarded EL0 has no separate translation regime: it shares the EL0
+     * indexes. Accesses made while executing there use the guarded table
+     * (Darwin keys this on CURRENTG); exception entry/return flush the EL0
+     * indexes around guarded EL0 so these entries never serve ordinary EL0.
+     * AT S1E0* from a higher level keeps the ordinary user table.
+     */
+    if (permission_el == 0 && arm_current_el(env) == 0 &&
+        arm_is_modern_guarded(env)) {
+        guarded = true;
+    }
+
     /* AArch32 permission semantics are unsupported by this opt-in profile. */
     if (!aarch64) {
         return 0;

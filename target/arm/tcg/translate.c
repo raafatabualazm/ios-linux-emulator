@@ -1090,6 +1090,8 @@ static void gen_exception_bkpt_insn(DisasContext *s, uint32_t syn)
 void unallocated_encoding(DisasContext *s)
 {
     /* Unallocated and reserved encodings are uncategorized */
+    qemu_log_mask(LOG_UNIMP, "unallocated encoding 0x%08x at 0x%" PRIx64
+                  " (el%d)\n", s->insn, (uint64_t)s->pc_curr, s->current_el);
     gen_exception_insn(s, 0, EXCP_UDEF, syn_uncategorized());
 }
 

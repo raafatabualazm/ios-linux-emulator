@@ -10,9 +10,9 @@
 
 typedef struct AppleModernAPSTSState {
     /*
-     * Internal backend readiness, never guest-writable. No production backend
-     * currently initializes these banks; reset and supported reads report 0.
-     * The unused EL0 slot is not an exposed register bank.
+     * Master-key readiness, never guest-writable. Reset presents the
+     * post-loader handoff state (ready). The unused EL0 slot is not an
+     * exposed register bank.
      */
     bool ready_el[3];
 } AppleModernAPSTSState;

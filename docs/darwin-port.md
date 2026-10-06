@@ -30,10 +30,14 @@ the isolated checkpoint does not qualify the retained additional models.
 | Guarded translation contexts | Separate existing guarded TB/TLB indexes; shared architectural TTBR/TCR invalidation covers both contexts | 128 production callback/mask checks, including rejected old-mask oracle |
 | CPU implementation register windows | Two bounded, nonoverlapping stock ADT windows mapped as register RAM | 28 component checks; all 86,048 bytes read before/after reset and after nonzero test writes |
 | Hypervisor virtual timer interrupt | Existing generic timer output wired directly to CPU FIQ, as in Darwin | Two actual board/reset runs: masking, ordinary EL2 and GL2 FIQ, ERET and GEXIT |
-| Modern SPRR permissions | Separate CONFIG/PPERM/UPERM banks, VHE aliases, raw leaf permission lookup and write-triggered TLB invalidation | 55,419 permission/regime and 536 register/alias component checks; six actual CPU/reset passes with normal/guarded permission faults |
+| Modern SPRR permissions | Separate CONFIG/PPERM/UPERM banks, VHE aliases, raw leaf permission lookup and write-triggered TLB invalidation. UPERM is EL0-writable as in Darwin (iOS 27 userspace toggles it for JIT write protection); guarded EL0 uses the guarded table | 101,499 permission/regime and 544 register/alias component checks with negative oracles; six actual CPU/reset passes with normal/guarded permission faults |
 | A64 guarded AT contexts | Modern and legacy guarded contexts select the requested translation regime | 57,344 recorded component checks and actual EL2/GL2 AT instructions; A32 callback remains unchanged |
-| Modern CTRR/AMCC | Existing legacy implementation and additional integration carryover retained | Hardware lock behavior and modern enforcement remain unqualified |
-| Modern AIC and SEP | Darwin reference inventory retained | Reference models are partial; ordinary interrupt/service behavior needs implementation |
+| APSTS_EL1/EL2 status | Read-only, reset presents the post-loader handoff state (master key valid). SPTM spins on bit 0 immediately after enabling its MMU. Pointer authentication keeps the architectural algorithm; the Apple key transformation is not modeled | 21,881 production access/VHE/raw/reset checks with four negative oracles; unchanged SPTM passes the former blocker |
+| Apple implementation register stores | 196 read-as-written stores generated from Darwin's tables (CTRR/CTXR, HID, AMX, ...), minus encodings owned by the GXF, timer, SPRR and APSTS modules; PMC0/PMC1 deterministic counters | Compatibility stores only; no hardware effect. Bank C CTRR and CTXR bounds are seeded from the served ADT as in Darwin |
+| Modern CTRR/AMCC | Darwin's AMCC model: aperture and per-bank bound registers from the served ADT; every other offset reads zero. Stores only; no enforcement | Hardware lock behavior and modern enforcement remain unqualified. The earlier plain-latch carryover model made SPTM panic (write-disabled read back as set) and is not used |
+| Modern AIC and SEP | aic,3 aperture mapped as RAM reporting 0x1000 IRQs at +0xC; SEP InvalidateHmac reg-block mapped as ignored RAM (Darwin's stubs) | Stubs only: no interrupt delivery and no SEP service. XNU starts AppleInterruptControllerV3 with the reported vector count; SEP endpoint waits time out |
+| Guarded EL0 | A guarded eret may return to EL0 (SPTM launches TXM there); TLB entries around guarded EL0 are flushed so they never serve ordinary EL0 | Boot-progress result; the AArch32 and cross-EL guarded cases remain rejected |
+| SME vector lengths | Board limits streaming vector lengths to 128/256/512 bits as Darwin does; with QEMU's maximum, XNU's ZA save area exceeded its zone limit | Board property of the compatibility profile |
 | Modern storage, DART, display and touch | Existing Inferno models retained | Target generation adapters, complete userspace and end-to-end GUI remain required |
 
 Darwin's simplified timer model is explicit: AGTCNTVOFF does not change
@@ -125,6 +129,30 @@ Private evidence lives under `modern-emulator/evidence/features-20261006/`:
 `independent-sprr-review`, `sprr-board-preparation-final` and
 `darwin-sptm-sprr-v1`. Firmware, tickets, IPAs,
 complete guest stores and raw logs remain outside versioned source.
+
+## Modern boot progress — October 6, 2026 (modern-boot branch)
+
+With the Darwin-prepared device tree (dt_fixup.py output, kept outside source), the
+private pin `modern-emulator/bin/qemu-system-aarch64-modern-boot-v1`
+(SHA-256 `f40c7b95a9449e8c754f6c98ce179d8145b7dfb0d43b1d344c4f0a46484b2321`)
+runs the unchanged iOS 27.0/24A437 SPTM, TXM and XNU: SPTM passes APSTS_EL1 and
+the CTRR/AMCC cross-checks, enters TXM at guarded EL0, XNU starts, mounts the
+restore ramdisk root (`md0`), and launchd's ignition stage begins. A 150 s
+bounded run exits by timeout with all eight input hashes unchanged and the child
+reaped. Evidence: `modern-emulator/evidence/features-20261006/{modern-boot-milestone-v1,modern-boot-probe,modern-boot-gates-v1}/`.
+All five QEMU-level gates pass on that exact pin (SPRR 6 CPU passes, guarded 4,
+timer 4, board FIQ 2, stopped board preparation/reset with all CPU windows).
+
+This is a boot-progress result, not a working userspace: the ignition stage does not
+complete (AppleCredentialManager/ACMTRM wait for a SEP endpoint that does not exist),
+and no interrupt controller, storage, display or touch device is modeled. The local
+Darwin reference build (`Darwin-VM/build-qemu-sptm`, built from a hardlinked mirror
+so the source checkout stays clean) reaches launchd and the restore environment
+with the same assets; its use of a kernel-cache compatibility patch is the known
+difference and is not ported here.
+
+Diagnostic logging added under `-d unimp`: unallocated encodings with PC/opcode,
+and UNDEFINED system-register accesses with the register name.
 
 ## Next integration gates
 

@@ -33,6 +33,7 @@ arm_common_system_ss.add(files(
   'modern-gxf.c',
   'modern-sprr.c',
   'modern-apsts.c',
+  'modern-sysregs.c',
   'ptw.c',
   'vfp_fpscr.c',
 ))

@@ -17,6 +17,7 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
@@ -858,6 +859,11 @@ const void *HELPER(access_check_cp_reg)(CPUARMState *env, uint32_t key,
             break;
         }
         syndrome = syn_uncategorized();
+        qemu_log_mask(LOG_UNIMP, "UNDEFINED %s of system register %s "
+                      "(op0=%d op1=%d crn=%d crm=%d op2=%d) at EL%d pc 0x%"
+                      PRIx64 "\n", isread ? "read" : "write", ri->name,
+                      ri->opc0, ri->opc1, ri->crn, ri->crm, ri->opc2,
+                      arm_current_el(env), (uint64_t)env->pc);
         break;
     default:
         tcg_debug_assert_not_reached();

@@ -33,6 +33,7 @@
 #include "accel/tcg/probe.h"
 #include "exec/target_page.h"
 #include "exec/tlb-flags.h"
+#include "exec/cputlb.h"
 #include "qemu/int128.h"
 #include "qemu/atomic128.h"
 #include "fpu/softfloat.h"
@@ -669,9 +670,14 @@ void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
     if (new_el == -1) {
         goto illegal_return;
     }
-    if (arm_is_modern_guarded(env) &&
-        (!return_to_aa64 || new_el == 0)) {
-        /* This profile supports guarded execution only at AArch64 EL1/2. */
+    if (arm_is_modern_guarded(env) && !return_to_aa64) {
+        /*
+         * This profile supports guarded execution only in AArch64. A plain
+         * eret in guarded state keeps the guarded context (currentg is left
+         * unchanged; only GEXIT restores it from ASPSR_GL) and may target any
+         * guarded exception level, including GL0: the iOS 27 SPTM launches
+         * TXM by eret'ing from GL2 to guarded EL0 with SPSR_GL2 selecting EL0.
+         */
         goto illegal_return;
     }
     if (new_el > cur_el || (new_el == 2 && !arm_is_el2_enabled(env))) {
@@ -742,6 +748,11 @@ void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
         }
         aarch64_restore_sp(env, new_el);
         helper_rebuild_hflags_a64(env, new_el);
+        if (new_el == 0 && arm_is_modern_guarded(env)) {
+            /* Guarded EL0 shares the EL0 regimes; drop ordinary entries. */
+            tlb_flush_by_mmuidx(env_cpu(env),
+                                ARMMMUIdxBit_E10_0 | ARMMMUIdxBit_E20_0);
+        }
 
         /*
          * Apply TBI to the exception return address.  We had to delay this

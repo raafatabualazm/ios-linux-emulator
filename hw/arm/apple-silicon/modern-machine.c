@@ -18,6 +18,7 @@
 #include "hw/arm/boot.h"
 #include "hw/arm/apple-silicon/modern-boot-metadata.h"
 #include "hw/arm/apple-silicon/modern-board-regions.h"
+#include "hw/arm/apple-silicon/modern-amcc.h"
 #include "hw/char/apple_uart.h"
 #include "system/address-spaces.h"
 #include "system/reset.h"
@@ -43,6 +44,9 @@ struct AppleModernMachine {
     ARMCPU *cpu;
     MemoryRegion ram, tag_memory, tag_ram;
     MemoryRegion cpu_register_ram[APPLE_MODERN_CPU_REGISTER_WINDOWS];
+    MemoryRegion aic_ram, sep_ram;
+    AppleModernAMCC amcc;
+    bool has_amcc;
     bool prepare_only, mte, initialized;
     uint64_t timebase_frequency;
 };
@@ -147,6 +151,89 @@ static void load_prepared_memory(AppleModernMachine *s)
     }
 }
 
+/*
+ * Look up a /chosen/memory-map region in the served (prepared) ADT. first =
+ * start of the region; last = start of its final 4 KiB page, as SPTM reads
+ * the CTRR/CTXR bounds.
+ */
+static bool adt_region(AppleModernMachine *s, const char *name,
+                       uint64_t *first, uint64_t *last)
+{
+    AppleModernBlob tree = { s->metadata.dtree, s->metadata.dtree_size };
+    AppleModernBlob value;
+    Error *err = NULL;
+    uint64_t base, size;
+
+    if (!apple_modern_adt_property(tree, "/chosen/memory-map", name, &value,
+                                   &err)) {
+        error_report_err(err);
+        return false;
+    }
+    if (value.size < 16) {
+        error_report("apple-modern memory-map region %s is too small", name);
+        return false;
+    }
+    base = ldq_le_p(value.data);
+    size = ldq_le_p(value.data + 8);
+    if (!size || size < 0x1000 || base > UINT64_MAX - size) {
+        error_report("apple-modern memory-map region %s is invalid", name);
+        return false;
+    }
+    *first = base;
+    *last = base + size - 0x1000;
+    return true;
+}
+
+/*
+ * Port of Darwin-VM apple_regs_init(): seed the CTRR/CTXR bounds and MTE tag
+ * offset that SPTM reads back and compares against the regions it stashed from
+ * the device tree. Bank C bounds are also mirrored into the AMCC aperture, as
+ * in Darwin. Values come from the prepared ADT, not from hardware
+ * observation; these are compatibility stores with no enforcement effect.
+ * Returns false on a missing region or absent compatibility register.
+ */
+static bool apply_adt_cpu_registers(AppleModernMachine *s)
+{
+    static const struct {
+        const char *lwr, *upr, *first_region, *last_region;
+    } windows[] = {
+        { "CTRR_A_LWR_EL2", "CTRR_A_UPR_EL2", "BootKC-rx", "BootKC-rs" },
+        { "ACC_CTRR_C_LWR_EL2", "ACC_CTRR_C_UPR_EL2", "DeviceTree", "SPTM-rx" },
+        { "ACC_CTXR_A_LWR_EL2", "ACC_CTXR_A_UPR_EL2", "SPTM-rx", "SPTM-rx" },
+        { "ACC_CTXR_B_LWR_EL2", "ACC_CTXR_B_UPR_EL2", "CL4-dummypage",
+          "CL4-dummypage" },
+        { "ACC_CTXR_C_LWR_EL2", "ACC_CTXR_C_UPR_EL2", "TXM-rx", "TXM-bx" },
+        { "ACC_CTXR_D_LWR_EL2", "ACC_CTXR_D_UPR_EL2", "BootKC-rx", "BootKC-bx" },
+    };
+    uint64_t ram = s->components.dram_size;
+
+    for (size_t i = 0; i < ARRAY_SIZE(windows); i++) {
+        uint64_t first, last, ignored;
+
+        if (!adt_region(s, windows[i].first_region, &first, &ignored) ||
+            !adt_region(s, windows[i].last_region, &ignored, &last)) {
+            return false;
+        }
+        if (s->has_amcc && !strcmp(windows[i].lwr, "ACC_CTRR_C_LWR_EL2")) {
+            apple_modern_amcc_set_bounds(&s->amcc, APPLE_MODERN_AMCC_BANK_C,
+                                         first, last);
+        }
+        if (!arm_apple_modern_sysreg_set(s->cpu, windows[i].lwr, first) ||
+            !arm_apple_modern_sysreg_set(s->cpu, windows[i].upr, last)) {
+            error_report("apple-modern missing compatibility register %s",
+                         windows[i].lwr);
+            return false;
+        }
+    }
+    /* Last 1/32nd of memory, moved forward by another 1/32nd (Darwin). */
+    if (!arm_apple_modern_sysreg_set(s->cpu, "TAG_OFFSET_EL2",
+            BIT_ULL(63) | (s->components.dram_base + ram - (2 * ram) / 32))) {
+        error_report("apple-modern missing TAG_OFFSET_EL2");
+        return false;
+    }
+    return true;
+}
+
 static void modern_reset(void *opaque)
 {
     AppleModernMachine *s = opaque;
@@ -156,10 +243,21 @@ static void modern_reset(void *opaque)
     cpu_reset(cs);
     assert(arm_highest_el(env) == 2);
     load_prepared_memory(s);
+    if (s->has_amcc) {
+        apple_modern_amcc_reset(&s->amcc);
+    }
+    if (!apply_adt_cpu_registers(s)) {
+        exit(EXIT_FAILURE);
+    }
     env->pc = s->metadata.layout.sptm_entry_physical;
     env->xregs[0] = s->metadata.layout.bootargs_physical;
     env->cp15.cpacr_el1 |= 3U << 20; /* Ordinary FP/SIMD enable. */
     env->cp15.cptr_el[2] &= ~(1U << 10); /* CPTR_EL2.TFP. */
+    /*
+     * With HCR_EL2.E2H the EL2 trap register uses the CPACR layout, so FPEN
+     * must also be set there for EL2 FP/SIMD (as in Darwin-VM's reset).
+     */
+    env->cp15.cptr_el[2] |= 3U << 20;
     cs->halted = s->prepare_only;
     arm_rebuild_hflags(env);
 }
@@ -203,6 +301,181 @@ static bool uart_address(AppleModernBlob dtree, uint64_t *address,
     }
     error_setg(errp, "modern UART is outside the ADT bus ranges");
     return false;
+}
+
+/* Translate an /arm-io child-relative (offset,size) through the bus ranges. */
+static bool arm_io_translate(AppleModernBlob dtree, uint64_t offset,
+                             uint64_t size, uint64_t *address, Error **errp)
+{
+    AppleModernBlob ranges;
+
+    if (!apple_modern_adt_property(dtree, "/arm-io", "ranges", &ranges, errp)) {
+        return false;
+    }
+    if (!ranges.size || ranges.size % 24) {
+        error_setg(errp, "unsupported /arm-io ranges schema");
+        return false;
+    }
+    for (size_t i = 0; i < ranges.size; i += 24) {
+        uint64_t child = ldq_le_p(ranges.data + i);
+        uint64_t parent = ldq_le_p(ranges.data + i + 8);
+        uint64_t length = ldq_le_p(ranges.data + i + 16);
+        if (offset >= child && offset - child <= length &&
+            size <= length - (offset - child) &&
+            parent <= UINT64_MAX - (offset - child) &&
+            parent + (offset - child) <= UINT64_MAX - size) {
+            *address = parent + (offset - child);
+            return true;
+        }
+    }
+    error_setg(errp, "device is outside the /arm-io bus ranges");
+    return false;
+}
+
+static bool adt_u32(AppleModernBlob dtree, const char *path, const char *name,
+                    uint32_t *value, Error **errp)
+{
+    AppleModernBlob prop;
+
+    if (!apple_modern_adt_property(dtree, path, name, &prop, errp)) {
+        return false;
+    }
+    if (prop.size != 4) {
+        error_setg(errp, "%s/%s is not a 32-bit value", path, name);
+        return false;
+    }
+    *value = ldl_le_p(prop.data);
+    return true;
+}
+
+/*
+ * Darwin-VM amcc_create(): map the AMCC aperture named by the served ADT
+ * (/chosen/lock-regs/amcc) and store only each bank's bound registers. The
+ * ADT values are Darwin's dt_fixup synthesis, not a hardware observation.
+ * Absent node: no AMCC, as in Darwin.
+ */
+static bool map_amcc(AppleModernMachine *s, Error **errp)
+{
+    static const char *const banks[APPLE_MODERN_AMCC_BANKS] = {
+        "amcc-ctrr-a", "amcc-ctrr-b", "amcc-ctrr-c", "amcc-ctrr-d",
+    };
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    AppleModernBlob prop;
+    uint32_t lwr[APPLE_MODERN_AMCC_BANKS] = {0}, upr[APPLE_MODERN_AMCC_BANKS] = {0};
+    uint32_t size;
+    uint64_t base;
+    Error *local = NULL;
+
+    if (!apple_modern_adt_property(dtree, "/chosen/lock-regs/amcc",
+                                   "aperture-phys-addr", &prop, &local)) {
+        error_free(local);
+        return true;
+    }
+    if (prop.size != 8) {
+        error_setg(errp, "AMCC aperture-phys-addr is not a 64-bit value");
+        return false;
+    }
+    base = ldq_le_p(prop.data);
+    if (!adt_u32(dtree, "/chosen/lock-regs/amcc", "aperture-size", &size,
+                 errp)) {
+        return false;
+    }
+    for (unsigned bank = 0; bank < APPLE_MODERN_AMCC_BANKS; bank++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/chosen/lock-regs/amcc/%s", banks[bank]);
+        if (!apple_modern_adt_property(dtree, path, "lower-limit-reg-offset",
+                                       &prop, &local)) {
+            error_free(local);
+            local = NULL;
+            continue; /* Bank without bound registers. */
+        }
+        if (!adt_u32(dtree, path, "lower-limit-reg-offset", &lwr[bank], errp) ||
+            !adt_u32(dtree, path, "upper-limit-reg-offset", &upr[bank], errp)) {
+            return false;
+        }
+    }
+    if (!apple_modern_amcc_init(&s->amcc, get_system_memory(),
+                                base, size, lwr, upr, errp)) {
+        return false;
+    }
+    s->has_amcc = true;
+    return true;
+}
+
+/*
+ * Darwin-VM init_aic(): a bare-bones controller that ignores register
+ * accesses and only reports the IRQ count. For aic,3 the count lives at
+ * aperture offset 0xC. This is a stub, not a functional AIC; interrupts are
+ * not delivered. Delivery remains a separate device gate.
+ */
+#define MODERN_AIC_NUM_IRQS 0x1000
+static bool map_aic(AppleModernMachine *s, Error **errp)
+{
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    AppleModernBlob reg, compatible;
+    uint64_t offset, size, base;
+    uint32_t num_irqs = MODERN_AIC_NUM_IRQS;
+
+    if (!apple_modern_adt_property(dtree, "/arm-io/aic", "reg", &reg, errp) ||
+        !apple_modern_adt_property(dtree, "/arm-io/aic", "compatible",
+                                   &compatible, errp)) {
+        return false;
+    }
+    if (reg.size != 16 || compatible.size < sizeof("aic,3") ||
+        memcmp(compatible.data, "aic,3", sizeof("aic,3"))) {
+        error_setg(errp, "unsupported modern AIC ADT schema (expected aic,3)");
+        return false;
+    }
+    offset = ldq_le_p(reg.data);
+    size = ldq_le_p(reg.data + 8);
+    if (size < 0x10 || size > 0x400000) {
+        error_setg(errp, "modern AIC register span is out of range");
+        return false;
+    }
+    if (!arm_io_translate(dtree, offset, size, &base, errp)) {
+        return false;
+    }
+    memory_region_init_ram(&s->aic_ram, NULL, "apple-modern.aic", size,
+                           &error_fatal);
+    memory_region_add_subregion(get_system_memory(), base, &s->aic_ram);
+    cpu_physical_memory_write(base + 0xC, &num_irqs, sizeof(num_irqs));
+    return true;
+}
+
+/*
+ * Darwin-VM init_sep(): the InvalidateHmac reg-block is mapped as ignored
+ * RAM. The served ADT sets sio-hmac1-disable-mask = -1 so InvalidateHmac is
+ * effectively disabled as long as these registers can be read and written.
+ * The reg-block base is absolute (not /arm-io child-relative). Absent on some
+ * trees, in which case nothing is mapped.
+ */
+static bool map_sep(AppleModernMachine *s, Error **errp)
+{
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    AppleModernBlob reg;
+    uint64_t base, size;
+    Error *local = NULL;
+
+    if (!apple_modern_adt_property(dtree,
+            "/arm-io/sep/iop-sep-nub/InvalidateHmac", "reg-block", &reg,
+            &local)) {
+        error_free(local);
+        return true; /* Optional: no SEP InvalidateHmac node present. */
+    }
+    if (reg.size != 16) {
+        error_setg(errp, "unsupported modern SEP InvalidateHmac schema");
+        return false;
+    }
+    base = ldq_le_p(reg.data);
+    size = ldq_le_p(reg.data + 8);
+    if (!size || size > 0x200000) {
+        error_setg(errp, "modern SEP InvalidateHmac span is out of range");
+        return false;
+    }
+    memory_region_init_ram(&s->sep_ram, NULL, "apple-modern.sep", size,
+                           &error_fatal);
+    memory_region_add_subregion(get_system_memory(), base, &s->sep_ram);
+    return true;
 }
 
 static void modern_init(MachineState *machine)
@@ -271,6 +544,10 @@ static void modern_init(MachineState *machine)
         memory_region_add_subregion(get_system_memory(), r->physical_address,
                                     &s->cpu_register_ram[i]);
     }
+    if (!map_amcc(s, &error) || !map_aic(s, &error) || !map_sep(s, &error)) {
+        error_report_err(error);
+        exit(EXIT_FAILURE);
+    }
     s->cpu = ARM_CPU(object_new(machine->cpu_type));
     object_property_add_child(OBJECT(s), "cpu", OBJECT(s->cpu));
     object_unref(OBJECT(s->cpu));
@@ -283,6 +560,10 @@ static void modern_init(MachineState *machine)
     object_property_set_bool(OBJECT(s->cpu), "apple-modern-guarded", true,
                               &error_fatal);
     object_property_set_bool(OBJECT(s->cpu), "apple-modern-sprr", true,
+                              &error_fatal);
+    object_property_set_bool(OBJECT(s->cpu), "apple-modern-apsts", true,
+                              &error_fatal);
+    object_property_set_bool(OBJECT(s->cpu), "apple-modern-sysregs", true,
                               &error_fatal);
     object_property_set_uint(OBJECT(s->cpu), "cntfrq", s->timebase_frequency,
                              &error_fatal);
@@ -298,6 +579,13 @@ static void modern_init(MachineState *machine)
         object_property_set_link(OBJECT(s->cpu), "tag-memory",
                                  OBJECT(&s->tag_memory), &error_fatal);
     }
+    /*
+     * As in Darwin-VM: limit SME streaming vector lengths to 128/256/512
+     * bits. With QEMU's max (2048-bit) SVL, XNU's per-thread ZA save area
+     * exceeds its zone element limit ("zone_create: element size too large:
+     * 74328") and the kernel panics during early zone setup.
+     */
+    s->cpu->sme_vq.supported = 0x0b;
     qdev_realize(DEVICE(s->cpu), NULL, &error_fatal);
     qdev_connect_gpio_out(DEVICE(s->cpu), GTIMER_HYPVIRT,
                           qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_FIQ));

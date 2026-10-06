@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * CONFIG/UPERM/PPERM have real permission effects in the page walker.
- * Hardware mask/lock controls are not approximated. EL0 may read UPERM but
- * writes remain unsupported until their permission mask is implemented.
+ * Hardware mask/lock controls are not approximated. As in Darwin's table
+ * (the _EL0 suffix gives it PL0_RW) EL0 may read and write UPERM; the iOS 27
+ * userspace toggles it at EL0 to switch JIT write protection. Real hardware
+ * limits which UPERM fields EL0 may change through a separate mask register;
+ * that control is not modeled, so every EL0 write takes effect.
+ * Execution at guarded EL0 selects UPERM through the guarded table; the
+ * walker keeps those TLB entries apart from ordinary EL0 by flushing the EL0
+ * translation regimes whenever guarded EL0 is entered or left.
  */
 #ifdef APPLE_MODERN_SPRR_STANDALONE
 #include <stddef.h>
@@ -50,8 +56,11 @@ int apple_modern_sprr_prot(const AppleModernSPRRState *state, unsigned el,
                      (((descriptor >> 6) & 3) << 2);
     uint64_t permissions;
 
-    /* Unsupported privilege levels fail closed. */
-    if (el > 2 || (el == 0 && guarded)) {
+    /*
+     * Unsupported privilege levels fail closed. Guarded EL0 (GL0) uses UPERM
+     * with the guarded table, as in Darwin: the iOS 27 SPTM runs TXM there.
+     */
+    if (el > 2) {
         return 0;
     }
     permissions = el ? state->pperm_el[el] : state->uperm_el0;
@@ -79,21 +88,34 @@ static void modern_sprr_write(CPUARMState *env, const ARMCPRegInfo *ri,
     tlb_flush(env_cpu(env));
 }
 
-#define SPRR_REG(n, crm_, op2_, member_, rights_) \
+static void modern_sprr_uperm_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                    uint64_t value)
+{
+    raw_write(env, ri, value);
+    /* UPERM only selects permissions for EL0 (and guarded EL0) accesses. */
+    tlb_flush_by_mmuidx(env_cpu(env),
+                        ARMMMUIdxBit_E10_0 | ARMMMUIdxBit_E20_0);
+}
+
+#define SPRR_REG_W(n, crm_, op2_, member_, rights_, write_) \
     { .name = n, .state = ARM_CP_STATE_AA64, \
       .opc0 = 3, .opc1 = 6, .crn = 15, .crm = crm_, .opc2 = op2_, \
-      .access = rights_, .resetvalue = 0, .writefn = modern_sprr_write, \
+      .access = rights_, .resetvalue = 0, .writefn = write_, \
       .raw_readfn = raw_read, .raw_writefn = raw_write, \
       .fieldoffset = offsetof(CPUARMState, modern_sprr.member_) }
+#define SPRR_REG(n, crm_, op2_, member_, rights_) \
+    SPRR_REG_W(n, crm_, op2_, member_, rights_, modern_sprr_write)
 
 static const ARMCPRegInfo modern_sprr_regs[] = {
     SPRR_REG("SPRR_CONFIG_EL1", 1, 0, config_el[1], PL1_RW),
     SPRR_REG("SPRR_CONFIG_EL2", 14, 2, config_el[2], PL2_RW),
     SPRR_REG("SPRR_PPERM_EL1", 1, 6, pperm_el[1], PL1_RW),
     SPRR_REG("SPRR_PPERM_EL2", 1, 7, pperm_el[2], PL2_RW),
-    SPRR_REG("SPRR_UPERM_EL0", 1, 5, uperm_el0, PL1_RW | PL0_R),
+    SPRR_REG_W("SPRR_UPERM_EL0", 1, 5, uperm_el0, PL0_RW,
+               modern_sprr_uperm_write),
 };
 #undef SPRR_REG
+#undef SPRR_REG_W
 
 void arm_register_apple_modern_sprr(ARMCPU *cpu)
 {

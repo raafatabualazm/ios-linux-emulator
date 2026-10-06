@@ -1442,7 +1442,8 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
     if (!arm_apple_modern_gxf_validate(cpu, errp) ||
         !arm_apple_modern_timers_validate(cpu, errp) ||
         !arm_apple_modern_sprr_validate(cpu, errp) ||
-        !arm_apple_modern_apsts_validate(cpu, errp)) {
+        !arm_apple_modern_apsts_validate(cpu, errp) ||
+        !arm_apple_modern_sysregs_validate(cpu, errp)) {
         return;
     }
 
@@ -2036,6 +2037,7 @@ static const Property arm_cpu_properties[] = {
     DEFINE_PROP_BOOL("apple-modern-guarded", ARMCPU, apple_modern_guarded, false),
     DEFINE_PROP_BOOL("apple-modern-sprr", ARMCPU, apple_modern_sprr, false),
     DEFINE_PROP_BOOL("apple-modern-apsts", ARMCPU, apple_modern_apsts, false),
+    DEFINE_PROP_BOOL("apple-modern-sysregs", ARMCPU, apple_modern_sysregs, false),
     DEFINE_PROP_UINT64("midr", ARMCPU, midr, 0),
     DEFINE_PROP_UINT64("mp-affinity", ARMCPU,
                         mp_affinity, ARM64_AFFINITY_INVALID),

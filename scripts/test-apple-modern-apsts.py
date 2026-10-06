@@ -215,21 +215,25 @@ static void reset_registers(ARMCPU *cpu) {
     ARMCPRegInfo *p1=named(cpu,"APSTS_EL1"),*p2=named(cpu,"APSTS_EL2"),
                  *p12=named(cpu,"APSTS_EL12");
     cpu->env.current_el=2; cpu->env.hcr=HCR_E2H;
+    /* Reset presents the post-loader handoff state: master key valid. */
     for (unsigned pass=0;pass<2;pass++) {
-        cpu->env.modern_apsts.ready_el[1]=true;
-        cpu->env.modern_apsts.ready_el[2]=true;
-        cp_reg_reset(p12,cpu);
-        CHECK(cpu->env.modern_apsts.ready_el[1] &&
-              cpu->env.modern_apsts.ready_el[2]);
+        cpu->env.modern_apsts.ready_el[1]=false;
+        cpu->env.modern_apsts.ready_el[2]=false;
+        cp_reg_reset(p12,cpu); /* Alias: no state of its own. */
+        CHECK(!cpu->env.modern_apsts.ready_el[1] &&
+              !cpu->env.modern_apsts.ready_el[2]);
         cp_reg_reset(p1,cpu);
-        CHECK(!cpu->env.modern_apsts.ready_el[1]);
-        CHECK(cpu->env.modern_apsts.ready_el[2]);
-        CHECK(read_reg(cpu,p12)==0 && read_reg(cpu,p1)==1);
-        cp_reg_reset(p2,cpu);
+        CHECK(cpu->env.modern_apsts.ready_el[1]);
         CHECK(!cpu->env.modern_apsts.ready_el[2]);
-        CHECK(read_reg(cpu,p1)==0 && read_reg(cpu,p2)==0);
-        CHECK(read_raw_cp_reg(&cpu->env,p1)==0);
-        CHECK(read_raw_cp_reg(&cpu->env,p2)==0);
+        CHECK(read_reg(cpu,p12)==1 && read_reg(cpu,p1)==0);
+        cp_reg_reset(p2,cpu);
+        CHECK(cpu->env.modern_apsts.ready_el[2]);
+        CHECK(read_reg(cpu,p1)==1 && read_reg(cpu,p2)==1);
+        CHECK(read_raw_cp_reg(&cpu->env,p1)==1);
+        CHECK(read_raw_cp_reg(&cpu->env,p2)==1);
+        /* Guest writes still cannot clear the status after reset. */
+        CHECK(!guest_write(cpu,p1,0) && !guest_write(cpu,p2,0));
+        CHECK(read_reg(cpu,p1)==1 && read_reg(cpu,p2)==1);
         CHECK(cpu->env.hcr==HCR_E2H && cpu->env.current_el==2);
     }
 }
@@ -257,7 +261,7 @@ int main(void) {
         CHECK(p->modern_vhe_snapshots==NULL); free(p->table.entries);
     }
     printf("%u modern APSTS production access/VHE/raw/reset/isolation checks passed "
-           "(ASan+UBSan; readiness true only in fixture; no CPU/firmware execution)\n",checks);
+           "(ASan+UBSan; reset presents handoff readiness; no CPU/firmware execution)\n",checks);
     return 0;
 }
 '''
@@ -296,10 +300,10 @@ def main():
         assert modern.count(expression) == 1
         variants.append(("guest-writable", shared,
                          modern.replace(expression, 'APSTS_REG("APSTS_EL1", 4, PL1_RW)')))
-        expression = "env->modern_apsts.ready_el[modern_apsts_bank(ri)] = false;"
+        expression = "env->modern_apsts.ready_el[modern_apsts_bank(ri)] = true;"
         assert modern.count(expression) == 1
-        variants.append(("incorrect-ready-reset", shared,
-                         modern.replace(expression, "env->modern_apsts.ready_el[modern_apsts_bank(ri)] = true;")))
+        variants.append(("not-ready-at-reset", shared,
+                         modern.replace(expression, "env->modern_apsts.ready_el[modern_apsts_bank(ri)] = false;")))
         expression = "state->ready_el[el] ? 1 : 0;"
         assert modern.count(expression) == 1
         variants.append(("reserved-status-bits", shared,

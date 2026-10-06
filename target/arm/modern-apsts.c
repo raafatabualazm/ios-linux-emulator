@@ -7,11 +7,16 @@
  * APSTS_EL2's name is tentative in that reference. These M1 observations
  * do not specify T8140 reset/initialization timing or an Apple PAC primitive.
  *
- * Bit 0 reflects internal backend readiness; all other bits read zero. No
- * production key-initialization contract exists yet, so readiness remains
- * false. This profile is default-off and is not enabled on the firmware board.
- * It changes neither APCTL controls nor the existing PAUTH algorithms.
- * Migration of backend readiness is unsupported (ARM_CP_NO_RAW).
+ * Bit 0 (M Key Valid) reflects internal readiness; all other bits read zero.
+ * The iOS 27 SPTM spins on this bit immediately after enabling its MMU
+ * (sptm offset 0x9f5d8) without writing anything that could set it, so the
+ * hardware/boot firmware must have established the master key before the
+ * handoff. Asahi's M1 dumps read 1 after Apple's loader. The modern boards
+ * start the CPU at that handoff, so reset presents the post-loader state:
+ * ready. The Apple key transformation itself is not modeled: PAC keeps using
+ * the CPU's architectural algorithm with the guest-written keys, and APCTL is
+ * a separate store. Guest writes cannot change readiness. Migration of
+ * readiness is unsupported (ARM_CP_NO_RAW); it is re-established at reset.
  */
 #include "qemu/osdep.h"
 #include "qapi/error.h"
@@ -80,7 +85,8 @@ static void modern_apsts_write_ignored(CPUARMState *env,
 
 static void modern_apsts_reset(CPUARMState *env, const ARMCPRegInfo *ri)
 {
-    env->modern_apsts.ready_el[modern_apsts_bank(ri)] = false;
+    /* Handoff state: the master key was generated before the CPU starts. */
+    env->modern_apsts.ready_el[modern_apsts_bank(ri)] = true;
 }
 
 #define APSTS_REG(n, op2_, rights_) \

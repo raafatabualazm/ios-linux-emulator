@@ -39,6 +39,12 @@ typedef struct CPUARMState {
     uint64_t legacy_canary[8], currentg;
     unsigned current_el;
 } CPUARMState;
+/* Fixture view of the CPU state predicates used by the production walker. */
+static inline int arm_current_el(CPUARMState *env) { return env->current_el; }
+static inline bool arm_is_modern_guarded(CPUARMState *env)
+{
+    return env->currentg & 1;
+}
 '''
 
 
@@ -89,7 +95,8 @@ static void test_masks(void)
         if (el) state.pperm_el[el] = value;
         else state.uperm_el0 = value;
         AppleModernSPRRState saved = state;
-        unsigned expected = el == 0 && gl ? 0 : (gl ? guarded[nibble] : ordinary[nibble]);
+        /* Guarded EL0 selects UPERM through the guarded table (Darwin). */
+        unsigned expected = gl ? guarded[nibble] : ordinary[nibble];
         uint64_t pte = descriptor(selector);
         CHECK((unsigned)apple_modern_sprr_prot(&state, el, gl, pte) == expected);
         /* Every descriptor bit outside the four selector bits is irrelevant. */
@@ -136,7 +143,8 @@ static void test_regimes(void)
     for (unsigned r = 0; r < sizeof(regimes) / sizeof(regimes[0]); r++)
     for (unsigned selector = 0; selector < 16; selector++)
     for (unsigned nibble = 0; nibble < 16; nibble++)
-    for (unsigned current = 0; current < 4; current++) {
+    for (unsigned current = 0; current < 4; current++)
+    for (unsigned g = 0; g < 2; g++) {
         CPUARMState env = {0};
         const Regime *regime = &regimes[r];
         env.modern_sprr.uperm_el0 = permissions(selector, (nibble + 5) & 15);
@@ -145,11 +153,16 @@ static void test_regimes(void)
         if (!regime->el) env.modern_sprr.uperm_el0 = permissions(selector, nibble);
         else if (regime->el < 3) env.modern_sprr.pperm_el[regime->el] = permissions(selector, nibble);
         env.current_el = current;
-        env.currentg = current;
+        env.currentg = g ? current | 1 : current & ~1u;
         memset(env.legacy_canary, 0x9b, sizeof(env.legacy_canary));
         CPUARMState saved = env;
+        /*
+         * User regimes are guarded only while executing at guarded EL0; AT
+         * S1E0* from a higher level keeps the ordinary user table.
+         */
+        bool gl = regime->gl || (regime->el == 0 && current == 0 && g);
         unsigned expected = regime->el == 3 ? 0 :
-                            (regime->gl ? guarded[nibble] : ordinary[nibble]);
+                            (gl ? guarded[nibble] : ordinary[nibble]);
         CHECK((unsigned)modern_sprr_regime_prot(&env, regime->index, true, descriptor(selector)) == expected);
         CHECK(modern_sprr_regime_prot(&env, regime->index, false, descriptor(selector)) == 0);
         CHECK(memcmp(&env, &saved, sizeof(env)) == 0);
@@ -198,6 +211,11 @@ def main():
         raw_call = 'guarded, descriptor);'
         if production.count(raw_call) != 1:
             raise RuntimeError('Missing raw descriptor argument to permission helper')
+        override = 'arm_is_modern_guarded(env)) {\n        guarded = true;'
+        if production.count(override) != 1:
+            raise RuntimeError('Missing guarded EL0 permission selection')
+        variants.append(('ordinary-only-EL0-oracle', production.replace(override,
+                          'arm_is_modern_guarded(env)) {\n        guarded = false;')))
         variants.append(('folded-XN-selector-oracle', production.replace(raw_call,
                           'guarded, descriptor | (UINT64_C(1) << 53));')))
     with tempfile.TemporaryDirectory(prefix='apple-sprr-unit-') as directory:

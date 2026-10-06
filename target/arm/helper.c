@@ -7186,6 +7186,9 @@ void register_cp_regs_for_features(ARMCPU *cpu)
     if (cpu->apple_modern_apsts) {
         arm_register_apple_modern_apsts(cpu);
     }
+    if (cpu->apple_modern_sysregs) {
+        arm_register_apple_modern_sysregs(cpu);
+    }
 
     /*
      * Register redirections and aliases must be done last,
@@ -7201,6 +7204,9 @@ void register_cp_regs_for_features(ARMCPU *cpu)
         }
         if (cpu->apple_modern_apsts) {
             arm_register_apple_modern_apsts_aliases(cpu);
+        }
+        if (cpu->apple_modern_sysregs) {
+            arm_register_apple_modern_sysreg_aliases(cpu);
         }
         if (cpu->apple_modern_timers) {
             arm_define_vhe_alias(cpu,
@@ -8780,8 +8786,23 @@ static void arm_cpu_do_interrupt_aarch64(CPUState *cs)
     unsigned int cur_el = arm_current_el(env);
     int rt;
 
+    if (cs->exception_index == EXCP_UDEF && cur_el == 0 &&
+        qemu_loglevel_mask(LOG_UNIMP)) {
+        uint32_t words[3] = {0};
+        cpu_memory_rw_debug(cs, env->pc, words, sizeof(words), 0);
+        qemu_log_mask(LOG_UNIMP, "EL0 UNDEFINED at pc 0x%" PRIx64
+                      " insn 0x%08x (next 0x%08x 0x%08x) hcr 0x%" PRIx64
+                      " esr class 0x%x\n", env->pc, words[0], words[1],
+                      words[2], arm_hcr_el2_eff(env),
+                      (unsigned)(env->exception.syndrome >> ARM_EL_EC_SHIFT));
+    }
+
     if (modern_gl) {
         addr = env->modern_gxf.vbar_gl[new_el];
+        if (cur_el == 0) {
+            /* Leaving guarded EL0: its entries must not serve ordinary EL0. */
+            tlb_flush_by_mmuidx(cs, ARMMMUIdxBit_E10_0 | ARMMMUIdxBit_E20_0);
+        }
     } else if (arm_is_guarded(env)) {
         addr = env->gxf.vbar_gl[new_el];
     }

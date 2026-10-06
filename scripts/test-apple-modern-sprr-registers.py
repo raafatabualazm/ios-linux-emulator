@@ -30,7 +30,8 @@ def prelude():
     source = GXF.PRELUDE.replace('#include "modern-gxf.h"',
                                 '#include "modern-gxf.h"\n#include "modern-sprr.h"')
     source = source.replace("PL3_RW=0xc0, PL2_RW=0xf0, PL1_RW=0xfc",
-                            "PL3_RW=0xc0, PL2_RW=0xf0, PL1_RW=0xfc, PL0_R=0xaa")
+                            "PL3_RW=0xc0, PL2_RW=0xf0, PL1_RW=0xfc, PL0_R=0xaa, "
+                            "PL0_RW=0xff")
     source = source.replace("typedef struct CPUARMState {", """
 typedef struct CPUState { unsigned flushes; } CPUState;
 static CPUState *last_flush;
@@ -64,6 +65,14 @@ static void ARMCPRegTable_set_at(Table *t, uint32_t key, ARMCPRegInfo value) {
 static CPUState *env_cpu(CPUARMState *env) { return env->owner; }
 static void tlb_flush(CPUState *cpu) {
     assert(cpu); cpu->flushes++; last_flush = cpu;
+}
+/* UPERM writes flush only the EL0 regimes (ordinary and guarded EL0). */
+#define ARMMMUIdxBit_E10_0 (1u << 0)
+#define ARMMMUIdxBit_E20_0 (1u << 1)
+static void tlb_flush_by_mmuidx(CPUState *cpu, unsigned idxmap) {
+    assert(cpu);
+    assert(idxmap == (ARMMMUIdxBit_E10_0 | ARMMMUIdxBit_E20_0));
+    cpu->flushes++; last_flush = cpu;
 }
 '''
     return source
@@ -176,7 +185,8 @@ static void encodings(ARMCPU *cpu) {
         for (unsigned el=0;el<3;el++) {
             cpu->env.current_el=el; cpu->env.hcr=HCR_E2H;
             CHECK(access_ok(cpu,ri,true)==(el>=want[i].el));
-            CHECK(access_ok(cpu,ri,false)==(el>=(want[i].el ? want[i].el : 1)));
+            /* Read and write share the minimum level, including UPERM at EL0. */
+            CHECK(access_ok(cpu,ri,false)==(el>=want[i].el));
         }
     }
 }
@@ -230,9 +240,11 @@ static void uperm(ARMCPU *cpu) {
     write_reg(cpu,ri,UINT64_C(0x8badf00dfeedcafe));
     cpu->env.current_el=0;
     CHECK(read_reg(cpu,ri)==UINT64_C(0x8badf00dfeedcafe));
-    CHECK(!access_ok(cpu,ri,false));
+    /* EL0 may write UPERM (Darwin's PL0_RW); the mask control is unmodeled. */
+    write_reg(cpu,ri,UINT64_C(0x0123456789abcdef));
+    CHECK(read_reg(cpu,ri)==UINT64_C(0x0123456789abcdef));
     cpu->env.current_el=2; cpu->env.hcr=HCR_E2H;
-    CHECK(read_reg(cpu,ri)==UINT64_C(0x8badf00dfeedcafe));
+    CHECK(read_reg(cpu,ri)==UINT64_C(0x0123456789abcdef));
     write_reg(cpu,ri,UINT64_MAX);
     CHECK(raw_value(cpu,ri)==UINT64_MAX);
     raw_store(cpu,ri,UINT64_C(0x1234567800000000));
@@ -327,6 +339,10 @@ def main():
         assert modern.count("tlb_flush(env_cpu(env));") == 1
         variants.append(("missing-flush", shared, modern.replace("tlb_flush(env_cpu(env));",
             "if (value == UINT64_C(0x3141592653589793)) { tlb_flush(env_cpu(env)); }")))
+        uperm_flush = "tlb_flush_by_mmuidx(env_cpu(env),"
+        assert modern.count(uperm_flush) == 1
+        variants.append(("missing-uperm-flush", shared, modern.replace(uperm_flush,
+            "if (value == UINT64_C(0x3141592653589793)) tlb_flush_by_mmuidx(env_cpu(env),")))
     flags = subprocess.check_output(["pkg-config", "--cflags", "--libs", "glib-2.0"],
                                     text=True, timeout=30).split()
     with tempfile.TemporaryDirectory(prefix="inferno-modern-sprr-registers-") as scratch:
