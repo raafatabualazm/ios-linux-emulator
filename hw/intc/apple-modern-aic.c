@@ -290,9 +290,35 @@ bool apple_modern_aic_core_write(AppleModernAICCore *s, uint64_t offset,
 #include "qemu/log.h"
 #include "qemu/module.h"
 
+#define APPLE_MODERN_AIC_TRACE_LIMIT 200
+
+static void apple_modern_aic_trace(AppleModernAICState *s, const char *what,
+                                   uint64_t offset, unsigned size,
+                                   uint64_t value)
+{
+    if (!s->trace || !s->asserted ||
+        s->traced >= APPLE_MODERN_AIC_TRACE_LIMIT) {
+        return;
+    }
+    s->traced++;
+    qemu_log_mask(LOG_UNIMP, "apple-modern-aic: %s +0x%06" PRIx64 " size %u "
+                  "value 0x%" PRIx64 "%s\n", what, offset, size, value,
+                  s->traced == APPLE_MODERN_AIC_TRACE_LIMIT ? " (limit)" : "");
+}
+
 static void apple_modern_aic_update(AppleModernAICState *s)
 {
-    qemu_set_irq(s->irq, apple_modern_aic_core_output(&s->core));
+    bool level = apple_modern_aic_core_output(&s->core);
+
+    if (s->trace && level != s->asserted) {
+        s->asserted = level;
+        if (s->traced < APPLE_MODERN_AIC_TRACE_LIMIT) {
+            s->traced++;
+            qemu_log_mask(LOG_UNIMP, "apple-modern-aic: output %s\n",
+                          level ? "ASSERTED" : "deasserted");
+        }
+    }
+    qemu_set_irq(s->irq, level);
 }
 
 static MemTxResult apple_modern_aic_read(void *opaque, hwaddr offset,
@@ -310,6 +336,7 @@ static MemTxResult apple_modern_aic_read(void *opaque, hwaddr offset,
         return MEMTX_ERROR;
     }
     *value = result;
+    apple_modern_aic_trace(s, "read ", offset, size, result);
     apple_modern_aic_update(s);
     return MEMTX_OK;
 }
@@ -320,6 +347,7 @@ static MemTxResult apple_modern_aic_write(void *opaque, hwaddr offset,
 {
     AppleModernAICState *s = opaque;
 
+    apple_modern_aic_trace(s, "write", offset, size, value);
     if (!apple_modern_aic_core_write(&s->core, offset, size, value)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "apple-modern-aic: unsupported write at 0x%" HWADDR_PRIx
@@ -391,6 +419,7 @@ static const Property apple_modern_aic_properties[] = {
                        geometry.timestamp_offset, 0),
     DEFINE_PROP_UINT32("timestamp-size", AppleModernAICState,
                        geometry.timestamp_size, 0),
+    DEFINE_PROP_BOOL("trace", AppleModernAICState, trace, false),
     DEFINE_PROP_UINT32("mmio-size", AppleModernAICState, geometry.mmio_size, 0),
 };
 

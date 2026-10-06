@@ -79,6 +79,14 @@ struct AppleModernAICState {
     qemu_irq irq;
     AppleModernAICGeometry geometry;
     AppleModernAICCore core;
+    /*
+     * Bounded delivery diagnostic (trace=on). Logs output transitions and the
+     * accesses that follow the first assertion, so interrupt delivery and the
+     * guest's acknowledge path can be observed without unbounded output.
+     */
+    bool trace;
+    bool asserted;
+    uint32_t traced;
 };
 #endif
 

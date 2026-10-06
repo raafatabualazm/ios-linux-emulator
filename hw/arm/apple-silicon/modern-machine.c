@@ -558,6 +558,7 @@ static bool map_aic(AppleModernMachine *s, Error **errp)
                                  stamp_count * stamp_stride);
         }
         qdev_prop_set_uint32(s->aic, "mmio-size", size);
+        qdev_prop_set_bit(s->aic, "trace", s->aic_trace);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(s->aic), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(s->aic), 0, base);
         s->aic_num_irqs = num_irqs;
@@ -869,9 +870,18 @@ static void modern_init(MachineState *machine)
      * (uart0 "interrupts", 0x444 on this tree); otherwise the console stays
      * polled, as it was before the controller existed.
      */
-    apple_uart_create(uart, 15, 0, serial_hd(0),
-                      s->aic && s->uart_irq < s->aic_num_irqs ?
-                      qdev_get_gpio_in(s->aic, s->uart_irq) : NULL);
+    if (s->aic && s->uart_irq < s->aic_num_irqs) {
+        warn_report("apple-modern: UART bound to AIC IRQ %u", s->uart_irq);
+        apple_uart_create(uart, 15, 0, serial_hd(0),
+                          qdev_get_gpio_in(s->aic, s->uart_irq));
+    } else {
+        if (s->aic) {
+            warn_report("apple-modern: UART left polled (ADT interrupt %u is "
+                        "outside the %u controller inputs)", s->uart_irq,
+                        s->aic_num_irqs);
+        }
+        apple_uart_create(uart, 15, 0, serial_hd(0), NULL);
+    }
     qemu_register_reset(modern_reset, s);
     s->initialized = true;
 }
