@@ -319,7 +319,8 @@ static void ats_write64(CPUARMState *env, const ARMCPRegInfo *ri,
     bool regime_e20 = (hcr_el2 & (HCR_E2H | HCR_TGE)) == (HCR_E2H | HCR_TGE);
     bool for_el3 = false;
     ARMSecuritySpace ss;
-    bool guarded = arm_is_guarded(env);
+    /* Modern SPRR permissions follow the guarded translation regime. */
+    bool guarded = arm_is_any_guarded(env);
 
     switch (ri->opc2 & 6) {
     case 0:

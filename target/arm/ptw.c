@@ -1096,6 +1096,23 @@ pte_to_sprr_prot(CPUARMState *env, int ap, int xn, int pxn)
     return pte_to_sprr_prot_is_guarded(env, ap, xn, pxn, arm_is_guarded(env));
 }
 
+static int modern_sprr_regime_prot(CPUARMState *env, ARMMMUIdx mmu_idx,
+                                    bool aarch64, uint64_t descriptor)
+{
+    unsigned permission_el = regime_is_user(env, mmu_idx) ? 0 :
+                             regime_el(env, mmu_idx);
+    bool guarded = arm_mmu_idx_is_guarded(mmu_idx) ||
+                   mmu_idx == ARMMMUIdx_Stage1_GE1 ||
+                   mmu_idx == ARMMMUIdx_Stage1_GE1_PAN;
+
+    /* AArch32 permission semantics are unsupported by this opt-in profile. */
+    if (!aarch64) {
+        return 0;
+    }
+    return apple_modern_sprr_prot(&env->modern_sprr, permission_el,
+                                  guarded, descriptor);
+}
+
 static bool get_phys_addr_v5(CPUARMState *env, S1Translate *ptw,
                              uint32_t address, MMUAccessType access_type,
                              GetPhysAddrResult *result, ARMMMUFaultInfo *fi)
@@ -2227,8 +2244,16 @@ static bool get_phys_addr_lpae(CPUARMState *env, S1Translate *ptw,
          * Note that we modified ptw->in_space earlier for NSTable, but
          * result->f.attrs retains a copy of the original security space.
          */
-        result->f.prot = get_S1prot(env, mmu_idx, aarch64, user_rw, prot_rw,
-                                    xn, pxn, result->f.attrs.space, out_space);
+        if (cpu->apple_modern_sprr &&
+            apple_modern_sprr_enabled(&env->modern_sprr)) {
+            /* Darwin selects the raw leaf bits, before APTable/XN folding. */
+            result->f.prot = modern_sprr_regime_prot(env, mmu_idx,
+                                                    aarch64, descriptor);
+        } else {
+            result->f.prot = get_S1prot(env, mmu_idx, aarch64, user_rw, prot_rw,
+                                        xn, pxn, result->f.attrs.space,
+                                        out_space);
+        }
 
         if (access_type == MMU_INST_FETCH) {
             if (arm_is_sprr_enabled(env) && !arm_is_guarded(env)) {

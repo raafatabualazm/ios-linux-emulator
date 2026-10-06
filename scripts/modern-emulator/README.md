@@ -7,7 +7,12 @@ checkout; `evidence` is an ignored local compatibility link.
 
 The current integration base is `linux-restore` commit
 `38f5665ecfc98ca2e5b32809717b81fc978cbbcd`. The original dirty checkout and both
-publication worktrees remain separate. The new branch is `modern-ios`.
+publication worktrees remain separate. Combined development is on `modern-ios`
+in `Inferno/integration`. The qualified SPRR extension is isolated on
+`darwin-cpu-verified` in `Inferno/darwin-cpu`; additional integration
+system-register/AMCC/metadata/PTW and USB/runtime edits remain preserved.
+This directory documents operating systems and hardware emulation, from CPU
+and firmware handoff through display/input and the application lifecycle.
 
 ## Implemented and measured
 
@@ -20,8 +25,10 @@ publication worktrees remain separate. The new branch is `modern-ios`.
   on three retained boots; Settings opened by touch. Signed per-report deltas,
   60 Hz sampling and stationary frames form an empirical working configuration.
   The wake/swipe order also affects the result, so the comparisons do not isolate
-  one cause or establish Apple wire units. A fresh copied state is continuing
-  app navigation. IPA installation and modern iOS GUI remain unverified.
+  one cause or establish Apple wire units. A fresh nine-store copied state
+  verified Home → Settings → Home → Notes → Home, with Notes Continue accepted
+  and its empty list visible. F6 returns Home; the measured bottom-edge swipe
+  still scrolls Settings. IPA installation and modern iOS GUI remain unverified.
 - Strict firmware selection prepared unchanged iPhone17,3/d47ap iOS27.0/24A437
   kernel, device tree, SPTM, TXM and stock restore trustcache with hashes.
   Explicit optional extraction also prepares the matched restore ramdisk;
@@ -32,14 +39,31 @@ publication worktrees remain separate. The new branch is `modern-ios`.
   full userspace is qualified yet.
 - An opt-in modern register interface has 23 base registers and 9 VHE aliases,
   independent GL1/GL2 banks and CPU-owned alias metadata. It passes 299 sanitizer
-  checks and two actual CPU instruction/reset runs. Guarded entry/exit and page
-  protections remain unimplemented; default legacy CPU properties are unchanged.
+  checks and two actual CPU instruction/reset runs. Later Darwin ports add
+  Apple timer views/stores, GENTER/GEXIT, guarded SP/exception/ERET routing,
+  authenticated ERETAA and shared-context ASID invalidation. Four timer,
+  four guarded and two actual board FIQ runs pass across reset. Default
+  generic CPU profiles remain off; `apple-modern` enables the modern profiles.
+- A separate modern SPRR model implements CONFIG/PPERM/UPERM banks, VHE aliases,
+  raw leaf AP/UXN/PXN permission lookup, write-triggered TLB invalidation and
+  A64 guarded AT context selection. ASan/UBSan fixtures pass 55,419
+  permission/regime, 536 register/alias and 57,344 AT checks. Six actual
+  synthetic-ROM execution passes cover omitted/disabled/enabled profiles,
+  each before and after reset. Enabled passes include actual read/write/execute
+  accesses, 21 expected level-3 permission faults, live permission changes
+  without guest TLBI and ten authenticated guarded returns per pass.
 - Experimental `apple-modern` prepares unchanged assets in RAM and defaults to
   halting the CPU. Whole-machine preparation/reset verifies PC/x0/EL2h, complete
-  bootargs/ADT/stock trustcache, 23 sampled segments and zero BSS. One bounded
-  unchanged-SPTM execution hit unsupported `MSR S3_1_C15_C9_4, XZR`; it did not
-  boot the kernel or iOS. Modern interrupt/storage/display/touch devices remain
-  unfinished.
+  bootargs/ADT/stock trustcache, 23 sampled segments and zero BSS. Two bounded
+  stock ADT CPU register windows provide 86,048 bytes of zeroed compatibility
+  RAM; full reads and nonzero write/reset patterns pass. The final stopped
+  board gate also verifies its enabled SPRR property. Unchanged SPTM now passes
+  the former timer and SPRR register failures and stops at APSTS_EL1,
+  `MRS S3_6_C15_C12_4,X0`, physical PC `0x100070a35d8`, source offset `0x9f5d8`.
+  The 52.213 ms observation stopped cleanly, exited 0 and reaped its child,
+  with executable and all five component hashes unchanged. XNU and modern
+  userspace have not booted. Modern interrupt/storage/display/touch devices
+  remain unfinished.
 - Runtime/diagnostics passed a 96-case review with a real loopback RFB handshake,
   signal-aware guest reaping, conservative dead-session recovery, and recorder
   run/PID binding. Later companion fixes have their own regression gate.
@@ -51,6 +75,33 @@ publication worktrees remain separate. The new branch is `modern-ios`.
 Detailed command references: [firmware](tools/firmware/README.md),
 [apps](tools/apps/README.md). Runtime commands below run from the shared
 `Inferno-and-Darwin-VM` workspace root.
+
+### October 6 modern CPU checkpoint
+
+The six SPRR CPU/reset passes used `qemu-system-aarch64-sprr-gate-v1`, SHA-256
+`768d7d61daac4d7f5f60c23a760c68a2b6cdfd95b616cafe4336cda205ecd3df`.
+The final board pin is `qemu-system-aarch64-darwin-sprr-v1`, SHA-256
+`27f30b9bbd74be317190929b46fecab37f9fbbc94ab57c3b7654528f7f78e08a`.
+Subsequent board-property and preparation-check changes passed the stopped
+board/reset gate on this final pin. The preceding ten timer/guarded/FIQ runs
+used `qemu-system-aarch64-darwin-port-v1`, SHA-256
+`8bc7e5abcb091d05a20747e22e72b1bb124d12bf5f7e1d57820d3963435e9437`.
+These are separate measured executable results.
+
+The CPU windows are register RAM with no modeled hardware locks or side
+effects. SPRR's UPERM register allows EL0 reads; EL0 writes remain unsupported
+until mask controls are modeled. User-bank AT instructions were tested from
+EL2/GL2 without executing an EL0 guest. Guarded EL0, AArch32, cross-EL guarded
+behavior, CTRR/AMCC locking and migration remain unqualified. SPRR VHE aliases
+have component checks; the SPRR execution ROM does not qualify VHE guest
+execution. See [the Darwin port inventory](../../docs/darwin-port.md) for
+supported behavior and retained reference revisions.
+
+Private evidence:
+`modern-emulator/evidence/features-20261006/{darwin-sprr-owned-rom-v1,sprr-board-preparation-final,darwin-sptm-sprr-v1}/`.
+The next CPU interface is APSTS/control behavior. Integrate it from reference
+evidence while preserving active pointer authentication and earlier source;
+matched userspace and modern device adapters remain necessary for SpringBoard.
 
 ## Build the integration candidate
 
@@ -69,6 +120,12 @@ ninja -j4 qemu-system-aarch64
 
 Pin the resulting executable when preparing a state bundle. A binary update
 requires a separately prepared bundle rather than changing a pinned manifest.
+
+For the isolated SPRR source, use `Inferno/darwin-cpu` and a separate build
+directory such as `modern-emulator/build-darwin-cpu`. The recorded native
+build additionally used `--enable-fdt=internal --enable-vnc --disable-download`
+with its already prepared local subproject dependencies. The existing
+integration build and pinned GUI states remain separate.
 
 To preserve a stopped state's setup progress with a different executable:
 
@@ -245,6 +302,29 @@ python3 Inferno/integration/scripts/test-apple-modern-boot-metadata.py \
 The whole-machine gate never resumes the guest; its RAM dumps are transient.
 The CPU gate executes a small owned register-test ROM on generic `virt`.
 Neither qualifies an iOS boot or SpringBoard.
+
+The current SPRR extension has separate component, actual instruction and
+stopped-board gates. Use fresh report destinations:
+
+```sh
+ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
+  python3 Inferno/darwin-cpu/scripts/test-apple-modern-sprr.py
+ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
+  python3 Inferno/darwin-cpu/scripts/test-apple-modern-sprr-registers.py
+ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
+  python3 Inferno/darwin-cpu/scripts/test-apple-modern-at.py
+python3 Inferno/darwin-cpu/scripts/test-apple-modern-sprr-qemu.py \
+  --binary modern-emulator/bin/qemu-system-aarch64-sprr-gate-v1 \
+  --output-dir /path/to/new/private/sprr-report
+python3 Inferno/darwin-cpu/scripts/test-apple-modern-machine.py \
+  --binary modern-emulator/bin/qemu-system-aarch64-darwin-sprr-v1 \
+  --components /path/to/matched/decoded-components \
+  --qmp-stdio --check-register-reset-pattern \
+  --output-dir /path/to/new/private/board-report
+```
+
+LeakSanitizer was disabled for recorded component runs after ptrace was denied
+in the earlier environment. ASan/UBSan results do not claim leak checking.
 
 ## Verification
 

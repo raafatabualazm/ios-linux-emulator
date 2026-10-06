@@ -5,7 +5,7 @@
  * Register encodings are recorded in the pinned Darwin-VM reference. Only
  * register storage and ordinary VHE aliases are implemented here. The
  * separate apple-modern-guarded profile enables CPU entry/exit handling;
- * modern memory protection and authentication remain unqualified.
+ * the separate modern SPRR profile supplies its declared permissions.
  */
 #include "qemu/osdep.h"
 #include "cpu.h"

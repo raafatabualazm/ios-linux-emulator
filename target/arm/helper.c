@@ -7180,6 +7180,9 @@ void register_cp_regs_for_features(ARMCPU *cpu)
     if (cpu->apple_modern_gxf) {
         arm_register_apple_modern_gxf(cpu);
     }
+    if (cpu->apple_modern_sprr) {
+        arm_register_apple_modern_sprr(cpu);
+    }
 
     /*
      * Register redirections and aliases must be done last,
@@ -7189,6 +7192,9 @@ void register_cp_regs_for_features(ARMCPU *cpu)
         define_arm_vh_e2h_redirects_aliases(cpu);
         if (cpu->apple_modern_gxf) {
             arm_register_apple_modern_gxf_aliases(cpu);
+        }
+        if (cpu->apple_modern_sprr) {
+            arm_register_apple_modern_sprr_aliases(cpu);
         }
         if (cpu->apple_modern_timers) {
             arm_define_vhe_alias(cpu,

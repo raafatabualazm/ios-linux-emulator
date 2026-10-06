@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * The register interface and the optional guarded execution profile are
- * separate from the older A13 GXF model. Memory protection is not modelled.
+ * separate from the older A13 GXF model. The optional modern SPRR profile
+ * supplies its declared page-permission mapping separately.
  */
 #ifndef ARM_MODERN_GXF_H
 #define ARM_MODERN_GXF_H

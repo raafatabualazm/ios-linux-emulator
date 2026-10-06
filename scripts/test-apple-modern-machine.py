@@ -579,7 +579,8 @@ def run(binary: Path, components: Path, output: Path, ramdisk: Path | None = Non
                     status = qmp.request("query-status")
                     require(status["running"] is False, "CPU remains stopped; no guest execution requested")
                     cpu_properties = {}
-                    for name in ("apple-modern-gxf", "apple-modern-timers", "apple-modern-guarded"):
+                    for name in ("apple-modern-gxf", "apple-modern-timers",
+                                 "apple-modern-guarded", "apple-modern-sprr"):
                         value = qmp.request("qom-get", {"path": cpu_path, "property": name})
                         require(value is True, "Modern CPU property enabled: " + name)
                         cpu_properties[name] = value

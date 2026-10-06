@@ -282,6 +282,8 @@ static void modern_init(MachineState *machine)
                               &error_fatal);
     object_property_set_bool(OBJECT(s->cpu), "apple-modern-guarded", true,
                               &error_fatal);
+    object_property_set_bool(OBJECT(s->cpu), "apple-modern-sprr", true,
+                              &error_fatal);
     object_property_set_uint(OBJECT(s->cpu), "cntfrq", s->timebase_frequency,
                              &error_fatal);
     object_property_set_link(OBJECT(s->cpu), "memory", OBJECT(get_system_memory()),
