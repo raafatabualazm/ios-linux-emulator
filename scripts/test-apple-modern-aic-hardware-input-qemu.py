@@ -16,11 +16,28 @@ line, checks it stays quiet with no data, and then requires exactly one IRQ
 exception whose acknowledge value names 1092, a status read showing data ready,
 and the injected byte. The sequence repeats across a system reset.
 
-Two further behaviours are MEASURED and RECORDED, not asserted, because they
-describe quirks of the existing UART model rather than anything the AIC does:
-whether a UCON write is stored (the model's write handler never assigns it, so
-the TX/RX threshold enables should be unreachable), and whether the line falls
-once the receive FIFO is drained (the URXH read path never refreshes the IRQ).
+Two behaviours of the UART model itself are ASSERTED, in BOTH directions. They
+were first measured here as quirks and recorded only (the gate passed against the
+quirky model, which hid them), and each is now behind an opt-in property, off by
+default and off on every shipped board:
+
+  * `drain-refresh`: the line must fall once the receive FIFO is drained. Off
+    (the historical model) the URXH read leaves the line high, so re-unmasking
+    delivers a second interrupt: the gate requires the count to be 2 and the raw
+    line to stay high after a FIFO-disabled read. On, it requires 1 and a low line.
+  * `ucon-store`: a UCON write must read back as written. Off (the historical
+    model) the write is dropped and UCON reads back 0, which the gate requires, so
+    an accidental flip of the default fails.
+
+`--uart-drain-refresh on` and `--uart-ucon-store on` add the matching
+`-global apple-uart.<name>=on`. The four combinations are independent and each is
+pinned. A second sequence feeds two bytes at once: the pop that leaves data must
+keep the level high (one more delivery on re-unmask), and only the pop that empties
+the FIFO lowers it. A third disables the FIFO, receives one byte and drains it
+through URXH, then reads the raw line level (the FIFO-disabled branch of the same
+refresh).
+Guest RAM survives system_reset, so the scratch words are rewritten with zeros on
+every reset; otherwise the second iteration would compare the first one's results.
 Firmware is never executed. This qualifies THIS model only.
 """
 import argparse
@@ -76,11 +93,23 @@ UART_IRQ = 1092              # ADT /arm-io/uart0 interrupts[0]
 UFCON, UCON, UTRSTAT, UFSTAT, URXH = 0x08, 0x04, 0x10, 0x18, 0x24
 UFCON_FIFO_ENABLE = 1
 UCON_TXTHRESH_ENA = 1 << 13
+UCON_WRITTEN = 0x2005        # TX-threshold enable | TX mode IRQ | RX mode IRQ
 UCON_TXMODE_IRQ = 1 << 2
 UCON_RXMODE_IRQ = 1
 UTRSTAT_RESET = 0x6          # Tx_EMPTY | Tx_BUFFER_EMPTY, per the model
 INJECTED = 0x5a
 PHASE_A_MARK = 0x600d        # ROM -> host: quiet check done, inject now
+PHASE_B_MARK = 0x600e        # ROM -> host: first sequence done, inject two bytes at once
+PHASE_C_MARK = 0x600f        # ROM -> host: FIFO disabled, inject one byte
+TWO_BYTES = bytes([0x41, 0x42])
+FIFO_OFF_BYTE = 0x43
+HW_STATE = MASK_CLEAR + NUM_IRQS // 32 * 4   # raw input levels, masking ignored
+LINE_BIT = 1 << (UART_IRQ & 31)
+LINE_WORD = AIC_BASE + HW_STATE + UART_IRQ // 32 * 4
+# msr daifset,#2. The value 0xd503425f that this gate used to emit (the AIC delivery and SEP
+# mailbox gates still emit it) disassembles as `msr dit,#2`, so IRQs were never masked again
+# after the first window. 0xd50342df is DAIFSet (op2 = 6).
+DAIFSET_2 = 0xd50342df
 
 REGS = {
     'HCR_EL2': (3, 4, 1, 1, 0), 'VBAR_EL2': (3, 4, 12, 0, 0),
@@ -102,8 +131,10 @@ def sysreg(name, register, read):
 class ROM:
     """Minimal AArch64 emitter; the same shape the timer gate uses."""
 
-    def __init__(self):
+    def __init__(self, ucon_expected=0, drain_refresh=False):
         self.words, self.expected = [], {}
+        self.ucon_expected = ucon_expected
+        self.drain_refresh = drain_refresh
 
     def emit(self, word):
         self.words.append(word)
@@ -158,10 +189,28 @@ class ROM:
         self.emit(0xd50342ff)                  # msr daifclr,#2
         for _ in range(64):
             self.emit(0xd503201f)              # nop
-        self.emit(0xd503425f)                  # msr daifset,#2
+        self.emit(DAIFSET_2)                   # msr daifset,#2
 
     def and1(self, register):
         self.emit(0x12000000 | (register << 5) | register)   # and w<r>,w<r>,#1
+
+    def movz(self, register, value):
+        require(0 <= value < 0x10000, 'movz immediate')
+        self.emit(0xd2800000 | (value << 5) | register)
+
+    def and_mask(self, register, mask):
+        """w<register> &= mask, through x1 (clobbered)."""
+        self.movz(1, mask)
+        self.emit(0x0a000000 | (1 << 16) | (register << 5) | register)  # and w<r>,w<r>,w1
+
+    def line(self, register=23):
+        """The raw uart0 input level from AIC HW_STATE, masked to the line's bit."""
+        self.read32(LINE_WORD, register)
+        self.and_mask(register, LINE_BIT)
+
+    def cbz_back(self, register, target_index):
+        displacement = target_index - len(self.words)
+        self.emit(0xb4000000 | ((displacement & 0x7ffff) << 5) | register)  # cbz x<r>
 
     def branch(self, target_index, condition=None):
         displacement = target_index - len(self.words)
@@ -192,13 +241,18 @@ class ROM:
         self.read32(UART_BASE + UTRSTAT, 23)
         self.trace('utrstat_reset', UTRSTAT_RESET, register=23)
 
-        # MEASURED, not asserted: is a UCON write stored? Written back to zero
-        # straight away so the line cannot be raised by a TX threshold either way.
+        # Is a UCON write stored? Asserted: 0 by default (the legacy model drops
+        # the write; an accidental default flip must fail) and UCON_WRITTEN with
+        # ucon-store on. Written back to zero straight away. With the store on,
+        # the write latches the TX-threshold request and raises the line while
+        # AIC input 1092 is still masked, and the following zero write lowers it
+        # again before the unmask below, so no delivery is expected before data.
+        # A -trace 'apple_uart_*' run showed the raise and the lower; the assertion
+        # that pins the absence of a delivery is quiet_before_data.
         self.write32(UART_BASE + UFCON, UFCON_FIFO_ENABLE)
-        self.write32(UART_BASE + UCON,
-                     UCON_TXTHRESH_ENA | UCON_TXMODE_IRQ | UCON_RXMODE_IRQ)
+        self.write32(UART_BASE + UCON, UCON_WRITTEN)
         self.read32(UART_BASE + UCON, 23)
-        self.trace('ucon_readback', None, register=23)
+        self.trace('ucon_readback', self.ucon_expected, register=23)
         self.write32(UART_BASE + UCON, 0)
 
         # No data yet: unmasking the line must not deliver anything.
@@ -211,7 +265,7 @@ class ROM:
         # The host now injects one byte; the line must raise exactly one IRQ.
         self.emit(0xd50342ff)                  # msr daifclr,#2
         self.await_count(1)
-        self.emit(0xd503425f)                  # msr daifset,#2
+        self.emit(DAIFSET_2)                   # msr daifset,#2
         self.trace('irq_count', 1, register=21)
         self.trace('irq_event', EVENT_IRQ | UART_IRQ, register=22)
 
@@ -227,11 +281,73 @@ class ROM:
         self.and1(23)
         self.trace('data_ready_after_drain', 0, register=23)
 
-        # MEASURED, not asserted: with the FIFO drained does the line fall? If
-        # the model never refreshed it, re-unmasking delivers a second IRQ.
+        # With the FIFO drained the line must have fallen. If the model never
+        # refreshed it (as before the URXH refresh), re-unmasking delivers a
+        # second IRQ, which this requires not to happen: the count stays at 1.
+        # With drain-refresh off the historical model leaves the line high and the
+        # count reaches 2: that is pinned too, so a default that silently starts
+        # refreshing fails here.
         self.unmask(UART_IRQ)
         self.window()
-        self.trace('irq_count_after_drain', None, register=21)
+        self.trace('irq_count_after_drain', 1 if self.drain_refresh else 2, register=21)
+
+        # Two bytes at once. A single os.write is not guaranteed to arrive in one
+        # chardev callback, so the ROM waits until the FIFO count reads 2 (IRQs are
+        # masked at the CPU meanwhile). Popping the first byte leaves data, so the
+        # level must stay high and re-unmasking must deliver exactly once more; only
+        # the pop that empties the FIFO lowers it.
+        self.mov(0, PHASE_B_MARK)
+        self.trace('phase_b_done', PHASE_B_MARK)
+        poll = len(self.words)
+        self.read32(UART_BASE + UFSTAT, 23)
+        self.emit(0x12000c00 | (23 << 5) | 23)  # and w23,w23,#0xf
+        self.emit(0x71000aff)                   # cmp w23,#2
+        self.branch(poll, 1)                    # b.ne
+        self.read32(UART_BASE + URXH, 23)
+        self.trace('two_first_byte', TWO_BYTES[0], register=23)
+        self.read32(UART_BASE + UTRSTAT, 23)
+        self.and1(23)
+        self.trace('two_data_ready_after_first_pop', 1, register=23)
+        self.window()
+        self.trace('two_irq_count_first', 2, register=21)
+        self.unmask(UART_IRQ)
+        self.window()
+        self.trace('two_irq_count_after_reunmask', 3, register=21)
+        self.read32(UART_BASE + URXH, 23)
+        self.trace('two_second_byte', TWO_BYTES[1], register=23)
+        self.read32(UART_BASE + UTRSTAT, 23)
+        self.and1(23)
+        self.trace('two_data_ready_after_second_pop', 0, register=23)
+        self.unmask(UART_IRQ)
+        self.window()
+        self.trace('two_irq_count_after_final_drain', 3 if self.drain_refresh else 4,
+                   register=21)
+
+        # FIFO disabled: a byte received now is held in URXH alone, and the URXH read
+        # that clears data-ready is the other branch of the refresh. The raw level is
+        # read from the AIC HW_STATE bank (masking is irrelevant to it).
+        self.write32(UART_BASE + UFCON, 0)
+        self.mov(0, PHASE_C_MARK)
+        self.trace('phase_c_done', PHASE_C_MARK)
+        poll = len(self.words)
+        self.read32(UART_BASE + UTRSTAT, 23)
+        self.and1(23)
+        self.cbz_back(23, poll)                 # until data-ready
+        self.read32(UART_BASE + URXH, 23)
+        self.trace('fifooff_byte', FIFO_OFF_BYTE, register=23)
+        self.read32(UART_BASE + UTRSTAT, 23)
+        self.and1(23)
+        self.trace('fifooff_data_ready_after_read', 0, register=23)
+        self.line()
+        self.trace('fifooff_line_after_read', 0 if self.drain_refresh else LINE_BIT,
+                   register=23)
+        # system_reset does not lower a device's output line, and with the refresh off
+        # the line is still high here: a UCON write refreshes it (a stored zero or a
+        # dropped write both call apple_uart_update_irq()), so the next iteration
+        # starts low.
+        self.write32(UART_BASE + UCON, 0)
+        self.line()
+        self.trace('fifooff_line_after_cleanup', 0, register=23)
 
         self.mov(0, 0xfeedfacecafebeef)
         self.trace('completion', 0xfeedfacecafebeef)
@@ -274,7 +390,7 @@ def child_limits():
     resource.setrlimit(resource.RLIMIT_AS, (16 << 30, 16 << 30))
 
 
-def run(binary, components, output):
+def run(binary, components, output, ucon_store='off', drain_refresh='off'):
     started = time.monotonic()
     asset_paths = {name: components / name for name in board.ASSETS}
     before = {name: digest(path) for name, path in asset_paths.items()}
@@ -291,10 +407,16 @@ def run(binary, components, output):
     require(shutil.disk_usage(output).free >= 64 * 1024 * 1024,
             'Minimum evidence free space')
 
-    rom = ROM()
+    rom = ROM(UCON_WRITTEN if ucon_store == 'on' else 0, drain_refresh == 'on')
     content = rom.build()
     rom_path = output / 'aic-hardware-input.rom'
     rom_path.write_bytes(content)
+    # Guest RAM survives system_reset (MEASURED: the second iteration used to see the
+    # first run's marks and completion word before the ROM had executed a single
+    # instruction, so its "pass" compared stale values). A second loader blob rewrites
+    # zeros over the scratch words and the fault counter on every reset.
+    zero_path = output / 'scratch-zero.bin'
+    zero_path.write_bytes(bytes(0x508))
     report = {'scope': 'Modern AIC hardware input path via the uart0 line; owned ROM only',
               'binary': str(binary), 'binary_sha256': digest(binary)['sha256'],
               'rom_sha256': digest(rom_path)['sha256'],
@@ -304,7 +426,14 @@ def run(binary, components, output):
               'event_offset_is_apple_documented': False,
               'line': {'device': '/arm-io/uart0', 'adt_interrupt': UART_IRQ,
                        'base': hex(UART_BASE)},
-              'uart_model_quirks_are_measured_not_asserted': True,
+              'uart_ucon_store': ucon_store,
+              'uart_drain_refresh': drain_refresh,
+              'uart_model_quirks_are_measured_not_asserted': False,
+              'asserted_uart_behaviours': {
+                  'irq_count_after_drain': 1 if drain_refresh == 'on' else 2,
+                  'two_irq_count_after_final_drain': 3 if drain_refresh == 'on' else 4,
+                  'fifooff_line_after_read': 0 if drain_refresh == 'on' else hex(LINE_BIT),
+                  'ucon_readback': hex(UCON_WRITTEN if ucon_store == 'on' else 0)},
               'guest_driver_exercised': False,
               'owned_range': {'start': hex(BASE), 'end': hex(PROBE_END)},
               'limits': {'wall_seconds': MAX_WALL, 'cpu_seconds': 30,
@@ -325,7 +454,11 @@ def run(binary, components, output):
                     '-nodefaults', '-display', 'none', '-serial', 'pipe:' + str(uart_pipe),
                     '-monitor', 'none',
                     '-device', f'loader,file={rom_path},addr={BASE},cpu-num=0,force-raw=true',
+                    '-device', f'loader,file={zero_path},addr={SCRATCH},force-raw=true',
                     '-S', '-qmp', 'stdio']
+            for name, value in (('ucon-store', ucon_store), ('drain-refresh', drain_refresh)):
+                if value == 'on':
+                    argv[1:1] = ['-global', 'apple-uart.' + name + '=on']
             report['argv'] = argv
             with log_path.open('xb') as log:
                 process = subprocess.Popen(argv, stdin=subprocess.PIPE,
@@ -377,13 +510,20 @@ def run(binary, components, output):
                     require(verify.read_bytes() == content,
                             'Owned ROM bytes are exact before cont')
                     verify.unlink()
+                    qmp.request('pmemsave', {'val': SCRATCH, 'size': 0x508,
+                                             'filename': str(verify)})
+                    require(verify.read_bytes() == bytes(0x508),
+                            'Scratch is zero before cont (no stale first-run values)')
+                    verify.unlink()
                     qmp.request('cont')
 
                     deadline = time.monotonic() + 10
                     dump = scratch / 'scratch.bin'
                     labels = list(rom.expected)
-                    phase_index = labels.index('phase_a_done')
-                    injected = False
+                    marks = {'phase_a_done': (PHASE_A_MARK, bytes([INJECTED])),
+                             'phase_b_done': (PHASE_B_MARK, TWO_BYTES),
+                             'phase_c_done': (PHASE_C_MARK, bytes([FIFO_OFF_BYTE]))}
+                    injected = set()
                     while True:
                         guard()
                         qmp.request('stop')
@@ -396,11 +536,12 @@ def run(binary, components, output):
                         # of tripping the harness's 64-event cap, which would
                         # replace the stalled-step diagnostic with a generic error.
                         qmp.events.clear()
-                        if not injected and len(raw) >= len(rom.expected) * 8 and \
-                                struct.unpack_from('<Q', raw, phase_index * 8)[0] == PHASE_A_MARK:
-                            # The ROM has proven the line quiet with no data.
-                            os.write(injector, bytes([INJECTED]))
-                            injected = True
+                        for label, (mark, payload) in marks.items():
+                            if label not in injected and len(raw) >= len(rom.expected) * 8 and \
+                                    struct.unpack_from('<Q', raw, labels.index(label) * 8)[0] == mark:
+                                # phase_a: the ROM has proven the line quiet with no data.
+                                os.write(injector, payload)
+                                injected.add(label)
                         done = len(raw) >= len(rom.expected) * 8 and struct.unpack_from(
                             '<Q', raw, (len(rom.expected) - 1) * 8)[0] == 0xfeedfacecafebeef
                         if done:
@@ -412,16 +553,19 @@ def run(binary, components, output):
                                 if len(raw) >= (i + 1) * 8 and
                                 struct.unpack_from('<Q', raw, i * 8)[0])
                             require(False, 'Owned ROM did not complete (injected=%s); '
-                                    'nonzero progress: %s' % (injected, progress))
+                                    'nonzero progress: %s' % (sorted(injected), progress))
                         qmp.request('cont')
                         time.sleep(0.05)
 
-                    observed = {}
+                    observed, failed = {}, []
                     for index, (label, expect) in enumerate(rom.expected.items()):
                         value = struct.unpack_from('<Q', raw, index * 8)[0]
                         observed[label] = hex(value)
-                        require(expect is None or value == expect,
-                                f'{label}: expected {expect!r}, observed {value:#x}')
+                        # Collect every mismatch rather than stopping at the first,
+                        # so a negative oracle shows exactly which checks it trips.
+                        if expect is not None and value != expect:
+                            shown = repr(expect) if expect < 10 else hex(expect)
+                            failed.append(f'{label}: expected {shown}, observed {value:#x}')
                     faults = scratch / 'faults.bin'
                     qmp.request('pmemsave', {'val': SCRATCH + 0x500, 'size': 8,
                                              'filename': str(faults)})
@@ -434,7 +578,9 @@ def run(binary, components, output):
                                              'measured_line_stuck_after_drain': drained > 1,
                                              'after_system_reset': bool(iteration),
                                              'observed': observed,
-                                             'completed': True})
+                                             'failed_checks': failed,
+                                             'completed': not failed})
+                    require(not failed, '; '.join(failed))
                 qmp.request('quit')
                 code = process.wait(timeout=10)
                 require(code == 0, f'Emulator exited {code}')
@@ -442,15 +588,27 @@ def run(binary, components, output):
         after = {name: digest(path) for name, path in asset_paths.items()}
         require(after == before, 'Firmware components are unchanged')
         report['component_hashes_after'] = after
-        report['passed'] = len(report['passes']) == 2
+        report['passed'] = (len(report['passes']) == 2 and
+                            all(item['completed'] for item in report['passes']))
+    except Exception as error:
+        # A failing run still leaves its evidence: which checks failed, and the
+        # emulator's last words (an unknown property, for one, stops it at creation).
+        report['error'] = str(error)
     finally:
         if process is not None:
             process.kill()
             process.wait(timeout=10)
+    if not report['passed'] and log_path.exists():
+        report['emulator_log_tail'] = log_path.read_text(errors='replace')[-600:]
     (output / 'report.json').write_text(json.dumps(report, indent=2, sort_keys=True))
     print(json.dumps({'passed': report['passed'],
                       'cpu_delivery_passes': len(report['passes']),
                       'binary_sha256': report['binary_sha256'],
+                      'uart_ucon_store': ucon_store,
+                      'uart_drain_refresh': drain_refresh,
+                      'failed_checks': [check for item in report['passes']
+                                        for check in item['failed_checks']],
+                      'error': report.get('error'),
                       'event_offset_is_apple_documented': False}))
     return 0 if report['passed'] else 1
 
@@ -460,9 +618,19 @@ def main():
     parser.add_argument('--binary', required=True, type=Path)
     parser.add_argument('--components', required=True, type=Path)
     parser.add_argument('--output-dir', required=True, type=Path)
+    parser.add_argument('--uart-ucon-store', choices=('off', 'on'), default='off',
+                        help='off: the shipped default, UCON must read back 0; on: '
+                             'pass -global apple-uart.ucon-store=on, UCON must read '
+                             'back as written')
+    parser.add_argument('--uart-drain-refresh', choices=('off', 'on'), default='off',
+                        help='off: the shipped default, the line stays high after a '
+                             'drain (second delivery on re-unmask, count 2); on: pass '
+                             '-global apple-uart.drain-refresh=on, the line falls '
+                             '(count 1)')
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    return run(args.binary, args.components, args.output_dir)
+    return run(args.binary, args.components, args.output_dir, args.uart_ucon_store,
+               args.uart_drain_refresh)
 
 
 if __name__ == '__main__':

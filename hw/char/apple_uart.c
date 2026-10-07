@@ -161,7 +161,33 @@ struct AppleUartState {
     qemu_irq dmairq;
 
     uint32_t channel;
+    /* Read only by the legacy TX-threshold path of apple_uart_update_irq(). */
     uint32_t last_irq;
+
+    /*
+     * Both opt-in, both default off, set only by -global; apple_uart_create()
+     * never sets them. With both off every guest-visible behaviour is the
+     * historical one (the one both boards ran before these properties
+     * existed), including its two quirks:
+     *
+     *   drain-refresh  after a URXH read that empties the receive FIFO (or any
+     *                  FIFO-disabled URXH read) re-evaluate the interrupt line.
+     *                  Off: the line is left as it was until some other
+     *                  register write refreshes it.
+     *   ucon-store     store UCON writes, and with them let the TX-threshold,
+     *                  RX-threshold and RX-timeout enables take effect, with the
+     *                  containment described at each use (an edge-latched TX
+     *                  request, write-1-to-clear UTRSTAT bits 2-5, a timeout
+     *                  that needs data). Off: UCON writes are dropped and read
+     *                  back 0.
+     *
+     * Every behaviour that differs from the historical one is behind one of the
+     * two properties, not merely unreachable while UCON stays 0: a halfword
+     * store to offset 6 lands in the generic register path and sets UCON without
+     * ucon-store, so "unreachable" would not have been true.
+     */
+    bool ucon_store;
+    bool drain_refresh;
 };
 
 
@@ -225,6 +251,28 @@ static uint32_t apple_uart_Rx_FIFO_trigger_level(const AppleUartState *s)
     return apple_uart_FIFO_trigger_level(s->channel, reg);
 }
 
+/*
+ * ucon-store only. The TX-threshold request is edge-latched, on the enable, not
+ * level-derived from the FIFO count: the FIFO is never occupied here (UTXH is
+ * written through synchronously), so a level-high request would be asserted
+ * permanently and no acknowledge could end it.
+ */
+static bool apple_uart_tx_irq_enabled(const AppleUartState *s)
+{
+    return (s->reg[I_(UFCON)] & UFCON_FIFO_ENABLE) &&
+           (s->reg[I_(UCON)] & UCON_TXTHRESH_ENA);
+}
+
+static bool apple_uart_tx_thresh_arm(AppleUartState *s, bool was_enabled)
+{
+    if (s->ucon_store && !was_enabled && apple_uart_tx_irq_enabled(s) &&
+        fifo8_num_used(&s->tx) <= apple_uart_Tx_FIFO_trigger_level(s)) {
+        s->reg[I_(UTRSTAT)] |= UTRSTAT_Tx_THRESH;
+        return true;
+    }
+    return false;
+}
+
 static void apple_uart_update_irq(AppleUartState *s)
 {
     /*
@@ -236,11 +284,25 @@ static void apple_uart_update_irq(AppleUartState *s)
         uint32_t count = fifo8_num_used(&s->tx);
 
         if (s->reg[I_(UCON)] & UCON_TXTHRESH_ENA) {
-            mask |=
-                UTRSTAT_Tx_THRESH | UTRSTAT_Tx_EMPTY | UTRSTAT_Tx_BUFFER_EMPTY;
-            if (count <= apple_uart_Tx_FIFO_trigger_level(s) &&
-                !(s->last_irq & UTRSTAT_Tx_THRESH)) {
-                s->reg[I_(UTRSTAT)] |= UTRSTAT_Tx_THRESH;
+            if (s->ucon_store) {
+                /*
+                 * Only the threshold request is an interrupt source here.
+                 * Tx_EMPTY and Tx_BUFFER_EMPTY are status that is set whenever
+                 * the transmitter is idle, which is always, and the acknowledge
+                 * (UTRSTAT <- 0x20) cannot clear them: with them in the mask,
+                 * enabling bit 13 raised the line at once and only clearing
+                 * bit 13 lowered it again. The request itself is latched by
+                 * apple_uart_tx_thresh_arm().
+                 */
+                mask |= UTRSTAT_Tx_THRESH;
+            } else {
+                /* Historical behaviour, unchanged. */
+                mask |= UTRSTAT_Tx_THRESH | UTRSTAT_Tx_EMPTY |
+                        UTRSTAT_Tx_BUFFER_EMPTY;
+                if (count <= apple_uart_Tx_FIFO_trigger_level(s) &&
+                    !(s->last_irq & UTRSTAT_Tx_THRESH)) {
+                    s->reg[I_(UTRSTAT)] |= UTRSTAT_Tx_THRESH;
+                }
             }
         }
 
@@ -275,11 +337,24 @@ static void apple_uart_update_irq(AppleUartState *s)
 static void apple_uart_timeout_int(void *opaque)
 {
     AppleUartState *s = opaque;
+    bool timed_out;
 
     trace_apple_uart_rx_timeout(s->channel, s->reg[I_(UTRSTAT)], 0);
 
-    if ((s->reg[I_(UTRSTAT)] & UTRSTAT_Rx_BUFFER_DATA_READY) ||
-        (s->reg[I_(UCON)] & UCON_RXTIMEOUT_ENA)) {
+    if (s->ucon_store) {
+        /*
+         * A timeout needs data to time out. The historical "or the enable bit
+         * is set" clause latched it with an empty FIFO, which held the line
+         * high until something cleared a status bit that nothing cleared
+         * (measured on the ancestor build, where UCON is stored).
+         */
+        timed_out = (s->reg[I_(UCON)] & UCON_RXTIMEOUT_ENA) &&
+                    (s->reg[I_(UTRSTAT)] & UTRSTAT_Rx_BUFFER_DATA_READY);
+    } else {
+        timed_out = (s->reg[I_(UTRSTAT)] & UTRSTAT_Rx_BUFFER_DATA_READY) ||
+                    (s->reg[I_(UCON)] & UCON_RXTIMEOUT_ENA);
+    }
+    if (timed_out) {
         s->reg[I_(UTRSTAT)] |= UTRSTAT_Rx_TIMEOUT;
         apple_uart_update_irq(s);
     }
@@ -358,7 +433,9 @@ static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
         s->reg[I_(offset)] = val;
         apple_uart_update_parameters(s);
         break;
-    case UFCON:
+    case UFCON: {
+        bool tx_was = apple_uart_tx_irq_enabled(s);
+
         s->reg[I_(UFCON)] = val;
         if (val & UFCON_Rx_FIFO_RESET) {
             fifo8_reset(&s->rx);
@@ -370,7 +447,16 @@ static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
             s->reg[I_(UFCON)] &= ~UFCON_Tx_FIFO_RESET;
             trace_apple_uart_tx_fifo_reset(s->channel);
         }
+        /*
+         * ucon-store: enabling the FIFO can arm the TX request. Refresh the
+         * line only then, so without the property UFCON writes keep their
+         * historical call pattern (the arm helper returns false at once).
+         */
+        if (apple_uart_tx_thresh_arm(s, tx_was)) {
+            apple_uart_update_irq(s);
+        }
         break;
+    }
 
     case UTXH:
         if (qemu_chr_fe_backend_connected(&s->chr)) {
@@ -387,7 +473,19 @@ static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
         break;
 
     case UTRSTAT:
-        val &= (UTRSTAT_Tx_EMPTY);
+        if (s->ucon_store) {
+            /*
+             * Write 1 to clear the status bits 2-5. XNU acknowledges the TX
+             * threshold by writing 0x20 (bit 5) and the Samsung driver writes
+             * the pending bits back, which is primary evidence for bit 5 only;
+             * bits 3 and 4 follow the same pattern as a declared choice, not a
+             * measured fact.
+             */
+            val &= (UTRSTAT_Tx_EMPTY | UTRSTAT_Tx_THRESH | UTRSTAT_Rx_THRESH |
+                    UTRSTAT_Rx_TIMEOUT);
+        } else {
+            val &= (UTRSTAT_Tx_EMPTY);
+        }
         s->reg[I_(UTRSTAT)] &= ~val;
         trace_apple_uart_intclr(s->channel, s->reg[I_(UTRSTAT)]);
         apple_uart_update_irq(s);
@@ -402,9 +500,24 @@ static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
         trace_apple_uart_ro_write(s->channel, apple_uart_regname(offset),
                                   offset);
         break;
-    case UCON:
+    case UCON: {
+        bool tx_was = apple_uart_tx_irq_enabled(s);
+
+        /*
+         * ucon-store: stored raw, with no reserved-bit mask, because the
+         * guests' own value 0x405 has bit 10 set, which the model leaves
+         * undefined. Without it the write is dropped, as it always was.
+         */
+        if (s->ucon_store) {
+            s->reg[I_(UCON)] = (uint32_t)val;
+            if (!(s->reg[I_(UCON)] & UCON_RXTIMEOUT_ENA)) {
+                timer_del(s->fifo_timeout_timer);
+            }
+            apple_uart_tx_thresh_arm(s, tx_was);
+        }
         apple_uart_update_irq(s);
         break;
+    }
     case UMCON:
     default:
         s->reg[I_(offset)] = val;
@@ -416,6 +529,7 @@ static uint64_t apple_uart_read(void *opaque, hwaddr offset, unsigned size)
 {
     AppleUartState *s = opaque;
     uint32_t res;
+    bool level_changed = false;
 
     switch (offset) {
     case UERSTAT: /* Read Only */
@@ -439,6 +553,11 @@ static uint64_t apple_uart_read(void *opaque, hwaddr offset, unsigned size)
                 trace_apple_uart_rx(s->channel, res);
                 if (fifo8_is_empty(&s->rx)) {
                     s->reg[I_(UTRSTAT)] &= ~UTRSTAT_Rx_BUFFER_DATA_READY;
+                    if (s->ucon_store) {
+                        /* Else a timeout latched with data pending outlives it. */
+                        s->reg[I_(UTRSTAT)] &= ~UTRSTAT_Rx_TIMEOUT;
+                    }
+                    level_changed = true;
                 } else {
                     s->reg[I_(UTRSTAT)] |= UTRSTAT_Rx_BUFFER_DATA_READY;
                 }
@@ -449,8 +568,26 @@ static uint64_t apple_uart_read(void *opaque, hwaddr offset, unsigned size)
         } else {
             s->reg[I_(UTRSTAT)] &= ~UTRSTAT_Rx_BUFFER_DATA_READY;
             res = s->reg[I_(URXH)];
+            level_changed = true;
         }
         qemu_chr_fe_accept_input(&s->chr);
+        /*
+         * drain-refresh: a drain is the one moment the level can fall, and
+         * nothing else refreshed it. The owned-ROM gate measured the line
+         * staying high after data-ready read 0, so re-unmasking it delivered a
+         * second interrupt. Only a pop that empties the FIFO, or a
+         * FIFO-disabled read, can lower the level. The refresh re-evaluates
+         * the whole mask (a bare qemu_irq_lower() would drop a pending TX
+         * request). The empty-FIFO error read is not refreshed: it changes no
+         * status bit, and after a UFCON Rx reset with data pending data-ready is
+         * still set, so a refresh there would leave the line high anyway. Its
+         * position after qemu_chr_fe_accept_input() is a choice that no gate
+         * pins (a backend that re-enters apple_uart_receive from there would
+         * be covered by it, but the gates use a pipe backend, which cannot).
+         */
+        if (s->drain_refresh && level_changed) {
+            apple_uart_update_irq(s);
+        }
         trace_apple_uart_read(s->channel, offset, apple_uart_regname(offset),
                               res);
         return res;
@@ -629,6 +766,8 @@ static const Property apple_uart_properties[] = {
     DEFINE_PROP_UINT32("channel", AppleUartState, channel, 0),
     DEFINE_PROP_UINT32("rx-size", AppleUartState, rx_fifo_size, 15),
     DEFINE_PROP_UINT32("tx-size", AppleUartState, tx_fifo_size, 15),
+    DEFINE_PROP_BOOL("ucon-store", AppleUartState, ucon_store, false),
+    DEFINE_PROP_BOOL("drain-refresh", AppleUartState, drain_refresh, false),
 };
 
 static void apple_uart_class_init(ObjectClass *klass, const void *data)
