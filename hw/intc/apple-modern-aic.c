@@ -397,7 +397,18 @@ static void apple_modern_aic_set_irq(void *opaque, int irq, int level)
 {
     AppleModernAICState *s = opaque;
 
-    assert(apple_modern_aic_core_set_level(&s->core, irq, level));
+    /*
+     * Never wrap this call in assert(). This tree is built with -DNDEBUG and
+     * G_DISABLE_ASSERT, so an assertion -- and any call inside it -- is
+     * compiled out entirely. That is how the controller came to ignore every
+     * hardware input: the level was delivered here and never recorded. The
+     * owned-ROM delivery gate could not see it because it raises its test
+     * interrupt through the software-set register, never through an input.
+     */
+    if (!apple_modern_aic_core_set_level(&s->core, irq, level)) {
+        /* Inputs are created for exactly num_irqs lines, so this is a bug. */
+        abort();
+    }
     apple_modern_aic_update(s);
 }
 
