@@ -161,3 +161,28 @@ The current build executable must match the supplied immutable pin. The script
 records fixture snapshots and linker-input hashes and refuses to overwrite
 evidence. This fixture qualifies the normal QEMU DMA wrapper; an iOS firmware
 run must independently show the guest driving that provider.
+
+## Transport behavioral negative oracle
+
+The owned-ROM transport gate also has a behavioral mutation qualification:
+
+```sh
+python3 Inferno/wt/sep-sim/scripts/test-apple-modern-sep-transport-mutation.py \
+  --build-dir Inferno/wt/sep-sim/build \
+  --binary modern-emulator/bin/qemu-system-aarch64-sep-transport-v3 \
+  --components modern-emulator/evidence/firmware-20261002/boot-components/derived \
+  --output-dir /new/private/evidence/directory
+```
+
+It compiles a private copy of `sep-sim.c` changing only the harmless PING ACK
+data word from zero to one, then links the exact existing QEMU objects with that
+one object replaced. Production source, linker inputs and the immutable binary
+are checked unchanged. The unmodified pin must pass twice across reset; the
+mutant must fail on `ping_message` readback while all fourteen diagnostic
+properties remain present and read-only. A missing instrument or timeout cannot
+satisfy this oracle. The first run retained 1,296 unchanged linker inputs and
+rejected the expected PING mismatch. Only owned code and basic mailbox messages
+execute; no firmware validation, key service or cryptographic request is sent.
+
+This closes the specific missing behavioral-negative finding for PING reply
+data. It does not establish completeness of the protocol or SEP boot.
