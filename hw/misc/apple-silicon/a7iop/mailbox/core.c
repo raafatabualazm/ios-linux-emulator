@@ -37,6 +37,284 @@
 
 #define MAX_MESSAGE_COUNT (15)
 
+/* ===== MBOXDIAG: bounded measurement instrumentation (diagnostic only) ===== */
+#include "qemu/timer.h"
+
+#define MBD_MAX_DEV 12
+#define MBD_MAX_LINES 900
+
+typedef struct MbdDev {
+    char name[16];
+    bool used;
+    /* index 0: the iop object / A2I queue ; index 1: the ap object / I2A queue */
+    uint64_t upd_status[2];
+    uint64_t enq[2], deq[2];
+    uint64_t uf_latch[2], uf_sticky[2];
+    uint64_t mask_w[2];
+    uint64_t pin_chg[4];                 /* transitions of the EXPORTED (ap object) pins */
+    uint64_t ev;                         /* queue-affecting events */
+    uint64_t stale_ep[2], stale_ep_line[2][4], stale_updates[2];
+    uint64_t stale_ns_total[2], stale_ns_max[2], heals[2];
+    uint64_t stale_ev_total[2];
+    uint8_t stale_now[2];
+    uint64_t stale_since_ns[2], stale_since_ev[2];
+    const char *stale_cause[2];
+    uint64_t heal_by_ctx[2][6];
+} MbdDev;
+
+static MbdDev mbd_devs[MBD_MAX_DEV];
+static unsigned mbd_lines;
+static int mbd_depth;
+static const char *mbd_ctx = "other";
+static const char *mbd_kind = "other";
+static bool mbd_atexit_done;
+static const char *const mbd_ctx_names[6] = { "send-a2i", "recv-a2i", "send-i2a",
+                                              "recv-i2a", "mask", "reset" };
+
+static FILE *mbd_fp;
+static bool mbd_fp_tried;
+static unsigned mbd_file_lines;
+
+static void mbd_log(const char *fmt, ...)
+{
+    va_list ap, ap2;
+
+    if (!mbd_fp_tried) {
+        const char *path = getenv("MBOX_DIAG_FILE");
+
+        mbd_fp_tried = true;
+        if (path) {
+            mbd_fp = fopen(path, "a");
+        }
+    }
+    va_start(ap, fmt);
+    va_copy(ap2, ap);
+    if (mbd_lines < MBD_MAX_LINES) {
+        mbd_lines++;
+        fputs("MBOXDIAG ", stderr);
+        vfprintf(stderr, fmt, ap);
+        fputc('\n', stderr);
+    }
+    if (mbd_fp && mbd_file_lines < 6000) {
+        mbd_file_lines++;
+        fputs("MBOXDIAG ", mbd_fp);
+        vfprintf(mbd_fp, fmt, ap2);
+        fputc('\n', mbd_fp);
+        fflush(mbd_fp);
+    }
+    va_end(ap2);
+    va_end(ap);
+}
+
+static int mbd_idx(AppleA7IOPMailbox *s)
+{
+    return s == s->iop_mailbox ? 0 : 1;
+}
+
+static MbdDev *mbd_dev(AppleA7IOPMailbox *s)
+{
+    char name[16];
+    const char *dash = strrchr(s->role, '-');
+    size_t n = dash ? (size_t)(dash - s->role) : strlen(s->role);
+    int i;
+
+    if (n >= sizeof(name)) {
+        n = sizeof(name) - 1;
+    }
+    memcpy(name, s->role, n);
+    name[n] = 0;
+    for (i = 0; i < MBD_MAX_DEV; i++) {
+        if (mbd_devs[i].used && !strcmp(mbd_devs[i].name, name)) {
+            return &mbd_devs[i];
+        }
+    }
+    for (i = 0; i < MBD_MAX_DEV; i++) {
+        if (!mbd_devs[i].used) {
+            mbd_devs[i].used = true;
+            memcpy(mbd_devs[i].name, name, n + 1);
+            return &mbd_devs[i];
+        }
+    }
+    return &mbd_devs[MBD_MAX_DEV - 1];
+}
+
+static uint8_t mbd_cached(AppleA7IOPMailbox *o)
+{
+    return (o->iop_nonempty ? 1 : 0) | (o->iop_empty ? 2 : 0) |
+           (o->ap_nonempty ? 4 : 0) | (o->ap_empty ? 8 : 0);
+}
+
+/* The four line levels object o WOULD show if it were refreshed right now. */
+static uint8_t mbd_expect(AppleA7IOPMailbox *o)
+{
+    AppleA7IOPMailbox *io = o->iop_mailbox, *ap = o->ap_mailbox;
+    bool ie = QTAILQ_EMPTY(&io->inbox), ae = QTAILQ_EMPTY(&ap->inbox);
+    uint32_t m = o->int_mask;
+
+    return (((m & IOP_NONEMPTY) == 0 && !ie) || io->underflow ? 1 : 0) |
+           (((m & IOP_EMPTY) == 0 && ie) ? 2 : 0) |
+           (((m & AP_NONEMPTY) == 0 && !ae) || ap->underflow ? 4 : 0) |
+           (((m & AP_EMPTY) == 0 && ae) ? 8 : 0);
+}
+
+static unsigned mbd_qlen(AppleA7IOPMailbox *q)
+{
+    unsigned n = 0;
+    AppleA7IOPMessage *m;
+
+    QTAILQ_FOREACH (m, &q->inbox, next) {
+        n++;
+    }
+    return n;
+}
+
+static int mbd_ctx_index(void)
+{
+    for (int i = 0; i < 6; i++) {
+        if (!strcmp(mbd_ctx, mbd_ctx_names[i])) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void mbd_summary(MbdDev *d, const char *tag)
+{
+    mbd_log("sum %s dev=%s ev=%" PRIu64 " a2i_enq=%" PRIu64 " a2i_deq=%" PRIu64
+            " i2a_enq=%" PRIu64 " i2a_deq=%" PRIu64 " uf_latch(i/a)=%" PRIu64
+            "/%" PRIu64 " uf_sticky(i/a)=%" PRIu64 "/%" PRIu64
+            " mask_w(i/a)=%" PRIu64 "/%" PRIu64 " pin_chg[iop_ne,iop_e,ap_ne,ap_e]=%"
+            PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64,
+            tag, d->name, d->ev, d->enq[0], d->deq[0], d->enq[1], d->deq[1],
+            d->uf_latch[0], d->uf_latch[1], d->uf_sticky[0], d->uf_sticky[1],
+            d->mask_w[0], d->mask_w[1], d->pin_chg[0], d->pin_chg[1],
+            d->pin_chg[2], d->pin_chg[3]);
+    for (int k = 0; k < 2; k++) {
+        mbd_log("sum %s dev=%s %s stale_episodes=%" PRIu64 " by_line[iop_ne,iop_e,ap_ne,ap_e]=%"
+                PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 " completed_updates_left_stale=%"
+                PRIu64 " heals=%" PRIu64 " stale_ns_total=%" PRIu64 " stale_ns_max=%"
+                PRIu64 " stale_events_total=%" PRIu64 " stale_now=0x%x heal_by_ctx[%s=%" PRIu64
+                ",%s=%" PRIu64 ",%s=%" PRIu64 ",%s=%" PRIu64 ",%s=%" PRIu64 ",%s=%" PRIu64
+                ",other=%" PRIu64 "]",
+                tag, d->name, k == 0 ? "I-object(cache/cpu-irq)" : "A-object(EXPORTED)",
+                d->stale_ep[k], d->stale_ep_line[k][0], d->stale_ep_line[k][1],
+                d->stale_ep_line[k][2], d->stale_ep_line[k][3], d->stale_updates[k],
+                d->heals[k], d->stale_ns_total[k], d->stale_ns_max[k],
+                d->stale_ev_total[k], d->stale_now[k],
+                mbd_ctx_names[0], d->heal_by_ctx[k][0], mbd_ctx_names[1], d->heal_by_ctx[k][1],
+                mbd_ctx_names[2], d->heal_by_ctx[k][2], mbd_ctx_names[3], d->heal_by_ctx[k][3],
+                mbd_ctx_names[4], d->heal_by_ctx[k][4], mbd_ctx_names[5], d->heal_by_ctx[k][5],
+                d->heals[k] - d->heal_by_ctx[k][0] - d->heal_by_ctx[k][1] -
+                    d->heal_by_ctx[k][2] - d->heal_by_ctx[k][3] -
+                    d->heal_by_ctx[k][4] - d->heal_by_ctx[k][5]);
+    }
+}
+
+static void mbd_final(void)
+{
+    for (int i = 0; i < MBD_MAX_DEV; i++) {
+        if (mbd_devs[i].used) {
+            mbd_lines = 0;          /* the final summary always prints */
+            mbd_file_lines = 0;
+            mbd_summary(&mbd_devs[i], "FINAL");
+        }
+    }
+}
+
+static void mbd_touch(void)
+{
+    if (!mbd_atexit_done) {
+        mbd_atexit_done = true;
+        atexit(mbd_final);
+    }
+}
+
+/* Called when a top-level update_irq() has finished propagating. */
+static void mbd_check(AppleA7IOPMailbox *s)
+{
+    MbdDev *d = mbd_dev(s);
+    AppleA7IOPMailbox *obj[2] = { s->iop_mailbox, s->ap_mailbox };
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    for (int k = 0; k < 2; k++) {
+        uint8_t diff = mbd_expect(obj[k]) ^ mbd_cached(obj[k]);
+
+        if (diff) {
+            d->stale_updates[k]++;
+        }
+        if (diff && !d->stale_now[k]) {
+            d->stale_ep[k]++;
+            for (int l = 0; l < 4; l++) {
+                if (diff & (1 << l)) {
+                    d->stale_ep_line[k][l]++;
+                }
+            }
+            d->stale_since_ns[k] = now;
+            d->stale_since_ev[k] = d->ev;
+            d->stale_cause[k] = mbd_ctx;
+            if (d->stale_ep[k] <= 10) {
+                mbd_log("STALE-BEGIN dev=%s obj=%s cause=%s diff=0x%x expect=0x%x cached=0x%x "
+                        "qa2i=%u qi2a=%u uf_i=%d uf_a=%d mask_ap=0x%x mask_iop=0x%x t=%" PRIu64,
+                        d->name, k == 0 ? "I" : "A", mbd_ctx, diff, mbd_expect(obj[k]),
+                        mbd_cached(obj[k]), mbd_qlen(s->iop_mailbox), mbd_qlen(s->ap_mailbox),
+                        s->iop_mailbox->underflow, s->ap_mailbox->underflow,
+                        s->ap_mailbox->int_mask, s->iop_mailbox->int_mask, now);
+            }
+        } else if (!diff && d->stale_now[k]) {
+            uint64_t dur = now - d->stale_since_ns[k];
+            int ci = mbd_ctx_index();
+
+            d->heals[k]++;
+            if (ci >= 0) {
+                d->heal_by_ctx[k][ci]++;
+            }
+            d->stale_ns_total[k] += dur;
+            if (dur > d->stale_ns_max[k]) {
+                d->stale_ns_max[k] = dur;
+            }
+            d->stale_ev_total[k] += d->ev - d->stale_since_ev[k];
+            if (d->heals[k] <= 10) {
+                mbd_log("STALE-END dev=%s obj=%s begun_by=%s healed_by=%s dur_ns=%" PRIu64
+                        " queue_events_during=%" PRIu64,
+                        d->name, k == 0 ? "I" : "A", d->stale_cause[k], mbd_ctx, dur,
+                        d->ev - d->stale_since_ev[k]);
+            }
+        }
+        d->stale_now[k] = diff;
+    }
+}
+
+static void mbd_queue_event(AppleA7IOPMailbox *q, bool enq)
+{
+    MbdDev *d = mbd_dev(q);
+    int k = mbd_idx(q);
+
+    mbd_touch();
+    mbd_kind = enq ? (k == 0 ? "send-a2i" : "send-i2a") : (k == 0 ? "recv-a2i" : "recv-i2a");
+    if (enq) {
+        d->enq[k]++;
+    } else {
+        d->deq[k]++;
+    }
+    d->ev++;
+}
+
+static void mbd_post_event(AppleA7IOPMailbox *q)
+{
+    MbdDev *d = mbd_dev(q);
+
+    if (d->ev <= 48) {
+        mbd_log("EVT dev=%s n=%" PRIu64 " kind=%s qa2i=%u qi2a=%u A.cache=0x%x A.expect=0x%x "
+                "I.cache=0x%x I.expect=0x%x", d->name, d->ev, mbd_kind, mbd_qlen(q->iop_mailbox),
+                mbd_qlen(q->ap_mailbox), mbd_cached(q->ap_mailbox), mbd_expect(q->ap_mailbox),
+                mbd_cached(q->iop_mailbox), mbd_expect(q->iop_mailbox));
+    }
+    if (d->ev <= 4 || (d->ev & (d->ev - 1)) == 0 || d->ev % 512 == 0) {
+        mbd_summary(d, "ev");
+    }
+}
+/* ===== end MBOXDIAG ===== */
+
 #define CTRL_ENABLE BIT(0)
 #define CTRL_FULL BIT(16)
 #define CTRL_EMPTY BIT(17)
@@ -159,6 +437,10 @@ void apple_a7iop_mailbox_update_irq_status(AppleA7IOPMailbox *s)
     bool ap_nonempty_unmasked;
     bool ap_empty_unmasked;
 
+    uint8_t mbd_old = mbd_cached(s);
+
+    mbd_touch();
+    mbd_dev(s)->upd_status[mbd_idx(s)]++;
     iop_empty = QTAILQ_EMPTY(&s->iop_mailbox->inbox);
     ap_empty = QTAILQ_EMPTY(&s->ap_mailbox->inbox);
     iop_underflow = s->iop_mailbox->underflow;
@@ -193,10 +475,20 @@ void apple_a7iop_mailbox_update_irq_status(AppleA7IOPMailbox *s)
     s->iop_empty = iop_empty_unmasked && iop_empty;
     s->ap_nonempty = (ap_nonempty_unmasked && !ap_empty) || ap_underflow;
     s->ap_empty = ap_empty_unmasked && ap_empty;
+    if (mbd_idx(s) == 1) {
+        uint8_t chg = mbd_old ^ mbd_cached(s);
+
+        for (int l = 0; l < 4; l++) {
+            if (chg & (1 << l)) {
+                mbd_dev(s)->pin_chg[l]++;
+            }
+        }
+    }
 }
 
 void apple_a7iop_mailbox_update_irq(AppleA7IOPMailbox *s)
 {
+    mbd_depth++;
     apple_a7iop_mailbox_update_irq_status(s);
 
     bool sep_cpu_irq_raised =
@@ -208,6 +500,10 @@ void apple_a7iop_mailbox_update_irq(AppleA7IOPMailbox *s)
     smp_mb();
     if (!strcmp(s->role, "SEP-ap")) {
         apple_a7iop_mailbox_update_irq(s->iop_mailbox);
+    }
+    if (--mbd_depth == 0) {
+        mbd_check(s);
+        mbd_ctx = "other";
     }
 }
 
@@ -230,7 +526,10 @@ static void apple_a7iop_mailbox_send(AppleA7IOPMailbox *s,
 
     QTAILQ_INSERT_TAIL(&s->inbox, msg, next);
     s->count++;
+    mbd_queue_event(s, true);
+    mbd_ctx = mbd_idx(s) == 0 ? "send-a2i" : "send-i2a";
     apple_a7iop_mailbox_update_irq(s);
+    mbd_post_event(s);
 
     if (s->handle_messages_bh != NULL) {
         qemu_bh_schedule(s->handle_messages_bh);
@@ -275,11 +574,26 @@ static AppleA7IOPMessage *apple_a7iop_mailbox_recv(AppleA7IOPMailbox *s)
     AppleA7IOPMessage *msg;
 
     if (s->underflow) {
+        MbdDev *d = mbd_dev(s);
+
+        d->uf_sticky[mbd_idx(s)]++;
+        if (d->uf_sticky[mbd_idx(s)] <= 8) {
+            mbd_log("UF-STICKY-HIT dev=%s queue=%s qlen=%u (receive refused: underflow latched)",
+                    d->name, mbd_idx(s) == 0 ? "A2I" : "I2A", mbd_qlen(s));
+        }
         return NULL;
     }
 
     msg = QTAILQ_FIRST(&s->inbox);
     if (msg == NULL) {
+        MbdDev *d = mbd_dev(s);
+
+        mbd_touch();
+        d->uf_latch[mbd_idx(s)]++;
+        mbd_log("UF-LATCH dev=%s queue=%s t=%" PRIu64 " (receive on empty queue)",
+                d->name, mbd_idx(s) == 0 ? "A2I" : "I2A",
+                (uint64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        mbd_ctx = mbd_idx(s) == 0 ? "recv-a2i" : "recv-i2a";
         s->underflow = true;
         qemu_log_mask(LOG_GUEST_ERROR, "%s: %s underflowed.\n", __FUNCTION__,
                       s->role);
@@ -292,7 +606,10 @@ static AppleA7IOPMessage *apple_a7iop_mailbox_recv(AppleA7IOPMailbox *s)
     trace_apple_a7iop_mailbox_recv(s->role, ldq_le_p(msg->data),
                                    ldq_le_p(msg->data + sizeof(uint64_t)));
     s->count--;
+    mbd_queue_event(s, false);
+    mbd_ctx = mbd_idx(s) == 0 ? "recv-a2i" : "recv-i2a";
     apple_a7iop_mailbox_update_irq(s);
+    mbd_post_event(s);
 
     return msg;
 }
@@ -339,6 +656,12 @@ void apple_a7iop_mailbox_set_int_mask(AppleA7IOPMailbox *s, uint32_t value)
     QEMU_LOCK_GUARD(&s->lock);
 
     s->int_mask |= value;
+    mbd_dev(s)->mask_w[mbd_idx(s)]++;
+    if (mbd_dev(s)->mask_w[0] + mbd_dev(s)->mask_w[1] <= 60) {
+        mbd_log("MASK-SET dev=%s obj=%s value=0x%x new_mask=0x%x", mbd_dev(s)->name,
+                mbd_idx(s) == 0 ? "I" : "A", value, s->int_mask);
+    }
+    mbd_ctx = "mask";
     apple_a7iop_mailbox_update_irq(s);
 }
 
@@ -347,6 +670,12 @@ void apple_a7iop_mailbox_clear_int_mask(AppleA7IOPMailbox *s, uint32_t value)
     QEMU_LOCK_GUARD(&s->lock);
 
     s->int_mask &= ~value;
+    mbd_dev(s)->mask_w[mbd_idx(s)]++;
+    if (mbd_dev(s)->mask_w[0] + mbd_dev(s)->mask_w[1] <= 60) {
+        mbd_log("MASK-CLR dev=%s obj=%s value=0x%x new_mask=0x%x", mbd_dev(s)->name,
+                mbd_idx(s) == 0 ? "I" : "A", value, s->int_mask);
+    }
+    mbd_ctx = "mask";
     apple_a7iop_mailbox_update_irq(s);
 }
 
@@ -609,6 +938,11 @@ static void apple_a7iop_mailbox_reset(DeviceState *dev)
 
     QEMU_LOCK_GUARD(&s->lock);
 
+    mbd_touch();
+    mbd_log("RESET-ENTER role=%s qa2i=%u qi2a=%u uf_i=%d uf_a=%d int_mask_before=0x%x "
+            "cache_before=0x%x", s->role, mbd_qlen(s->iop_mailbox), mbd_qlen(s->ap_mailbox),
+            s->iop_mailbox->underflow, s->ap_mailbox->underflow, s->int_mask, mbd_cached(s));
+
     assert_false(s->iop_mailbox == s->ap_mailbox);
 
     s->count = 0;
@@ -646,6 +980,12 @@ static void apple_a7iop_mailbox_reset(DeviceState *dev)
     s->timer1_masked = 0;
     s->sepd_enabled = 0;
     apple_a7iop_mailbox_update_irq_status(s);
+    mbd_ctx = "reset";
+    mbd_check(s);
+    mbd_ctx = "other";
+    mbd_log("RESET-EXIT role=%s exported_levels=0x%x (I-object cache 0x%x, A-object cache 0x%x)",
+            s->role, mbd_cached(s->ap_mailbox), mbd_cached(s->iop_mailbox),
+            mbd_cached(s->ap_mailbox));
 }
 
 const VMStateDescription vmstate_apple_a7iop_message = {

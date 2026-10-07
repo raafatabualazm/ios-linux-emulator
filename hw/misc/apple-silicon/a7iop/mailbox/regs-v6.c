@@ -79,6 +79,15 @@
  */
 static void apple_a7iop_v6_refresh_lines(AppleA7IOPMailbox *s)
 {
+    /* MBOXDIAG counterfactual: MBOX_DIAG_NO_V6_REFRESH=1 disables the workaround. */
+    static int off = -1;
+
+    if (off < 0) {
+        off = getenv("MBOX_DIAG_NO_V6_REFRESH") != NULL;
+    }
+    if (off) {
+        return;
+    }
     apple_a7iop_mailbox_update_irq(s->ap_mailbox);
 }
 

@@ -9,6 +9,7 @@ system_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'a7iop/regs-v4.c',
     'a7iop/regs-v6.c',
     'a7iop/rtkit.c',
+    'a7iop/mbox-selftest.c',
     'smc.c',
     'roswell.c',
     'chestnut.c',
