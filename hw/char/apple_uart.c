@@ -272,6 +272,17 @@ static void apple_uart_update_irq(AppleUartState *s)
     }
 }
 
+/* EXPERIMENT ONLY (wt/uart-ancestor): APPLE_UART_XFIX bit0 stores UCON, bit1 refreshes after URXH. */
+static int apple_uart_xfix(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("APPLE_UART_XFIX");
+        v = e ? atoi(e) : 0;
+    }
+    return v;
+}
+
 static void apple_uart_timeout_int(void *opaque)
 {
     AppleUartState *s = opaque;
@@ -403,6 +414,9 @@ static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
                                   offset);
         break;
     case UCON:
+        if (apple_uart_xfix() & 1) {
+            s->reg[I_(UCON)] = val;
+        }
         apple_uart_update_irq(s);
         break;
     case UMCON:
@@ -451,6 +465,9 @@ static uint64_t apple_uart_read(void *opaque, hwaddr offset, unsigned size)
             res = s->reg[I_(URXH)];
         }
         qemu_chr_fe_accept_input(&s->chr);
+        if (apple_uart_xfix() & 2) {
+            apple_uart_update_irq(s);
+        }
         trace_apple_uart_read(s->channel, offset, apple_uart_regname(offset),
                               res);
         return res;
