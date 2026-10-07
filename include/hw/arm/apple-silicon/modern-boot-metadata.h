@@ -24,6 +24,15 @@ typedef struct AppleModernBootMetadataInput {
     uint64_t boot_flags;
     /* Zero selects the computed reservation; a smaller budget is allowed. */
     size_t dtree_capacity_limit;
+    /*
+     * Acknowledge register offset to publish as /arm-io/aic
+     * "aic-iack-offset" (u64), replacing any value the stock tree carries.
+     * XNU's AppleInterruptControllerV3 reads only that property for the
+     * offset, defaults it to zero and panics when it is still zero, so the
+     * served tree and our controller must agree. Zero leaves the node alone,
+     * and a nonzero value requires /arm-io/aic to exist.
+     */
+    uint32_t aic_iack_offset;
 } AppleModernBootMetadataInput;
 
 typedef struct AppleModernBootMetadata {

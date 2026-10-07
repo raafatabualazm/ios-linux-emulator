@@ -29,6 +29,8 @@ import traceback
 
 DRAM = 1 << 40
 RAM_SIZE = 8 << 30
+# Declared acknowledge offset the board publishes and the controller decodes.
+AIC_IACK_OFFSET = 0x2000
 PAGE = 0x4000
 INDEX_MASK = (1 << 36) - 1
 COMMAND_LINE = "--audit-modern-command-line -v"
@@ -311,9 +313,17 @@ def audit(qmp: QMP, scratch: Path, blobs: dict, layout: dict, parse_adt) -> dict
         normal[name] = b"\xff" * 16
     if layout["ramdisk"] is None:
         normal["RAMDisk"] = b"\xff" * 16
+    # /arm-io/aic "aic-iack-offset" is published by the board because XNU's
+    # AppleInterruptControllerV3 reads only that property for the acknowledge
+    # register offset, defaults it to zero, and panics at
+    # AppleInterruptControllerV3.cpp:214 when it is still zero. The stock tree
+    # does not carry it, so the board must add it, and the value must match the
+    # offset the controller decodes. Asserting the exact bytes here keeps the
+    # served tree and the model from drifting apart.
     generated = {"/chosen": {"dram-base": struct.pack("<Q", DRAM),
                               "dram-size": struct.pack("<Q", RAM_SIZE)},
-                 "/chosen/memory-map": normal}
+                 "/chosen/memory-map": normal,
+                 "/arm-io/aic": {"aic-iack-offset": struct.pack("<Q", AIC_IACK_OFFSET)}}
     preserved = 0
     for path, props in original.items():
         for name, prop in props.items():

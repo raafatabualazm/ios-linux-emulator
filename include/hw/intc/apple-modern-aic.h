@@ -14,9 +14,22 @@
 
 #define APPLE_MODERN_AIC_MAX_IRQS 4096
 #define APPLE_MODERN_AIC_MAX_WORDS (APPLE_MODERN_AIC_MAX_IRQS / 32)
+/* Defaults for the ADT-named rev-offset and aicglbcfg-offset properties. */
 #define APPLE_MODERN_AIC_VERSION_OFFSET 0x0000
+/*
+ * Declared: the ADT names no reset register and XNU's own driver never reads
+ * this offset. It sits in the hole between the Apple-named cap0 (0x4) and
+ * aicglbcfg (0x14) registers.
+ */
 #define APPLE_MODERN_AIC_RESET_OFFSET 0x0010
 #define APPLE_MODERN_AIC_CONFIG_OFFSET 0x0014
+/*
+ * Declared acknowledge offset. Apple documents no value; the ADT property
+ * aic-iack-offset supplies it and the firmware treats zero as fatal. 0x1000
+ * must not be used: that is Apple's own pubstampcfg0-offset, which the same
+ * driver both reads and writes.
+ */
+#define APPLE_MODERN_AIC_EVENT_OFFSET 0x2000
 #define APPLE_MODERN_AIC_EVENT_IRQ 0x00010000
 
 /* All offsets are relative to MMIO0, including the AP event register. */
@@ -24,6 +37,8 @@ typedef struct AppleModernAICGeometry {
     uint32_t revision;
     uint32_t num_irqs;
     uint32_t max_irqs;
+    uint32_t version_offset;
+    uint32_t config_offset;
     uint32_t cap0_offset;
     uint32_t maxnumirq_offset;
     uint32_t irq_config_offset;

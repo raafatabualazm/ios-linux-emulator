@@ -51,7 +51,8 @@ typedef struct Tree {
     NormalProp normal[MAX_NORMAL_PROPS];
     size_t normal_count;
     const AppleModernBootLayout *layout;
-    unsigned chosen_count, map_count, vram_count;
+    unsigned chosen_count, map_count, vram_count, aic_count;
+    uint32_t aic_iack_offset;
     const char *probe_path, *probe_name;
     AppleModernBlob probe_value;
     unsigned probe_nodes, probe_properties;
@@ -153,6 +154,9 @@ static bool normal_property(const Tree *tree, const char *path,
             }
         }
     }
+    if (tree->aic_iack_offset && !strcmp(path, "/arm-io/aic")) {
+        return !strcmp(name, "aic-iack-offset");
+    }
     return false;
 }
 
@@ -181,6 +185,16 @@ static bool emit_normal(Tree *tree, const char *path, Error **errp)
             }
         }
     }
+    if (tree->aic_iack_offset && !strcmp(path, "/arm-io/aic")) {
+        uint8_t bytes[8];
+        /*
+         * XNU rejects any length other than eight: the reader compares the
+         * property length against 8 and panics at
+         * AppleInterruptControllerV3.cpp:195 otherwise.
+         */
+        put64(bytes, tree->aic_iack_offset);
+        return property(tree, "aic-iack-offset", bytes, sizeof(bytes), errp);
+    }
     return true;
 }
 
@@ -191,7 +205,7 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
     uint32_t count, children, replaced = 0;
     size_t start, end, output_header = tree->used;
     char name[128] = "", path[512];
-    bool chosen, map, vram;
+    bool chosen, map, vram, aic;
     if (depth > 32 || ++tree->nodes > 8192 ||
         !span(tree->cursor, 8, tree->input.size)) {
         return fail(errp, "ADT node depth/count/bounds exceeded");
@@ -248,10 +262,12 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
     map = !strcmp(path, "/chosen/memory-map");
     vram = tree->layout && tree->layout->framebuffer_size &&
            !strcmp(path, "/vram");
+    aic = tree->aic_iack_offset && !strcmp(path, "/arm-io/aic");
     if ((chosen && ++tree->chosen_count > 1) ||
         (map && ++tree->map_count > 1) ||
-        (vram && ++tree->vram_count > 1)) {
-        return fail(errp, "ambiguous ADT chosen/memory-map/vram path");
+        (vram && ++tree->vram_count > 1) ||
+        (aic && ++tree->aic_count > 1)) {
+        return fail(errp, "ambiguous ADT chosen/memory-map/vram/aic path");
     }
     if (tree->probe_path && !strcmp(path, tree->probe_path)) {
         tree->probe_nodes++;
@@ -283,7 +299,8 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
         cursor += size;
     }
     if (tree->output) {
-        size_t added = chosen ? 2 : map ? tree->normal_count : vram ? 1 : 0;
+        size_t added = chosen ? 2 : map ? tree->normal_count : vram ? 1 :
+                       aic ? 1 : 0;
         if (count - replaced + added > 4096) {
             return fail(errp, "generated ADT node property count exceeds bound");
         }
@@ -522,9 +539,11 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     tree.input = components->dtree;
     tree.output = prepared.dtree;
     tree.capacity = capacity;
+    tree.aic_iack_offset = input->aic_iack_offset;
     prepare_normal(&tree, &prepared.layout);
     if (!walk(&tree, "", 0, errp) || tree.cursor != components->dtree.size ||
-        tree.chosen_count != 1 || tree.map_count != 1) {
+        tree.chosen_count != 1 || tree.map_count != 1 ||
+        (tree.aic_iack_offset && tree.aic_count != 1)) {
         if (!errp || !*errp) {
             fail(errp, "ADT chosen path missing or serialization incomplete");
         }

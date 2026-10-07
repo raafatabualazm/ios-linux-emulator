@@ -62,6 +62,11 @@ struct AppleModernMachine {
     uint32_t uart_irq;
     uint32_t aic_num_irqs;
     uint32_t aic_revision;
+    /*
+     * Published as /arm-io/aic "aic-iack-offset" and used as the controller's
+     * acknowledge offset, so the served tree and the model cannot disagree.
+     */
+    uint32_t aic_iack_offset;
     bool boot_display;
     bool prepare_only, mte, initialized;
     uint64_t timebase_frequency;
@@ -516,8 +521,16 @@ static bool map_aic(AppleModernMachine *s, Error **errp)
          * stock extintrcfg/intmaskset/intmaskclear/hwintmon stride of 0x4a00.
          * The measured guest driver masks at irq_config + 0x4400 and unmasks
          * at + 0x4688, which is exactly this layout's MASK_SET/MASK_CLEAR.
-         * No event/acknowledge offset is named by the ADT; event-offset is a
-         * separate opt-in parameter and defaults to the unused aperture tail.
+         * The acknowledge offset IS named by the ADT, as aic-iack-offset,
+         * and it is the only thing XNU reads for it: the driver defaults that
+         * member to zero and panics at AppleInterruptControllerV3.cpp:214
+         * when it is still zero. We publish the property ourselves (see
+         * metadata_input.aic_iack_offset) and read it back here, so the tree
+         * the guest parses and the offset we decode are the same number.
+         * The value remains our declared choice: Apple documents none, and
+         * the reference project's 0x1000 cannot be right because that is
+         * Apple's own pubstampcfg0-offset, which this same driver both reads
+         * and writes.
          */
         /*
          * The ADT compatible is "aic,3". The revision register value selects
@@ -528,19 +541,64 @@ static bool map_aic(AppleModernMachine *s, Error **errp)
          */
         const uint32_t revision = s->aic_revision;
         uint32_t extint = 0, stamp_off = 0, stamp_count = 0, stamp_stride = 0;
+        uint32_t rev_off = APPLE_MODERN_AIC_VERSION_OFFSET;
+        uint32_t glbcfg_off = APPLE_MODERN_AIC_CONFIG_OFFSET;
+        uint32_t cap0_off = 4, maxnumirq_off = 0xc, extint_num = 0;
+        AppleModernBlob iack;
 
         if (!adt_u32(dtree, "/arm-io/aic", "extint-baseaddress", &extint,
                      errp)) {
+            return false;
+        }
+        /*
+         * Prefer the ADT for every offset XNU itself reads, keeping the
+         * measured values as fallbacks. They agree on this part (rev 0x0,
+         * cap0 0x4, maxnumirq 0xc, aicglbcfg 0x14) and the driver carries the
+         * same compiled-in defaults, so this is defensive rather than a fix:
+         * a different part that moved them would otherwise diverge silently.
+         */
+        adt_u32(dtree, "/arm-io/aic", "rev-offset", &rev_off, NULL);
+        adt_u32(dtree, "/arm-io/aic", "cap0-offset", &cap0_off, NULL);
+        adt_u32(dtree, "/arm-io/aic", "maxnumirq-offset", &maxnumirq_off, NULL);
+        adt_u32(dtree, "/arm-io/aic", "aicglbcfg-offset", &glbcfg_off, NULL);
+        /*
+         * max-extint-num selects which mask banks XNU uses: its driver does
+         * csel on this property and moves mask-set/mask-clear/hwintmon to
+         * extint_base + 0x8800/0x8c00/0x9000 when it is nonzero. Our banks
+         * follow the zero branch, so refuse rather than mismatch in silence.
+         * The property is absent from every tree measured so far.
+         */
+        if (adt_u32(dtree, "/arm-io/aic", "max-extint-num", &extint_num,
+                    NULL) && extint_num) {
+            error_setg(errp, "modern AIC ADT sets max-extint-num %u; the "
+                       "modelled mask banks only match the zero branch",
+                       extint_num);
+            return false;
+        }
+        /*
+         * The acknowledge offset comes from the property we published, so the
+         * guest and the model necessarily agree. XNU rejects any length other
+         * than eight (AppleInterruptControllerV3.cpp:195).
+         */
+        if (!apple_modern_adt_property(dtree, "/arm-io/aic",
+                                       "aic-iack-offset", &iack, errp)) {
+            return false;
+        }
+        if (iack.size != 8 || ldq_le_p(iack.data) != s->aic_iack_offset) {
+            error_setg(errp, "served aic-iack-offset does not match the "
+                       "modelled acknowledge offset 0x%x", s->aic_iack_offset);
             return false;
         }
         s->aic = qdev_new(TYPE_APPLE_MODERN_AIC);
         qdev_prop_set_uint32(s->aic, "revision", revision);
         qdev_prop_set_uint32(s->aic, "num-irqs", num_irqs);
         qdev_prop_set_uint32(s->aic, "max-irqs", num_irqs);
-        qdev_prop_set_uint32(s->aic, "cap0-offset", 4);
-        qdev_prop_set_uint32(s->aic, "maxnumirq-offset", 0xc);
+        qdev_prop_set_uint32(s->aic, "version-offset", rev_off);
+        qdev_prop_set_uint32(s->aic, "config-offset", glbcfg_off);
+        qdev_prop_set_uint32(s->aic, "cap0-offset", cap0_off);
+        qdev_prop_set_uint32(s->aic, "maxnumirq-offset", maxnumirq_off);
         qdev_prop_set_uint32(s->aic, "irq-config-offset", extint);
-        qdev_prop_set_uint32(s->aic, "event-offset", 0x2000);
+        qdev_prop_set_uint32(s->aic, "event-offset", s->aic_iack_offset);
         /*
          * Shared timestamp block: ADT pubstampcfg0-offset with
          * #shared-timestamps entries of pubstampstride-mask bytes. Accepted
@@ -585,7 +643,6 @@ static bool map_aic(AppleModernMachine *s, Error **errp)
     return true;
 }
 
-/*
 /*
  * Observation aperture for the SEP ASC windows named by /arm-io/sep "reg".
  * Opt-in (sep-trace) and default off. It is NOT a device: reads return zero
@@ -755,6 +812,19 @@ static void modern_init(MachineState *machine)
     metadata_input.command_line_length = s->boot_command_line ?
                                          strlen(s->boot_command_line) : 0;
     metadata_input.has_mte = s->mte;
+    /*
+     * Publish the acknowledge offset even when modern-aic is off: XNU's
+     * AppleInterruptControllerV3 requires the property regardless of whether
+     * we model the controller, and panics without it. Zero is refused here
+     * rather than silently omitting the property, because the omission would
+     * surface much later as that panic or as a confusing ADT lookup failure.
+     */
+    if (!s->aic_iack_offset) {
+        error_report("apple-modern: aic-iack-offset must be nonzero; XNU "
+                     "panics when the device-tree property is absent or zero");
+        exit(EXIT_FAILURE);
+    }
+    metadata_input.aic_iack_offset = s->aic_iack_offset;
     if (!apple_modern_boot_metadata_build(&metadata_input, &s->metadata, &error) ||
         !uart_address(s->components.dtree, &uart, &uart_span, &s->uart_irq,
                       &error)) {
@@ -994,6 +1064,7 @@ static void modern_instance_init(Object *obj)
     AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
     s->prepare_only = true;
     s->aic_revision = 3;
+    s->aic_iack_offset = APPLE_MODERN_AIC_EVENT_OFFSET;
     s->timebase_frequency = 24000000; /* Configurable experiment value. */
     s->display_width = 1024;
     s->display_height = 768;
@@ -1038,6 +1109,10 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                               get_display_geometry, set_display_geometry,
                               NULL, (void *)offsetof(AppleModernMachine,
                                                      aic_revision));
+    object_class_property_add(oc, "aic-iack-offset", "uint32",
+                              get_display_geometry, set_display_geometry,
+                              NULL, (void *)offsetof(AppleModernMachine,
+                                                     aic_iack_offset));
     object_class_property_add_bool(oc, "img4-ignition-compat",
                                    get_img4_ignition_compat,
                                    set_img4_ignition_compat);

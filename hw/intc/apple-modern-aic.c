@@ -72,9 +72,21 @@ bool apple_modern_aic_core_init(AppleModernAICCore *s,
         problem = "IRQ configuration and bitmap banks exceed the MMIO aperture";
         goto invalid;
     }
-    registers[0] = APPLE_MODERN_AIC_VERSION_OFFSET;
+    /*
+     * A zero acknowledge offset can never match a real driver. XNU's
+     * AppleInterruptControllerV3 stores the ADT "aic-iack-offset" property
+     * into its own member with a compiled-in default of zero, then tests that
+     * member and panics at AppleInterruptControllerV3.cpp:214 ("Couldnt find
+     * aic-iack-offset device tree property") when it is still zero. Reject it
+     * here rather than realizing a controller the firmware would refuse.
+     */
+    if (!geometry->event_offset) {
+        problem = "event register offset must be nonzero";
+        goto invalid;
+    }
+    registers[0] = geometry->version_offset;
     registers[1] = APPLE_MODERN_AIC_RESET_OFFSET;
-    registers[2] = APPLE_MODERN_AIC_CONFIG_OFFSET;
+    registers[2] = geometry->config_offset;
     registers[3] = geometry->cap0_offset;
     registers[4] = geometry->maxnumirq_offset;
     registers[5] = geometry->event_offset;
@@ -84,6 +96,21 @@ bool apple_modern_aic_core_init(AppleModernAICCore *s,
             aic_ranges_overlap(registers[i], 4, geometry->irq_config_offset,
                            total_size)) {
             problem = "capability/control/event register is outside or overlaps IRQ banks";
+            goto invalid;
+        }
+        /*
+         * The shared timestamp window is matched before every named register
+         * in both access paths, so a register placed inside it would be
+         * silently shadowed rather than decoded. Apple's own ADT puts that
+         * window at 0x1000, which is where the reference project's
+         * dt_fixup.py advertises the acknowledge register, so this is a
+         * reachable misconfiguration and not a theoretical one.
+         */
+        if (geometry->timestamp_size &&
+            aic_ranges_overlap(registers[i], 4, geometry->timestamp_offset,
+                               geometry->timestamp_size)) {
+            problem = "capability/control/event register is shadowed by the "
+                      "shared timestamp window";
             goto invalid;
         }
         for (unsigned j = 0; j < i; j++) {
@@ -201,7 +228,7 @@ bool apple_modern_aic_core_read(AppleModernAICCore *s, uint64_t offset,
         offset >= s->geometry.timestamp_offset &&
         offset - s->geometry.timestamp_offset < s->geometry.timestamp_size) {
         *value = 0; /* Shared timestamp counters are not modelled. */
-    } else if (offset == APPLE_MODERN_AIC_VERSION_OFFSET) {
+    } else if (offset == s->geometry.version_offset) {
         *value = s->geometry.revision;
     } else if (offset == s->geometry.cap0_offset) {
         *value = s->geometry.num_irqs; /* last die = 0 */
@@ -209,7 +236,7 @@ bool apple_modern_aic_core_read(AppleModernAICCore *s, uint64_t offset,
         *value = s->geometry.max_irqs | UINT32_C(1) << 24; /* one die */
     } else if (offset == APPLE_MODERN_AIC_RESET_OFFSET) {
         *value = 0;
-    } else if (offset == APPLE_MODERN_AIC_CONFIG_OFFSET) {
+    } else if (offset == s->geometry.config_offset) {
         *value = s->enabled;
     } else if (offset == s->geometry.event_offset) {
         *value = apple_modern_aic_core_ack(s);
@@ -251,7 +278,7 @@ bool apple_modern_aic_core_write(AppleModernAICCore *s, uint64_t offset,
         if (value & 1) {
             apple_modern_aic_core_reset(s);
         }
-    } else if (offset == APPLE_MODERN_AIC_CONFIG_OFFSET) {
+    } else if (offset == s->geometry.config_offset) {
         if (value & ~UINT32_C(1)) {
             return false;
         }
@@ -409,12 +436,17 @@ static const Property apple_modern_aic_properties[] = {
     DEFINE_PROP_UINT32("revision", AppleModernAICState, geometry.revision, 2),
     DEFINE_PROP_UINT32("num-irqs", AppleModernAICState, geometry.num_irqs, 0),
     DEFINE_PROP_UINT32("max-irqs", AppleModernAICState, geometry.max_irqs, 0),
+    DEFINE_PROP_UINT32("version-offset", AppleModernAICState,
+                       geometry.version_offset, APPLE_MODERN_AIC_VERSION_OFFSET),
+    DEFINE_PROP_UINT32("config-offset", AppleModernAICState,
+                       geometry.config_offset, APPLE_MODERN_AIC_CONFIG_OFFSET),
     DEFINE_PROP_UINT32("cap0-offset", AppleModernAICState, geometry.cap0_offset, 4),
     DEFINE_PROP_UINT32("maxnumirq-offset", AppleModernAICState,
                        geometry.maxnumirq_offset, 12),
     DEFINE_PROP_UINT32("irq-config-offset", AppleModernAICState,
                        geometry.irq_config_offset, 0x2000),
-    DEFINE_PROP_UINT32("event-offset", AppleModernAICState, geometry.event_offset, 0),
+    DEFINE_PROP_UINT32("event-offset", AppleModernAICState,
+                       geometry.event_offset, APPLE_MODERN_AIC_EVENT_OFFSET),
     DEFINE_PROP_UINT32("timestamp-offset", AppleModernAICState,
                        geometry.timestamp_offset, 0),
     DEFINE_PROP_UINT32("timestamp-size", AppleModernAICState,
