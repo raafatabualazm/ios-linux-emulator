@@ -66,6 +66,9 @@ struct AppleSEPSimState {
     AppleSEPSimOOLState ool_state[SEP_ENDPOINT_MAX];
 };
 
+AppleSEPSimState *apple_sep_sim_new(const char *role, uint64_t mmio_size,
+                                    AppleA7IOPVersion version,
+                                    AddressSpace *dma_as);
 AppleSEPSimState *apple_sep_sim_from_node(AppleDTNode *node, bool modern);
 
 #endif /* HW_ARM_APPLE_SILICON_SEP_SIM_H */

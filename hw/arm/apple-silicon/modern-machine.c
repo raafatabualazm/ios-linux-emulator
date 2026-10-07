@@ -21,6 +21,7 @@
 #include "hw/arm/apple-silicon/modern-amcc.h"
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
 #include "hw/intc/apple-modern-aic.h"
+#include "hw/arm/apple-silicon/sep-sim.h"
 #include "hw/misc/apple-silicon/a7iop/core.h"
 #include "hw/qdev-properties.h"
 #include "hw/arm/apple-silicon/modern-boot-display.h"
@@ -58,6 +59,7 @@ struct AppleModernMachine {
     bool pauth_compat;
     bool sep_trace;
     bool sep_mailbox;
+    bool sep_sim;
     DeviceState *sep_mbox;
     bool aic_trace;
     bool modern_aic;
@@ -733,9 +735,29 @@ static bool map_sep_mailbox(AppleModernMachine *s, Error **errp)
         return false;
     }
 
-    s->sep_mbox = qdev_new(TYPE_APPLE_A7IOP);
-    apple_a7iop_init(APPLE_A7IOP(s->sep_mbox), "SEP", size, APPLE_A7IOP_V6,
-                     NULL, NULL);
+    if (s->sep_sim) {
+        /*
+         * The SEP protocol simulator instead of a bare FIFO. It is an
+         * AppleA7IOP subclass, so the geometry, the four lines and the
+         * connect-before-realize ordering below are unchanged; only the
+         * message handler differs. V6 is named explicitly: the simulator's
+         * historical apple_sep_sim_from_node() boolean selects V4, which is
+         * the wrong register layout for this board's ascwrap-v6 wrapper.
+         *
+         * Out-of-line payloads are given the system address space. /arm-io/sep
+         * names an iommu-parent and the tree has /arm-io/dart-sep, which this
+         * board does not model, so an out-of-line address is treated as a
+         * physical address rather than an IOVA. That is a declared
+         * simplification: it is correct only while the guest's mapper is
+         * identity, and it is why the simulator stays opt-in.
+         */
+        s->sep_mbox = DEVICE(apple_sep_sim_new("SEP", size, APPLE_A7IOP_V6,
+                                               &address_space_memory));
+    } else {
+        s->sep_mbox = qdev_new(TYPE_APPLE_A7IOP);
+        apple_a7iop_init(APPLE_A7IOP(s->sep_mbox), "SEP", size,
+                         APPLE_A7IOP_V6, NULL, NULL);
+    }
 
     /*
      * Positional mapping, and it is the measured one. XNU registers only two
@@ -769,11 +791,14 @@ static bool map_sep_mailbox(AppleModernMachine *s, Error **errp)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(s->sep_mbox), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->sep_mbox), 0, base);
     error_free(local);
-    warn_report("apple-modern: SEP ASC mailbox at 0x%" PRIx64 " size 0x%"
-                PRIx64 ", AIC inputs %u/%u/%u/%u (opt-in sep-mailbox; the v6 "
-                "register map is our declared layout, not Apple-documented)",
+    warn_report("apple-modern: SEP %s at 0x%" PRIx64 " size 0x%" PRIx64
+                ", AIC inputs %u/%u/%u/%u (opt-in; the v6 register map is our "
+                "declared layout, not Apple-documented%s)",
+                s->sep_sim ? "protocol simulator" : "ASC mailbox",
                 base, size, ldl_le_p(ints.data), ldl_le_p(ints.data + 4),
-                ldl_le_p(ints.data + 8), ldl_le_p(ints.data + 12));
+                ldl_le_p(ints.data + 8), ldl_le_p(ints.data + 12),
+                s->sep_sim ? "; no sepOS, no firmware and no real "
+                             "cryptography" : "");
     return true;
 }
 
@@ -837,7 +862,7 @@ static bool map_sep_trace(AppleModernMachine *s, Error **errp)
          * one place where leaving a logging aperture mapped can still teach us
          * something.
          */
-        if (s->sep_mailbox && i == 0) {
+        if ((s->sep_mailbox || s->sep_sim) && i == 0) {
             continue;
         }
         if (!size || size > 0x1000000) {
@@ -1010,7 +1035,7 @@ static void modern_init(MachineState *machine)
                                     &s->cpu_register_ram[i]);
     }
     if (!map_amcc(s, &error) || !map_aic(s, &error) || !map_sep(s, &error) ||
-        (s->sep_mailbox && !map_sep_mailbox(s, &error)) ||
+        ((s->sep_mailbox || s->sep_sim) && !map_sep_mailbox(s, &error)) ||
         (s->sep_trace && !map_sep_trace(s, &error))) {
         error_report_err(error);
         exit(EXIT_FAILURE);
@@ -1139,6 +1164,7 @@ BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(sep_trace, sep_trace)
 BOOL_PROPERTY(sep_mailbox, sep_mailbox)
+BOOL_PROPERTY(sep_sim, sep_sim)
 BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
 BOOL_PROPERTY(boot_display, boot_display)
@@ -1236,6 +1262,7 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_sep_trace);
     object_class_property_add_bool(oc, "sep-mailbox", get_sep_mailbox,
                                    set_sep_mailbox);
+    object_class_property_add_bool(oc, "sep-sim", get_sep_sim, set_sep_sim);
     object_class_property_add_bool(oc, "aic-trace", get_aic_trace,
                                    set_aic_trace);
     object_class_property_add_bool(oc, "modern-aic", get_modern_aic,

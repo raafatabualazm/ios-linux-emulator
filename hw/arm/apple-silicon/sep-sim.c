@@ -27,6 +27,7 @@
 #include "hw/resettable.h"
 #include "qapi/error.h"
 #include "qemu/guest-random.h"
+#include "qemu/error-report.h"
 #include "qemu/lockable.h"
 #include "qemu/log.h"
 #include "system/dma.h"
@@ -40,6 +41,53 @@ typedef struct {
     uint8_t param;
     uint32_t data;
 } QEMU_PACKED SEPMessage;
+
+/*
+ * Out-of-line (OOL) transfer helpers.
+ *
+ * s->dma_as is supplied by the board. A board with a DART passes that DART's
+ * address space, so an OOL address is an IOVA; apple-modern models no DART and
+ * passes the system address space, so there an OOL address is a physical
+ * address. A board that wires neither leaves the field NULL -- s8000 ships that
+ * way today -- and the OOL sites below would dereference it. Refuse the
+ * transfer and say so instead of crashing the emulator on a guest message.
+ */
+static bool apple_sep_sim_ool_write(AppleSEPSimState *s, uint64_t addr,
+                                    const void *buf, size_t len,
+                                    const char *what)
+{
+    if (s->dma_as == NULL) {
+        qemu_log_mask(LOG_UNIMP, "SEP sim: %s needs an out-of-line address "
+                      "space and this board supplied none; %zu-byte transfer "
+                      "dropped\n", what, len);
+        return false;
+    }
+    if (dma_memory_write(s->dma_as, addr, buf, len,
+                         MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+        qemu_log_mask(LOG_GUEST_ERROR, "SEP sim: %s out-of-line write of %zu "
+                      "bytes to 0x%" PRIx64 " failed\n", what, len, addr);
+        return false;
+    }
+    return true;
+}
+
+static bool apple_sep_sim_ool_read(AppleSEPSimState *s, uint64_t addr,
+                                   void *buf, size_t len, const char *what)
+{
+    if (s->dma_as == NULL) {
+        qemu_log_mask(LOG_UNIMP, "SEP sim: %s needs an out-of-line address "
+                      "space and this board supplied none; %zu-byte read "
+                      "dropped\n", what, len);
+        return false;
+    }
+    if (dma_memory_read(s->dma_as, addr, buf, len,
+                        MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+        qemu_log_mask(LOG_GUEST_ERROR, "SEP sim: %s out-of-line read of %zu "
+                      "bytes from 0x%" PRIx64 " failed\n", what, len, addr);
+        return false;
+    }
+    return true;
+}
 
 typedef struct {
     uint8_t ep;
@@ -394,12 +442,29 @@ static void apple_sep_sim_handle_control_msg(AppleSEPSimState *s,
 
         char error_desc[ASN1_MAX_ERROR_DESCRIPTION_SIZE];
         asn1_node art_defs = NULL;
-        assert_cmpuint(
-            asn1_array2tree(art_definitions_array, &art_defs, error_desc), ==,
-            ASN1_SUCCESS);
         asn1_node art = NULL;
-        assert_cmpuint(asn1_create_element(art_defs, "ART.Header", &art), ==,
-                       ASN1_SUCCESS);
+        int art_rc;
+
+        /*
+         * These calls must NOT sit inside an assert. This tree builds with
+         * -DNDEBUG and G_DISABLE_ASSERT, which removes the assert and the call
+         * inside it, so the encode below never ran and the 512-byte buffer it
+         * was supposed to fill was DMA'd to the guest uninitialised -- host
+         * stack disclosure. Check the results explicitly instead.
+         */
+        art_rc = asn1_array2tree(art_definitions_array, &art_defs, error_desc);
+        if (art_rc != ASN1_SUCCESS) {
+            qemu_log_mask(LOG_UNIMP, "SEP sim: ART definitions failed to "
+                          "load (%d); no ART reported\n", art_rc);
+            break;
+        }
+        art_rc = asn1_create_element(art_defs, "ART.Header", &art);
+        if (art_rc != ASN1_SUCCESS) {
+            qemu_log_mask(LOG_UNIMP, "SEP sim: ART.Header element failed "
+                          "(%d); no ART reported\n", art_rc);
+            asn1_delete_structure(&art_defs);
+            break;
+        }
         uint8_t val = 0;
         asn1_write_value(art, "Version", &val, sizeof(val));
         uint16_t val16 = 0;
@@ -409,19 +474,20 @@ static void apple_sep_sim_handle_control_msg(AppleSEPSimState *s,
         asn1_write_value(art, "Info.SleepHash", byte0x20, 20);
         asn1_write_value(art, "Info.Nonce", byte0x20, 0);
         asn1_write_value(art, "InfoHMAC", byte0x20, sizeof(byte0x20));
-        char data[512];
+        char data[512] = { 0 };
         int data_len = sizeof(data);
-        assert_cmpuint(asn1_der_coding(art, "", data, &data_len, error_desc),
-                       ==, ASN1_SUCCESS);
+
+        art_rc = asn1_der_coding(art, "", data, &data_len, error_desc);
         asn1_delete_structure(&art);
         asn1_delete_structure(&art_defs);
-
-        if (dma_memory_write(s->dma_as, s->ool_state[EP_ART_STORAGE].out_addr,
-                             data, data_len,
-                             MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "EP_XART_STORAGE: Failed to write ART to OOL");
+        if (art_rc != ASN1_SUCCESS) {
+            qemu_log_mask(LOG_UNIMP, "SEP sim: ART DER encode failed (%d: %s); "
+                          "nothing reported rather than sending an "
+                          "unencoded buffer\n", art_rc, error_desc);
+            break;
         }
+        apple_sep_sim_ool_write(s, s->ool_state[EP_ART_STORAGE].out_addr,
+                                data, data_len, "XART storage ART");
         apple_sep_sim_send_message(s, EP_ART_STORAGE, 0,
                                    ART_STORAGE_OP_INCOMING, 0, 0);
         break;
@@ -638,7 +704,12 @@ static uint8_t *apple_sep_sim_gen_sks_hash(uint8_t *buf,
             .iov_len = msg_size - KEYSTORE_IPC_HEADER_SIZE,
         },
     };
-    assert_true(qcrypto_hash_supports(QCRYPTO_HASH_ALGO_SHA256));
+    /* Not in an assert: -DNDEBUG would remove the call as well as the check. */
+    if (!qcrypto_hash_supports(QCRYPTO_HASH_ALGO_SHA256)) {
+        qemu_log_mask(LOG_UNIMP, "SEP sim: SHA-256 unavailable; SKS hashes "
+                      "will not be generated\n");
+        return NULL;
+    }
     uint8_t *hash = NULL;
     size_t hash_len = 0;
     int ret =
@@ -660,12 +731,16 @@ static void apple_sep_sim_keystore_send_ipc_resp(AppleSEPSimState *s,
 
     resp_hdr = (KeystoreIPCHeader *)resp_buf;
     resp_hash = apple_sep_sim_gen_sks_hash(resp_buf, resp_size);
+    if (resp_hash == NULL) {
+        /* Hashing is unavailable; an unhashed reply would fail validation. */
+        return;
+    }
 
     memcpy(resp_hdr->payload_hash, resp_hash, sizeof(resp_hdr->payload_hash));
     g_free(resp_hash);
 
-    dma_memory_write(s->dma_as, s->ool_state[EP_KEYSTORE].out_addr, resp_buf,
-                     resp_size, MEMTXATTRS_UNSPECIFIED);
+    apple_sep_sim_ool_write(s, s->ool_state[EP_KEYSTORE].out_addr, resp_buf,
+                            resp_size, "keystore reply");
 
     apple_sep_sim_send_message(s, msg->ep, msg->tag | KEYSTORE_MSG_TAG_REPLY,
                                msg->id, 0, resp_size << 16);
@@ -676,8 +751,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 {
     uint8_t msg_code = msg->tag & KEYSTORE_MSG_TAG_CODE_MASK;
     uint8_t *msg_buf = g_new0(uint8_t, msg->size);
-    dma_memory_read(s->dma_as, s->ool_state[EP_KEYSTORE].in_addr, msg_buf,
-                    msg->size, MEMTXATTRS_UNSPECIFIED);
+    apple_sep_sim_ool_read(s, s->ool_state[EP_KEYSTORE].in_addr, msg_buf,
+                           msg->size, "keystore request");
     const KeystoreIPCHeader *msg_hdr = (KeystoreIPCHeader *)msg_buf;
 #if 0
     char fn[128];
@@ -980,8 +1055,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
         qemu_log_mask(LOG_GUEST_ERROR, "SEP KeyStore // Unknown (0x%02X)\n",
                       msg_code);
 
-        dma_memory_write(s->dma_as, s->ool_state[EP_KEYSTORE].out_addr, msg_buf,
-                         msg->size, MEMTXATTRS_UNSPECIFIED);
+        apple_sep_sim_ool_write(s, s->ool_state[EP_KEYSTORE].out_addr, msg_buf,
+                                msg->size, "keystore unknown-opcode echo");
         apple_sep_sim_send_message(s, msg->ep,
                                    msg->tag | KEYSTORE_MSG_TAG_REPLY, msg->id,
                                    0, (uint32_t)msg->size << 16);
@@ -1049,31 +1124,70 @@ static void apple_sep_sim_handle_messages(void *opaque)
     }
 }
 
-AppleSEPSimState *apple_sep_sim_from_node(AppleDTNode *node, bool modern)
+/*
+ * Create the simulator from plain values, with no device tree involved.
+ *
+ * Boards that build an AppleDTNode tree use apple_sep_sim_from_node() below.
+ * apple-modern does not: it reads the ADT blob through its own bounded
+ * accessor and never materialises nodes, so it needs the geometry, the wrapper
+ * version and the out-of-line address space passed directly.
+ *
+ * version selects the mailbox register layout and must match the node's
+ * compatible string: ascwrap-v2 -> V2, -v4 -> V4, -v6 -> V6. Passing the wrong
+ * one installs a device at offsets the guest driver will not use, which looks
+ * exactly like a dead device.
+ *
+ * dma_as is the address space for out-of-line payloads, or NULL when the board
+ * has none; see the OOL helpers above for what NULL costs.
+ */
+AppleSEPSimState *apple_sep_sim_new(const char *role, uint64_t mmio_size,
+                                    AppleA7IOPVersion version,
+                                    AddressSpace *dma_as)
 {
     DeviceState *dev;
-    AppleA7IOP *a7iop;
     AppleSEPSimState *s;
-    AppleDTProp *prop;
-    uint64_t *reg;
-    AppleDTNode *child;
 
     dev = qdev_new(TYPE_APPLE_SEP_SIM);
-    a7iop = APPLE_A7IOP(dev);
     s = APPLE_SEP_SIM(dev);
+    apple_a7iop_init(APPLE_A7IOP(dev), role, mmio_size, version, NULL,
+                     apple_sep_sim_handle_messages);
+    qemu_mutex_init(&s->lock);
+    s->dma_as = dma_as;
+    return s;
+}
 
+AppleSEPSimState *apple_sep_sim_from_node(AppleDTNode *node, bool modern)
+{
+    AppleSEPSimState *s;
+    AppleDTProp *prop;
+    AppleDTNode *child;
+    uint64_t *reg;
+
+    /*
+     * Checked, not asserted: this tree builds with -DNDEBUG, so an
+     * assert_nonnull() here disappears and the reg[1] below would dereference
+     * NULL on a tree without the property.
+     */
     prop = apple_dt_get_prop(node, "reg");
-    assert_nonnull(prop);
+    if (prop == NULL || prop->len < 2 * sizeof(uint64_t)) {
+        error_report("SEP sim: node has no usable reg property");
+        return NULL;
+    }
     reg = (uint64_t *)prop->data;
 
-    apple_a7iop_init(a7iop, "SEP", reg[1],
-                     modern ? APPLE_A7IOP_V4 : APPLE_A7IOP_V2, NULL,
-                     apple_sep_sim_handle_messages);
-
-    qemu_mutex_init(&s->lock);
+    /*
+     * The historical boolean. It predates V6 and still means "V4 rather than
+     * V2", which is correct for t8030 and s8000, the only callers. A v6
+     * wrapper must use apple_sep_sim_new() and name its version.
+     */
+    s = apple_sep_sim_new("SEP", reg[1],
+                          modern ? APPLE_A7IOP_V4 : APPLE_A7IOP_V2, NULL);
 
     child = apple_dt_get_node(node, "iop-sep-nub");
-    assert_nonnull(child);
+    if (child == NULL) {
+        error_report("SEP sim: node has no iop-sep-nub child");
+        return NULL;
+    }
     apple_dt_del_node_named(child, "Lynx");
     return s;
 }
