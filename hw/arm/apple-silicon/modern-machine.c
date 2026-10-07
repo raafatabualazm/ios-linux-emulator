@@ -19,6 +19,7 @@
 #include "hw/arm/apple-silicon/modern-boot-metadata.h"
 #include "hw/arm/apple-silicon/modern-board-regions.h"
 #include "hw/arm/apple-silicon/modern-amcc.h"
+#include "hw/arm/apple-silicon/modern-pmgr.h"
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
 #include "hw/intc/apple-modern-aic.h"
 #include "hw/arm/apple-silicon/sep-sim.h"
@@ -62,6 +63,7 @@ struct AppleModernMachine {
     bool sep_mailbox;
     bool sep_sim;
     bool sep_dart;
+    bool modern_pmgr;
     AppleDARTT8110State *sep_mapper;
     AddressSpace *sep_dma_as;
     DeviceState *sep_mbox;
@@ -390,6 +392,79 @@ static bool adt_u32(AppleModernBlob dtree, const char *path, const char *name,
         return false;
     }
     *value = ldl_le_p(prop.data);
+    return true;
+}
+
+/* Power-state cells only: preserving the tree does not supply MCC or DVFS. */
+static bool map_pmgr(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
+                       Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernPMGRPlan plan;
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    size_t count = 0;
+    static const char *const paths[] = {
+        "/arm-io/aic", "/arm-io/sep", "/arm-io/dart-sep",
+    };
+    bool mapped[] = {true, s->sep_trace || s->sep_mailbox || s->sep_sim,
+                     s->sep_dart};
+
+    exclusions[count++] = (AppleModernAddressRange){uart, uart_span};
+    for (size_t i = 0; i < s->board_regions.count; i++) {
+        AppleModernBoardRegion *r = &s->board_regions.windows[i];
+        exclusions[count++] = (AppleModernAddressRange){r->physical_address,
+                                                       r->size};
+    }
+    if (s->has_amcc) {
+        exclusions[count++] = (AppleModernAddressRange){s->amcc.base,
+                                                       s->amcc.size};
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(paths); i++) {
+        AppleModernBlob reg;
+        if (!mapped[i]) {
+            continue;
+        }
+        if (!apple_modern_adt_property(dtree, paths[i], "reg", &reg, errp)) {
+            return false;
+        }
+        if (!reg.size || reg.size % 16 || reg.size > 4 * 16) {
+            error_setg(errp, "invalid %s PMGR exclusion geometry", paths[i]);
+            return false;
+        }
+        for (size_t j = 0; j < reg.size; j += 16) {
+            uint64_t base, size = ldq_le_p(reg.data + j + 8);
+            if (!arm_io_translate(dtree, ldq_le_p(reg.data + j), size,
+                                   &base, errp)) {
+                return false;
+            }
+            exclusions[count++] = (AppleModernAddressRange){base, size};
+        }
+    }
+    AppleModernBlob hmac;
+    if (apple_modern_adt_property(dtree,
+            "/arm-io/sep/iop-sep-nub/InvalidateHmac", "reg-block", &hmac, NULL)) {
+        if (hmac.size != 16) {
+            error_setg(errp, "invalid SEP reg-block PMGR exclusion");
+            return false;
+        }
+        exclusions[count++] = (AppleModernAddressRange){ldq_le_p(hmac.data),
+                                                       ldq_le_p(hmac.data + 8)};
+    }
+    if (!apple_modern_pmgr_plan_build(dtree, s->components.dram_base,
+                                      s->components.dram_size, exclusions,
+                                      count, &plan, errp)) {
+        return false;
+    }
+    DeviceState *dev = apple_modern_pmgr_new(&plan);
+    dev->id = g_strdup("modern-pmgr");
+    object_property_add_child(OBJECT(s), "pmgr", OBJECT(dev));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    for (unsigned i = 0; i < plan.window_count; i++) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), i, plan.windows[i].base);
+    }
+    warn_report("apple-modern: opt-in PMGR power cells: %u windows, %u cells, "
+                "%u virtual domains; no MCC, DVFS, PMP or PMGR IRQ model",
+                plan.window_count, plan.cell_count, plan.virtual_count);
     return true;
 }
 
@@ -1165,7 +1240,8 @@ static void modern_init(MachineState *machine)
     if (!map_amcc(s, &error) || !map_aic(s, &error) || !map_sep(s, &error) ||
         (s->sep_dart && !map_sep_dart(s, &error)) ||
         ((s->sep_mailbox || s->sep_sim) && !map_sep_mailbox(s, &error)) ||
-        (s->sep_trace && !map_sep_trace(s, &error))) {
+        (s->sep_trace && !map_sep_trace(s, &error)) ||
+        (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error))) {
         error_report_err(error);
         exit(EXIT_FAILURE);
     }
@@ -1295,6 +1371,7 @@ BOOL_PROPERTY(sep_trace, sep_trace)
 BOOL_PROPERTY(sep_mailbox, sep_mailbox)
 BOOL_PROPERTY(sep_sim, sep_sim)
 BOOL_PROPERTY(sep_dart, sep_dart)
+BOOL_PROPERTY(modern_pmgr, modern_pmgr)
 BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
 BOOL_PROPERTY(boot_display, boot_display)
@@ -1394,6 +1471,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_sep_mailbox);
     object_class_property_add_bool(oc, "sep-sim", get_sep_sim, set_sep_sim);
     object_class_property_add_bool(oc, "sep-dart", get_sep_dart, set_sep_dart);
+    object_class_property_add_bool(oc, "modern-pmgr", get_modern_pmgr,
+                                   set_modern_pmgr);
     object_class_property_add_bool(oc, "aic-trace", get_aic_trace,
                                    set_aic_trace);
     object_class_property_add_bool(oc, "modern-aic", get_modern_aic,
