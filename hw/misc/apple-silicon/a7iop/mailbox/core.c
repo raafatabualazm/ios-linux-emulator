@@ -75,6 +75,17 @@ static FILE *mbd_fp;
 static bool mbd_fp_tried;
 static unsigned mbd_file_lines;
 
+/* MBOX_DIAG_FULL_FANOUT=1: counterfactual that refreshes both objects on every update. */
+static bool mbd_full_fanout(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        on = getenv("MBOX_DIAG_FULL_FANOUT") != NULL;
+    }
+    return on;
+}
+
 static void mbd_log(const char *fmt, ...)
 {
     va_list ap, ap2;
@@ -500,6 +511,13 @@ void apple_a7iop_mailbox_update_irq(AppleA7IOPMailbox *s)
     smp_mb();
     if (!strcmp(s->role, "SEP-ap")) {
         apple_a7iop_mailbox_update_irq(s->iop_mailbox);
+    } else if (mbd_full_fanout() && mbd_depth == 1) {
+        /* MBOXDIAG counterfactual: refresh the peer object too, whatever the role. */
+        AppleA7IOPMailbox *peer = s == s->iop_mailbox ? s->ap_mailbox : s->iop_mailbox;
+
+        if (peer != s) {
+            apple_a7iop_mailbox_update_irq(peer);
+        }
     }
     if (--mbd_depth == 0) {
         mbd_check(s);
@@ -980,6 +998,11 @@ static void apple_a7iop_mailbox_reset(DeviceState *dev)
     s->timer1_masked = 0;
     s->sepd_enabled = 0;
     apple_a7iop_mailbox_update_irq_status(s);
+    if (mbd_full_fanout()) {
+        /* counterfactual: a reset of either object re-derives the peer's lines too */
+        apple_a7iop_mailbox_update_irq_status(s == s->iop_mailbox ? s->ap_mailbox :
+                                                                    s->iop_mailbox);
+    }
     mbd_ctx = "reset";
     mbd_check(s);
     mbd_ctx = "other";
