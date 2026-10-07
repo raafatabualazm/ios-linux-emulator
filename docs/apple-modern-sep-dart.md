@@ -120,11 +120,17 @@ Run the production-core gate from the isolated checkout:
 python3 scripts/test-apple-dart-t8110.py
 ```
 
-The v3 core gate runs 1,068 checks under ASan/UBSan and production `NDEBUG`, with two
+The v3 core gate runs 1,234 checks under ASan/UBSan and production `NDEBUG`, with two
 owned DMA/fault/reset passes in each mode. It verifies high IOVAs, page crossing,
 table-level faults, denied writes with unchanged RAM, read denial, fault masks
 and clearing, explicit bypass, lower-address walks, remapping, protection,
-flush requests and permission-query semantics. LeakSanitizer is disabled because
+flush requests and permission-query semantics, that the first fault (address,
+direction, code) is retained until cleared while later faults are only counted,
+that a four-level walk reports an IOVA at or above 2^va_bits as an address fault,
+and that a reset clears a pending fault, its address, stream bits and the mask.
+A mutation study (15 of 16 hand-made defects are detected) leaves one mutant
+alive on purpose: ignoring ERROR_FLAG in the interrupt mask would pin a choice
+that is declared, not documented. LeakSanitizer is disabled because
 the workspace monitor uses ptrace; this fixture allocates no heap.
 
 **That gate exercises the production core through an owned-RAM adapter.** It

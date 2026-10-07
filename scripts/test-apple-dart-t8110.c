@@ -318,6 +318,48 @@ static void gate(AppleDARTT8110Core *s)
     CHECK(!apple_dart_t8110_core_irq(s));
 }
 
+/*
+ * Documented behaviours the first pass never pinned. Mutation study 2026-10-08
+ * (tools/mutate_dart_core.py): M08 "first fault overwritten", M11 "IOVA >= 2^va_bits
+ * not rejected" and M13 "reset keeps fault state" all survived the original gate.
+ */
+static void extra_gate(AppleDARTT8110Core *s)
+{
+    unsigned char data[8];
+    const uint64_t beyond = UINT64_C(1) << s->geometry.va_bits;
+    unsigned before;
+
+    seed_tables();
+    configure(s);
+
+    /* Four-level walk: an IOVA at 2^va_bits is an address fault (code bit 6), not a
+     * walk that reports a missing table entry (bit 1). */
+    CHECK(!dma(s, 0, beyond, data, 4, false));
+    fault_is(s, 0, 6, beyond, false);
+    clear_fault(s);
+
+    /* The first fault, its address and its direction are retained until cleared;
+     * a second fault is counted but does not overwrite them. */
+    put64(L0 + ((IOVA >> 36) & 0x7ff) * 8, 0);
+    CHECK(!dma(s, 0, IOVA, data, 4, false));
+    fault_is(s, 0, 1, IOVA, false);
+    before = s->faults;
+    CHECK(!dma(s, 0, beyond, data, 4, true));
+    CHECK(s->faults == before + 1);
+    fault_is(s, 0, 1, IOVA, false);
+    clear_fault(s);
+    CHECK(!dma(s, 0, beyond, data, 4, true));
+    fault_is(s, 0, 6, beyond, true);
+    clear_fault(s);
+
+    /* Leave a fault, its address, its stream bit and a non-zero mask pending so the
+     * caller's reset has something to clear. */
+    CHECK(!dma(s, 0, IOVA, data, 4, false));
+    wr(s, 0x104, 0x10);
+    CHECK(s->error && s->error_address == IOVA && s->error_mask == 0x10 &&
+          s->error_streams[0] && s->faults);
+}
+
 int main(void)
 {
     AppleDARTT8110Core core;
@@ -337,6 +379,14 @@ int main(void)
         }
         for (unsigned bank = 0; bank < 8; bank++) {
             CHECK(core.enabled[bank] == 0 && core.error_streams[bank] == 0);
+        }
+        /* Reset must clear a PENDING fault, its address, its stream bits and the mask. */
+        extra_gate(&core);
+        apple_dart_t8110_core_reset(&core);
+        CHECK(core.error == 0 && core.error_address == 0 && core.error_mask == 0);
+        CHECK(core.faults == 0 && !apple_dart_t8110_core_irq(&core));
+        for (unsigned bank = 0; bank < 8; bank++) {
+            CHECK(core.error_streams[bank] == 0);
         }
     }
     /* Geometry/MMIO bounds stay checked in production NDEBUG builds too. */
