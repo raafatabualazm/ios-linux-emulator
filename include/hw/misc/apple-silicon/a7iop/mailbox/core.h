@@ -124,6 +124,8 @@ struct AppleA7IOPMailbox {
     uint32_t sepd_enabled;
 };
 
+/* UFLOW-PROBE (diagnostic only): which register handler is receiving. */
+extern __thread const char *apple_a7iop_uf_site;
 void apple_a7iop_mailbox_update_irq_status(AppleA7IOPMailbox *s);
 void apple_a7iop_mailbox_update_irq(AppleA7IOPMailbox *s);
 bool apple_a7iop_mailbox_is_empty(AppleA7IOPMailbox *s);

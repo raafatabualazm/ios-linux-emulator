@@ -34,6 +34,8 @@
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "qemu/queue.h"
+#include "qemu/timer.h"
+#include "hw/core/cpu.h"
 
 #define MAX_MESSAGE_COUNT (15)
 
@@ -45,6 +47,53 @@
 #define CTRL_COUNT_SHIFT (20)
 #define CTRL_COUNT_MASK (MAX_MESSAGE_COUNT << CTRL_COUNT_SHIFT)
 #define CTRL_COUNT(v) (((v) << CTRL_COUNT_SHIFT) & CTRL_COUNT_MASK)
+
+
+/* ---- UFLOW-PROBE: bounded stderr diagnostics, NO behaviour change ---- */
+__thread const char *apple_a7iop_uf_site;
+
+typedef struct UFStat {
+    AppleA7IOPMailbox *mb;
+    uint64_t ok, ok_vcpu, ok_main, latched_calls, ctrl_latched, stranded, forced;
+} UFStat;
+static UFStat uf_stats[64];
+
+static UFStat *uf_stat(AppleA7IOPMailbox *s)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(uf_stats); i++) {
+        if (uf_stats[i].mb == s) {
+            return &uf_stats[i];
+        }
+        if (uf_stats[i].mb == NULL) {
+            uf_stats[i].mb = s;
+            return &uf_stats[i];
+        }
+    }
+    return &uf_stats[ARRAY_SIZE(uf_stats) - 1];
+}
+
+static bool uf_pow2(uint64_t n)
+{
+    return n != 0 && (n & (n - 1)) == 0;
+}
+
+static const char *uf_kind(AppleA7IOPMailbox *s)
+{
+    return g_str_has_suffix(s->role, "-iop") ? "A2I" : "I2A";
+}
+
+static void uf_who(char *buf, size_t n)
+{
+    if (current_cpu != NULL) {
+        CPUClass *cc = CPU_GET_CLASS(current_cpu);
+        snprintf(buf, n, "vcpu%d(%s) pc=0x%" PRIx64, current_cpu->cpu_index,
+                 object_get_typename(OBJECT(current_cpu)),
+                 (uint64_t)(cc->get_pc ? cc->get_pc(current_cpu) : 0));
+    } else {
+        snprintf(buf, n, "main-loop/BH");
+    }
+}
+/* ---- end UFLOW-PROBE ---- */
 
 static bool is_interrupt_enabled(AppleA7IOPMailbox *s, uint32_t status)
 {
@@ -172,6 +221,19 @@ void apple_a7iop_mailbox_update_irq_status(AppleA7IOPMailbox *s)
         s->role, iop_empty, ap_empty, !iop_nonempty_unmasked,
         !iop_empty_unmasked, !ap_nonempty_unmasked, !ap_empty_unmasked);
 
+    if (iop_underflow || ap_underflow) {
+        UFStat *st = uf_stat(s);
+        st->forced++;
+        if (st->forced <= 3 || uf_pow2(st->forced)) {
+            fprintf(stderr, "[A7IOP-UFLOW] LINE-FORCED obj=%s iop_queue_uf=%d "
+                    "ap_queue_uf=%d iop_queue_empty=%d ap_queue_empty=%d "
+                    "iop_nonempty_unmasked=%d ap_nonempty_unmasked=%d n=%" PRIu64
+                    "\n", s->role, iop_underflow, ap_underflow, iop_empty,
+                    ap_empty, iop_nonempty_unmasked, ap_nonempty_unmasked,
+                    st->forced);
+        }
+    }
+
 
     // SEP:
     // 0x65: inbox/IOP overflow
@@ -214,6 +276,16 @@ void apple_a7iop_mailbox_update_irq(AppleA7IOPMailbox *s)
 bool apple_a7iop_mailbox_is_empty(AppleA7IOPMailbox *s)
 {
     QEMU_LOCK_GUARD(&s->lock);
+
+    if (s->underflow && !QTAILQ_EMPTY(&s->inbox)) {
+        UFStat *st = uf_stat(s);
+        st->stranded++;
+        if (st->stranded <= 3 || uf_pow2(st->stranded)) {
+            fprintf(stderr, "[A7IOP-UFLOW] STRANDED is_empty()==true with "
+                    "messages queued queue=%s(%s) count=%u n=%" PRIu64 "\n",
+                    s->role, uf_kind(s), s->count, st->stranded);
+        }
+    }
 
     return s->underflow || QTAILQ_EMPTY(&s->inbox);
 }
@@ -273,13 +345,31 @@ AppleA7IOPMessage *apple_a7iop_inbox_peek(AppleA7IOPMailbox *s)
 static AppleA7IOPMessage *apple_a7iop_mailbox_recv(AppleA7IOPMailbox *s)
 {
     AppleA7IOPMessage *msg;
+    UFStat *uf = uf_stat(s);
+    char uf_w[96];
 
     if (s->underflow) {
+        uf->latched_calls++;
+        if (uf->latched_calls <= 3 || uf_pow2(uf->latched_calls)) {
+            uf_who(uf_w, sizeof(uf_w));
+            fprintf(stderr, "[A7IOP-UFLOW] RECV-WHILE-LATCHED queue=%s(%s) "
+                    "calls=%" PRIu64 " inbox_empty=%d count=%u site=%s who=%s\n",
+                    s->role, uf_kind(s), uf->latched_calls,
+                    QTAILQ_EMPTY(&s->inbox), s->count,
+                    apple_a7iop_uf_site ? apple_a7iop_uf_site : "capi", uf_w);
+        }
         return NULL;
     }
 
     msg = QTAILQ_FIRST(&s->inbox);
     if (msg == NULL) {
+        uf_who(uf_w, sizeof(uf_w));
+        fprintf(stderr, "[A7IOP-UFLOW] LATCH queue=%s(%s) ok_before=%" PRIu64
+                " count=%u iop_dir_en=%d ap_dir_en=%d site=%s who=%s "
+                "vt_ns=%" PRId64 "\n", s->role, uf_kind(s), uf->ok, s->count,
+                s->iop_dir_en, s->ap_dir_en,
+                apple_a7iop_uf_site ? apple_a7iop_uf_site : "capi", uf_w,
+                qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
         s->underflow = true;
         qemu_log_mask(LOG_GUEST_ERROR, "%s: %s underflowed.\n", __FUNCTION__,
                       s->role);
@@ -293,6 +383,20 @@ static AppleA7IOPMessage *apple_a7iop_mailbox_recv(AppleA7IOPMailbox *s)
                                    ldq_le_p(msg->data + sizeof(uint64_t)));
     s->count--;
     apple_a7iop_mailbox_update_irq(s);
+
+    uf->ok++;
+    if (current_cpu != NULL) {
+        uf->ok_vcpu++;
+    } else {
+        uf->ok_main++;
+    }
+    if (uf_pow2(uf->ok)) {
+        uf_who(uf_w, sizeof(uf_w));
+        fprintf(stderr, "[A7IOP-UFLOW] RECV-OK queue=%s(%s) n=%" PRIu64
+                " by_vcpu=%" PRIu64 " by_main_bh=%" PRIu64 " site=%s last_who=%s\n",
+                s->role, uf_kind(s), uf->ok, uf->ok_vcpu, uf->ok_main,
+                apple_a7iop_uf_site ? apple_a7iop_uf_site : "capi", uf_w);
+    }
 
     return msg;
 }
@@ -353,6 +457,15 @@ void apple_a7iop_mailbox_clear_int_mask(AppleA7IOPMailbox *s, uint32_t value)
 static inline uint32_t apple_a7iop_mailbox_ctrl(AppleA7IOPMailbox *s)
 {
     if (s->underflow) {
+        UFStat *st = uf_stat(s);
+        st->ctrl_latched++;
+        if (st->ctrl_latched <= 3 || uf_pow2(st->ctrl_latched)) {
+            char w[96];
+            uf_who(w, sizeof(w));
+            fprintf(stderr, "[A7IOP-UFLOW] CTRL-READ-WHILE-LATCHED queue=%s(%s) "
+                    "returns=0x%x n=%" PRIu64 " who=%s\n", s->role, uf_kind(s),
+                    CTRL_UNDERFLOW, st->ctrl_latched, w);
+        }
         return CTRL_UNDERFLOW;
     }
 
