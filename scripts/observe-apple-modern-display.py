@@ -13,10 +13,18 @@ from pathlib import Path
 import resource
 import struct
 import subprocess
+import sys
 import threading
 import time
 import traceback
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from apple_modern_console import Console  # noqa: E402
+
+# A capture counts as a visible console only if it decodes to this many glyph cells. The
+# cursor is one solid cell and is not a glyph, so it can never satisfy this by itself.
+MIN_TEXT_CELLS = 40
 
 spec = importlib.util.spec_from_file_location(
     'display_observation_board', Path(__file__).with_name('test-apple-modern-machine.py'))
@@ -129,7 +137,25 @@ def run(args, output):
                 histogram = rgb.getcolors(WIDTH * HEIGHT)
                 report['pixel_colors'] = len(histogram) if histogram is not None else None
                 report['nonblack_pixels'] = sum(count for count, color in histogram if color != (0, 0, 0))
-                report['visible_boot_console'] = report['nonblack_pixels'] > 0
+            # nonblack_pixels is kept for the record but is NOT the criterion: a single cursor
+            # cell (128 pixels) satisfies "any non-black pixel" with no text on screen at all,
+            # which is exactly what a serial=3 boot shows. Decode the capture with the kernel's
+            # own glyph table instead.
+            # Known limitation, deliberately not papered over: under serial=2 the UART is silent,
+            # so serial_shell_prompt cannot become true, and this single late screenshot usually no
+            # longer shows the prompt (the guest's repeating log line scrolls it away within seconds).
+            # Use test-apple-modern-display-shell-qemu.py to check for the prompt and for input.
+            try:
+                rows, unknown, text_cells = Console(args.components / 'bootkc').decode(screenshot)
+                report['console_text_cells'] = text_cells
+                report['console_unknown_cells'] = unknown
+                report['console_text_rows'] = sum(1 for row in rows if row.strip(' \u2588'))
+                report['visible_boot_console'] = text_cells >= MIN_TEXT_CELLS
+                (output / 'boot-console.txt').write_text('\n'.join(rows) + '\n')
+            except ValueError as error:
+                # Different kernel collection: refuse to decode rather than guess a glyph table.
+                report['console_decode_error'] = str(error)
+                report['visible_boot_console'] = None
             report['screenshot'] = board.digest(screenshot)
             (output / 'final-registers.txt').write_text(qmp.request(
                 'human-monitor-command', {'command-line': 'info registers'}))
@@ -182,8 +208,9 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     result = run(args, output)
     print(json.dumps({key: result.get(key) for key in
-                      ('observation_completed', 'serial_shell_prompt', 'visible_boot_console',
-                       'nonblack_pixels', 'inputs_unchanged', 'error')}))
+                      ('observation_completed', 'serial_shell_prompt',
+                       'visible_boot_console', 'console_text_cells', 'nonblack_pixels',
+                       'inputs_unchanged', 'error')}))
     raise SystemExit(0 if result['observation_completed'] and result['inputs_unchanged'] else 1)
 
 
