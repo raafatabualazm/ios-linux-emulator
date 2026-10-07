@@ -411,11 +411,40 @@ static void scenario_mask_reset(const char *name, AppleA7IOPVersion ver, const c
     st_done(c);
 }
 
+/*
+ * The legacy t8030 SEP model's own reset: apple_sep_reset_hold() runs after both
+ * mailbox objects have been reset and enqueues two A2I messages with
+ * apple_a7iop_send_iop() (sep.c:4554 and sep.c:4560). Reproduce that shape.
+ */
+static void scenario_sep_boot(const char *name, AppleA7IOPVersion ver, const char *role)
+{
+    StCtx *c = st_new(name, ver, role);
+
+    st_obs(c, "after reset");
+    device_cold_reset(DEVICE(c->dev->ap_mailbox));
+    device_cold_reset(DEVICE(c->dev->iop_mailbox));
+    st_obs(c, "both mailbox objects reset (ap, iop)");
+    apple_a7iop_send_iop(c->dev, st_msg(0x67));
+    st_obs(c, "SEP reset hold: send_iop #1 (sep.c:4554)");
+    apple_a7iop_send_iop(c->dev, st_msg(0x00));
+    st_obs(c, "SEP reset hold: send_iop #2 (sep.c:4560)");
+    ap_mask_clr(c, 0);
+    st_obs(c, "first AP-side mask write");
+    (void)iop_recv_a2i(c);
+    st_obs(c, "firmware drains message 1");
+    (void)iop_recv_a2i(c);
+    st_obs(c, "firmware drains message 2");
+    iop_send_i2a(c, 0x22);
+    st_obs(c, "firmware posts a reply (I2A)");
+    st_done(c);
+}
+
 static void mbox_selftest_realize(DeviceState *dev, Error **errp)
 {
     scenario_basic("V4/SEP basic", APPLE_A7IOP_V4, "SEP");
     scenario_basic("V2/SEP basic", APPLE_A7IOP_V2, "SEP");
     scenario_basic("V4/RTK basic", APPLE_A7IOP_V4, "RTK");
+    scenario_sep_boot("V4/SEP legacy-boot-shape", APPLE_A7IOP_V4, "SEP");
     scenario_mask_reset("V4/SEP mask-reset", APPLE_A7IOP_V4, "SEP");
     scenario_missed_wake("V4/SEP missed-wake", APPLE_A7IOP_V4, "SEP");
     scenario_missed_wake("V2/SEP missed-wake", APPLE_A7IOP_V2, "SEP");
