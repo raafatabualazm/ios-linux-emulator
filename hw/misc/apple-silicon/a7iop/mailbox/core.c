@@ -579,6 +579,9 @@ AppleA7IOPMailbox *apple_a7iop_mailbox_new(const char *role,
     case APPLE_A7IOP_V4:
         apple_a7iop_mailbox_init_mmio_v4(s, name);
         break;
+    case APPLE_A7IOP_V6:
+        apple_a7iop_mailbox_init_mmio_v6(s, name);
+        break;
     }
 
     sysbus_init_mmio(sbd, &s->mmio);

@@ -134,6 +134,9 @@ void apple_a7iop_init(AppleA7IOP *s, const char *role, uint64_t mmio_size,
     case APPLE_A7IOP_V4:
         apple_a7iop_init_mmio_v4(s, mmio_size);
         break;
+    case APPLE_A7IOP_V6:
+        apple_a7iop_init_mmio_v6(s, mmio_size);
+        break;
     }
 
     sysbus_pass_irq(sbd, SYS_BUS_DEVICE(s->ap_mailbox));

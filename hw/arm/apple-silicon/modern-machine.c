@@ -21,6 +21,7 @@
 #include "hw/arm/apple-silicon/modern-amcc.h"
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
 #include "hw/intc/apple-modern-aic.h"
+#include "hw/misc/apple-silicon/a7iop/core.h"
 #include "hw/qdev-properties.h"
 #include "hw/arm/apple-silicon/modern-boot-display.h"
 #include "hw/char/apple_uart.h"
@@ -56,6 +57,8 @@ struct AppleModernMachine {
     bool img4_ignition_compat;
     bool pauth_compat;
     bool sep_trace;
+    bool sep_mailbox;
+    DeviceState *sep_mbox;
     bool aic_trace;
     bool modern_aic;
     DeviceState *aic;
@@ -656,6 +659,124 @@ typedef struct AppleModernSEPTrace {
     unsigned index;
 } AppleModernSEPTrace;
 
+/*
+ * SEP ASC mailbox, opt-in (sep-mailbox) and default off.
+ *
+ * This is the inter-processor message FIFO and its doorbell interrupt, not a
+ * Secure Enclave: there is no SEP core, no sepOS, no firmware load and no
+ * cryptography. A guest driver waiting for a sepOS boot message will still
+ * wait forever.
+ *
+ * Geometry comes from the ADT. Register semantics come from XNU's own
+ * AppleA7IOP driver in the pinned boot kernel collection; see
+ * hw/misc/apple-silicon/a7iop/regs-v6.c for the measured offset inventory and
+ * for what remains a declared choice.
+ */
+static bool map_sep_mailbox(AppleModernMachine *s, Error **errp)
+{
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    AppleModernBlob reg, ints, compatible;
+    uint64_t offset, size, base;
+    Error *local = NULL;
+
+    if (!apple_modern_adt_property(dtree, "/arm-io/sep", "reg", &reg, errp)) {
+        return false;
+    }
+    if (reg.size != 32) {
+        error_setg(errp, "unsupported modern SEP reg schema");
+        return false;
+    }
+    /*
+     * Window 0 only. Window 1 (measured at a uniform win0 - 0x5B0000 on every
+     * ascwrap-v6 node in the tree) has entirely unknown contents and is left
+     * unmodelled.
+     */
+    offset = ldq_le_p(reg.data);
+    size = ldq_le_p(reg.data + 8);
+    if (size < 0x10000 || size > 0x400000) {
+        error_setg(errp, "modern SEP register span is out of range");
+        return false;
+    }
+    if (!arm_io_translate(dtree, offset, size, &base, errp)) {
+        return false;
+    }
+    /*
+     * Accept a missing compatible: Darwin's device-tree fixup strips it from
+     * /arm-io/sep on the tree the guest actually boots, so gating hard on it
+     * would make the device vanish exactly when it is wanted.
+     */
+    if (apple_modern_adt_property(dtree, "/arm-io/sep", "compatible",
+                                  &compatible, NULL)) {
+        if (compatible.size < sizeof("iop-sep,ascwrap-v6") ||
+            memcmp(compatible.data, "iop-sep,ascwrap-v6",
+                   sizeof("iop-sep,ascwrap-v6"))) {
+            error_setg(errp, "unsupported modern SEP wrapper (expected "
+                       "iop-sep,ascwrap-v6)");
+            return false;
+        }
+    } else {
+        warn_report("apple-modern: /arm-io/sep has no compatible string; "
+                    "assuming iop-sep,ascwrap-v6");
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/sep", "interrupts", &ints,
+                                   errp)) {
+        return false;
+    }
+    if (ints.size != 16) {
+        error_setg(errp, "modern SEP names %zu interrupt bytes, expected 16",
+                   (size_t)ints.size);
+        return false;
+    }
+    if (!s->aic) {
+        error_setg(errp, "sep-mailbox needs modern-aic: without a controller "
+                   "no doorbell can be delivered");
+        return false;
+    }
+
+    s->sep_mbox = qdev_new(TYPE_APPLE_A7IOP);
+    apple_a7iop_init(APPLE_A7IOP(s->sep_mbox), "SEP", size, APPLE_A7IOP_V6,
+                     NULL, NULL);
+
+    /*
+     * Positional mapping, and it is the measured one. XNU registers only two
+     * of the four lines -- provider interrupt index 1 for the coprocessor's
+     * inbox (our IOP_EMPTY, which wakes a blocked sender) and index 2 for its
+     * outbox (our AP_NONEMPTY, the message doorbell). Our IRQ enum happens to
+     * put IOP_EMPTY at 1 and AP_NONEMPTY at 2, so index i -> interrupts[i] is
+     * correct for both lines XNU uses. Indices 0 and 3 are registered by
+     * nothing, so their assignment is a declared choice.
+     * The ADT carries no interrupt-names on any node in the tree, so the names
+     * above are our reading of the driver's behaviour, not Apple's labels.
+     */
+    for (unsigned i = 0; i < APPLE_A7IOP_IRQ_MAX; i++) {
+        uint32_t line = ldl_le_p(ints.data + i * 4);
+
+        if (line >= s->aic_num_irqs) {
+            error_setg(errp, "modern SEP interrupt %u is outside the %u "
+                       "controller inputs", line, s->aic_num_irqs);
+            return false;
+        }
+        sysbus_connect_irq(SYS_BUS_DEVICE(s->sep_mbox), i,
+                           qdev_get_gpio_in(s->aic, line));
+    }
+    /*
+     * Realize only after connecting. The device's four lines are the AP
+     * mailbox's, re-exported through sysbus_pass_irq, and a connection made
+     * after realize never reached those pins: measured, the AIC level word for
+     * lines 320-351 stayed zero even after a queue change the mailbox itself
+     * reported. The t8030 SEP connects first for the same reason.
+     */
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(s->sep_mbox), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->sep_mbox), 0, base);
+    error_free(local);
+    warn_report("apple-modern: SEP ASC mailbox at 0x%" PRIx64 " size 0x%"
+                PRIx64 ", AIC inputs %u/%u/%u/%u (opt-in sep-mailbox; the v6 "
+                "register map is our declared layout, not Apple-documented)",
+                base, size, ldl_le_p(ints.data), ldl_le_p(ints.data + 4),
+                ldl_le_p(ints.data + 8), ldl_le_p(ints.data + 12));
+    return true;
+}
+
 static uint64_t sep_trace_read(void *opaque, hwaddr offset, unsigned size)
 {
     AppleModernSEPTrace *t = opaque;
@@ -708,6 +829,16 @@ static bool map_sep_trace(AppleModernMachine *s, Error **errp)
 
         if (s->sep_trace_count >= ARRAY_SIZE(s->sep_trace_mr)) {
             break;
+        }
+        /*
+         * The mailbox device claims window 0, so step aside rather than
+         * fighting it for the aperture. Window 1 is still worth observing:
+         * nothing models it and its contents remain unexplained, which is the
+         * one place where leaving a logging aperture mapped can still teach us
+         * something.
+         */
+        if (s->sep_mailbox && i == 0) {
+            continue;
         }
         if (!size || size > 0x1000000) {
             error_setg(errp, "modern SEP register window is out of range");
@@ -879,6 +1010,7 @@ static void modern_init(MachineState *machine)
                                     &s->cpu_register_ram[i]);
     }
     if (!map_amcc(s, &error) || !map_aic(s, &error) || !map_sep(s, &error) ||
+        (s->sep_mailbox && !map_sep_mailbox(s, &error)) ||
         (s->sep_trace && !map_sep_trace(s, &error))) {
         error_report_err(error);
         exit(EXIT_FAILURE);
@@ -1006,6 +1138,7 @@ ASSET_PROPERTY(ramdisk, ASSET_RAMDISK)
 BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(sep_trace, sep_trace)
+BOOL_PROPERTY(sep_mailbox, sep_mailbox)
 BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
 BOOL_PROPERTY(boot_display, boot_display)
@@ -1101,6 +1234,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_pauth_compat);
     object_class_property_add_bool(oc, "sep-trace", get_sep_trace,
                                    set_sep_trace);
+    object_class_property_add_bool(oc, "sep-mailbox", get_sep_mailbox,
+                                   set_sep_mailbox);
     object_class_property_add_bool(oc, "aic-trace", get_aic_trace,
                                    set_aic_trace);
     object_class_property_add_bool(oc, "modern-aic", get_modern_aic,

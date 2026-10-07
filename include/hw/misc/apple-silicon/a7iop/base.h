@@ -30,6 +30,14 @@
 typedef enum {
     APPLE_A7IOP_V2 = 0,
     APPLE_A7IOP_V4,
+    /*
+     * ASC "ascwrap-v6". Note this enum tracks our register files, not Apple's
+     * compatible string: t8030's ADT says ascwrap-v2 while that board
+     * instantiates APPLE_A7IOP_V4. XNU itself has no version field -- it
+     * dispatches on the compatible string through IOKit personalities, and one
+     * kext (com.apple.driver.AppleA7IOP-ASCWrap-v6) serves both v6 and v7.
+     */
+    APPLE_A7IOP_V6,
 } AppleA7IOPVersion;
 
 enum {
