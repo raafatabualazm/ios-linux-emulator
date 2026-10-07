@@ -88,6 +88,7 @@ static void apple_a7iop_v6_mailbox_reg_write(void *opaque, hwaddr addr,
     AppleA7IOPMailbox *s = opaque;
     AppleA7IOPMessage *msg;
 
+    s->diagnostic_mmio_writes++;
     switch (addr) {
     case REG_A2I_CTRL:
         apple_a7iop_mailbox_set_iop_ctrl(s, (uint32_t)data);
@@ -155,6 +156,7 @@ static uint64_t apple_a7iop_v6_mailbox_reg_read(void *opaque, hwaddr addr,
     AppleA7IOPMessage *msg;
     uint64_t ret = 0;
 
+    s->diagnostic_mmio_reads++;
     switch (addr) {
     case REG_A2I_CTRL:
         return apple_a7iop_mailbox_get_iop_ctrl(s);

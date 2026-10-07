@@ -8,6 +8,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'a9.c',
     'boot.c',
     'dt.c',
+    'dart-t8110.c',
     'mem.c',
     'modern-amcc.c',
     'modern-kc-patch.c',

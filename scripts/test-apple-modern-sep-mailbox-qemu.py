@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Qualify the SEP ASC mailbox with an owned ROM.
 
-The restore ramdisk never touches the SEP: with a matchable device tree and a
-booted shell, an unbuffered trace aperture over both /arm-io/sep windows records
-zero accesses. So no firmware boot can exercise this device, and this gate is the
-only evidence that it works.
+This gate isolates the hardware transport from firmware and SEP protocol
+behaviour. Earlier zero-access restore observations were superseded by later
+AppleSEPManager startup; firmware access needs device counters measured on the
+exact supplied device tree.
 
 An owned ROM plays both ends. As the AP it uses exactly the apertures measured in
 XNU's AppleA7IOP driver (INBOX0_CTRL +0x8110, OUTBOX0_CTRL +0x8114, a 16-byte

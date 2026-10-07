@@ -42,6 +42,14 @@ typedef struct {
     uint32_t data;
 } QEMU_PACKED SEPMessage;
 
+static void apple_sep_sim_note_unsupported(AppleSEPSimState *s, uint8_t ep,
+                                           uint8_t op)
+{
+    s->diagnostic_unsupported++;
+    s->diagnostic_last_unsupported_ep = ep;
+    s->diagnostic_last_unsupported_op = op;
+}
+
 /*
  * Out-of-line (OOL) transfer helpers.
  *
@@ -57,6 +65,7 @@ static bool apple_sep_sim_ool_write(AppleSEPSimState *s, uint64_t addr,
                                     const char *what)
 {
     if (s->dma_as == NULL) {
+        s->diagnostic_ool_errors++;
         qemu_log_mask(LOG_UNIMP, "SEP sim: %s needs an out-of-line address "
                       "space and this board supplied none; %zu-byte transfer "
                       "dropped\n", what, len);
@@ -64,6 +73,7 @@ static bool apple_sep_sim_ool_write(AppleSEPSimState *s, uint64_t addr,
     }
     if (dma_memory_write(s->dma_as, addr, buf, len,
                          MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+        s->diagnostic_ool_errors++;
         qemu_log_mask(LOG_GUEST_ERROR, "SEP sim: %s out-of-line write of %zu "
                       "bytes to 0x%" PRIx64 " failed\n", what, len, addr);
         return false;
@@ -75,6 +85,7 @@ static bool apple_sep_sim_ool_read(AppleSEPSimState *s, uint64_t addr,
                                    void *buf, size_t len, const char *what)
 {
     if (s->dma_as == NULL) {
+        s->diagnostic_ool_errors++;
         qemu_log_mask(LOG_UNIMP, "SEP sim: %s needs an out-of-line address "
                       "space and this board supplied none; %zu-byte read "
                       "dropped\n", what, len);
@@ -82,6 +93,7 @@ static bool apple_sep_sim_ool_read(AppleSEPSimState *s, uint64_t addr,
     }
     if (dma_memory_read(s->dma_as, addr, buf, len,
                         MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+        s->diagnostic_ool_errors++;
         qemu_log_mask(LOG_GUEST_ERROR, "SEP sim: %s out-of-line read of %zu "
                       "bytes from 0x%" PRIx64 " failed\n", what, len, addr);
         return false;
@@ -486,13 +498,16 @@ static void apple_sep_sim_handle_control_msg(AppleSEPSimState *s,
                           "unencoded buffer\n", art_rc, error_desc);
             break;
         }
-        apple_sep_sim_ool_write(s, s->ool_state[EP_ART_STORAGE].out_addr,
-                                data, data_len, "XART storage ART");
+        if (!apple_sep_sim_ool_write(s, s->ool_state[EP_ART_STORAGE].out_addr,
+                                     data, data_len, "XART storage ART")) {
+            break;
+        }
         apple_sep_sim_send_message(s, EP_ART_STORAGE, 0,
                                    ART_STORAGE_OP_INCOMING, 0, 0);
         break;
     }
     default:
+        apple_sep_sim_note_unsupported(s, msg->ep, msg->op);
         qemu_log_mask(LOG_GUEST_ERROR, "EP_CONTROL: Unknown opcode %d\n",
                       msg->op);
         break;
@@ -506,6 +521,7 @@ static void apple_sep_sim_handle_arts_msg(AppleSEPSimState *s, SEPMessage *msg)
         qemu_log_mask(LOG_GUEST_ERROR, "EP_ART_STORAGE: ART_RECEIVED\n");
         break;
     default:
+        apple_sep_sim_note_unsupported(s, msg->ep, msg->op);
         qemu_log_mask(LOG_GUEST_ERROR, "EP_ART_STORAGE: Unknown opcode %d\n",
                       msg->op);
         break;
@@ -551,6 +567,7 @@ static void apple_sep_sim_handle_xart_msg(AppleSEPSimState *s, bool slave,
         apple_sep_sim_xart_send_ack(s, message, 0, 0);
         break;
     default:
+        apple_sep_sim_note_unsupported(s, message->ep, message->op);
         qemu_log_mask(LOG_GUEST_ERROR, "EP_XART_%s: Unknown opcode %d\n",
                       xart_name, message->op);
         apple_sep_sim_xart_send_ack(s, message, 0, 0);
@@ -682,6 +699,7 @@ static void apple_sep_sim_handle_bootstrap_msg(AppleSEPSimState *s,
                                    BOOTSTRAP_OP_OPCODE_16_RESPONSE, 0, randval);
         break;
     default:
+        apple_sep_sim_note_unsupported(s, msg->ep, msg->op);
         qemu_log_mask(LOG_GUEST_ERROR, "EP_BOOTSTRAP: Unknown opcode %d\n",
                       msg->op);
         break;
@@ -739,8 +757,10 @@ static void apple_sep_sim_keystore_send_ipc_resp(AppleSEPSimState *s,
     memcpy(resp_hdr->payload_hash, resp_hash, sizeof(resp_hdr->payload_hash));
     g_free(resp_hash);
 
-    apple_sep_sim_ool_write(s, s->ool_state[EP_KEYSTORE].out_addr, resp_buf,
-                            resp_size, "keystore reply");
+    if (!apple_sep_sim_ool_write(s, s->ool_state[EP_KEYSTORE].out_addr, resp_buf,
+                                 resp_size, "keystore reply")) {
+        return;
+    }
 
     apple_sep_sim_send_message(s, msg->ep, msg->tag | KEYSTORE_MSG_TAG_REPLY,
                                msg->id, 0, resp_size << 16);
@@ -751,8 +771,11 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 {
     uint8_t msg_code = msg->tag & KEYSTORE_MSG_TAG_CODE_MASK;
     uint8_t *msg_buf = g_new0(uint8_t, msg->size);
-    apple_sep_sim_ool_read(s, s->ool_state[EP_KEYSTORE].in_addr, msg_buf,
-                           msg->size, "keystore request");
+    if (!apple_sep_sim_ool_read(s, s->ool_state[EP_KEYSTORE].in_addr, msg_buf,
+                                msg->size, "keystore request")) {
+        g_free(msg_buf);
+        return;
+    }
     const KeystoreIPCHeader *msg_hdr = (KeystoreIPCHeader *)msg_buf;
 #if 0
     char fn[128];
@@ -1052,11 +1075,15 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
         break;
     }
     default: {
+        apple_sep_sim_note_unsupported(s, msg->ep, msg_code);
         qemu_log_mask(LOG_GUEST_ERROR, "SEP KeyStore // Unknown (0x%02X)\n",
                       msg_code);
 
-        apple_sep_sim_ool_write(s, s->ool_state[EP_KEYSTORE].out_addr, msg_buf,
-                                msg->size, "keystore unknown-opcode echo");
+        if (!apple_sep_sim_ool_write(s, s->ool_state[EP_KEYSTORE].out_addr,
+                                     msg_buf, msg->size,
+                                     "keystore unknown-opcode echo")) {
+            break;
+        }
         apple_sep_sim_send_message(s, msg->ep,
                                    msg->tag | KEYSTORE_MSG_TAG_REPLY, msg->id,
                                    0, (uint32_t)msg->size << 16);
@@ -1077,7 +1104,14 @@ static void apple_sep_sim_handle_messages(void *opaque)
 
     while (!apple_a7iop_mailbox_is_empty(a7iop->iop_mailbox)) {
         msg = apple_a7iop_recv_iop(a7iop);
+        /* A disabled direction can leave a queued frame unavailable. */
+        if (msg == NULL) {
+            break;
+        }
         sep_msg = (SEPMessage *)msg->data;
+        s->diagnostic_dispatches++;
+        s->diagnostic_last_ep = sep_msg->ep;
+        s->diagnostic_last_op = sep_msg->op;
 
         switch (sep_msg->ep) {
         case EP_CONTROL:
@@ -1087,10 +1121,12 @@ static void apple_sep_sim_handle_messages(void *opaque)
             apple_sep_sim_handle_arts_msg(s, sep_msg);
             break;
         case EP_ART_REQUESTS:
+            apple_sep_sim_note_unsupported(s, sep_msg->ep, sep_msg->op);
             qemu_log_mask(LOG_GUEST_ERROR,
                           "EP_ART_REQUESTS: Unknown opcode %d\n", sep_msg->op);
             break;
         case EP_SECURE_CREDENTIALS:
+            apple_sep_sim_note_unsupported(s, sep_msg->ep, sep_msg->op);
             qemu_log_mask(LOG_GUEST_ERROR,
                           "EP_SECURE_CREDENTIALS: Unknown opcode %d\n",
                           sep_msg->op);
@@ -1105,6 +1141,7 @@ static void apple_sep_sim_handle_messages(void *opaque)
             apple_sep_sim_handle_xart_msg(s, false, sep_msg);
             break;
         case EP_DISCOVERY:
+            apple_sep_sim_note_unsupported(s, sep_msg->ep, sep_msg->op);
             qemu_log_mask(LOG_GUEST_ERROR, "EP_DISCOVERY: Unknown opcode %d\n",
                           sep_msg->op);
             break;
@@ -1115,6 +1152,7 @@ static void apple_sep_sim_handle_messages(void *opaque)
             apple_sep_sim_handle_bootstrap_msg(s, sep_msg);
             break;
         default:
+            apple_sep_sim_note_unsupported(s, sep_msg->ep, sep_msg->op);
             qemu_log_mask(LOG_GUEST_ERROR, "UNKNOWN_%d_OP_%d\n", sep_msg->ep,
                           sep_msg->op);
             break;
@@ -1153,6 +1191,49 @@ AppleSEPSimState *apple_sep_sim_new(const char *role, uint64_t mmio_size,
                      apple_sep_sim_handle_messages);
     qemu_mutex_init(&s->lock);
     s->dma_as = dma_as;
+    /* Diagnostics contain counts and routing bytes only, never payloads. */
+    AppleA7IOP *a7iop = APPLE_A7IOP(s);
+    Object *obj = OBJECT(s);
+    object_property_add_uint64_ptr(obj, "transport-ap-send-count",
+                                   &a7iop->iop_mailbox->diagnostic_enqueues,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "transport-ap-recv-count",
+                                   &a7iop->ap_mailbox->diagnostic_dequeues,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "sim-reply-count",
+                                   &a7iop->ap_mailbox->diagnostic_enqueues,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "sim-dispatch-count",
+                                   &s->diagnostic_dispatches,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "sim-unsupported-count",
+                                   &s->diagnostic_unsupported,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "sim-ool-error-count",
+                                   &s->diagnostic_ool_errors,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "wrapper-mmio-read-count",
+                                   &a7iop->diagnostic_mmio_reads,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "wrapper-mmio-write-count",
+                                   &a7iop->diagnostic_mmio_writes,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "ap-mmio-read-count",
+                                   &a7iop->ap_mailbox->diagnostic_mmio_reads,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "ap-mmio-write-count",
+                                   &a7iop->ap_mailbox->diagnostic_mmio_writes,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "sim-last-endpoint",
+                                   &s->diagnostic_last_ep, OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "sim-last-opcode",
+                                   &s->diagnostic_last_op, OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "sim-last-unsupported-endpoint",
+                                   &s->diagnostic_last_unsupported_ep,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "sim-last-unsupported-opcode",
+                                   &s->diagnostic_last_unsupported_op,
+                                   OBJ_PROP_FLAG_READ);
     return s;
 }
 
@@ -1223,6 +1304,14 @@ static void apple_sep_sim_reset_hold(Object *obj, ResetType type)
     }
 
     QEMU_LOCK_GUARD(&s->lock);
+
+    s->diagnostic_dispatches = 0;
+    s->diagnostic_unsupported = 0;
+    s->diagnostic_ool_errors = 0;
+    s->diagnostic_last_ep = 0;
+    s->diagnostic_last_op = 0;
+    s->diagnostic_last_unsupported_ep = 0;
+    s->diagnostic_last_unsupported_op = 0;
 
     a7iop->iop_mailbox->ap_dir_en = true;
     a7iop->iop_mailbox->iop_dir_en = true;

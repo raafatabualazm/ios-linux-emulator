@@ -230,6 +230,7 @@ static void apple_a7iop_mailbox_send(AppleA7IOPMailbox *s,
 
     QTAILQ_INSERT_TAIL(&s->inbox, msg, next);
     s->count++;
+    s->diagnostic_enqueues++;
     apple_a7iop_mailbox_update_irq(s);
 
     if (s->handle_messages_bh != NULL) {
@@ -288,6 +289,7 @@ static AppleA7IOPMessage *apple_a7iop_mailbox_recv(AppleA7IOPMailbox *s)
     }
 
     QTAILQ_REMOVE(&s->inbox, msg, next);
+    s->diagnostic_dequeues++;
     stl_le_p(msg->data + 0xC, CTRL_COUNT(s->count));
     trace_apple_a7iop_mailbox_recv(s->role, ldq_le_p(msg->data),
                                    ldq_le_p(msg->data + sizeof(uint64_t)));
@@ -612,6 +614,10 @@ static void apple_a7iop_mailbox_reset(DeviceState *dev)
     assert_false(s->iop_mailbox == s->ap_mailbox);
 
     s->count = 0;
+    s->diagnostic_enqueues = 0;
+    s->diagnostic_dequeues = 0;
+    s->diagnostic_mmio_reads = 0;
+    s->diagnostic_mmio_writes = 0;
     s->iop_dir_en = true;
     s->ap_dir_en = true;
     s->underflow = false;

@@ -99,6 +99,11 @@ struct AppleA7IOPMailbox {
     QTAILQ_HEAD(, AppleA7IOPMessage) inbox;
     QTAILQ_HEAD(, AppleA7IOPInterruptStatusMessage) interrupt_status;
     uint32_t count;
+    /* Host diagnostics. Enqueue/pop count complete accepted frames only. */
+    uint64_t diagnostic_enqueues;
+    uint64_t diagnostic_dequeues;
+    uint64_t diagnostic_mmio_reads;
+    uint64_t diagnostic_mmio_writes;
     AppleA7IOPMailbox *iop_mailbox;
     AppleA7IOPMailbox *ap_mailbox;
     qemu_irq irqs[APPLE_A7IOP_IRQ_MAX];

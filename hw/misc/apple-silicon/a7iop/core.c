@@ -152,6 +152,8 @@ static void apple_a7iop_reset(DeviceState *dev)
 
     QEMU_LOCK_GUARD(&s->lock);
     s->cpu_status = CPU_STATUS_IDLE;
+    s->diagnostic_mmio_reads = 0;
+    s->diagnostic_mmio_writes = 0;
 }
 
 static void apple_a7iop_realize(DeviceState *dev, Error **errp)

@@ -41,6 +41,7 @@ static void apple_a7iop_v6_reg_write(void *opaque, hwaddr addr,
 {
     AppleA7IOP *s = opaque;
 
+    s->diagnostic_mmio_writes++;
     switch (addr) {
     case REG_CPU_CTRL:
         /*
@@ -65,6 +66,7 @@ static uint64_t apple_a7iop_v6_reg_read(void *opaque, hwaddr addr,
 {
     AppleA7IOP *s = opaque;
 
+    s->diagnostic_mmio_reads++;
     switch (addr) {
     case REG_CPU_CTRL:
         return apple_a7iop_get_cpu_ctrl(s);

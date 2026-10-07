@@ -22,6 +22,7 @@
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
 #include "hw/intc/apple-modern-aic.h"
 #include "hw/arm/apple-silicon/sep-sim.h"
+#include "hw/arm/apple-silicon/dart-t8110.h"
 #include "hw/misc/apple-silicon/a7iop/core.h"
 #include "hw/qdev-properties.h"
 #include "hw/arm/apple-silicon/modern-boot-display.h"
@@ -60,6 +61,9 @@ struct AppleModernMachine {
     bool sep_trace;
     bool sep_mailbox;
     bool sep_sim;
+    bool sep_dart;
+    AppleDARTT8110State *sep_mapper;
+    AddressSpace *sep_dma_as;
     DeviceState *sep_mbox;
     bool aic_trace;
     bool modern_aic;
@@ -662,6 +666,126 @@ typedef struct AppleModernSEPTrace {
 } AppleModernSEPTrace;
 
 /*
+ * Normal SEP IOVA provider, opt-in and separate from mailbox/sepOS semantics.
+ * Both iommu-parent phandles are preserved and resolved, not treated as SIDs.
+ * The prepared d47ap ADT describes one t8110 DART and its two mapper nubs.
+ * Legacy apple-dart has a different register ABI and is deliberately untouched.
+ */
+static bool map_sep_dart(AppleModernMachine *s, Error **errp)
+{
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    AppleModernBlob reg, ints, value, parents;
+    uint64_t base, offset, span;
+    uint32_t num_streams, streams[2], mapper_phandles[2];
+    static const char *mapper_paths[] = {
+        "/arm-io/dart-sep/mapper-sep",
+        "/arm-io/dart-sep/mapper-sep-mpm",
+    };
+
+    if (!s->aic) {
+        error_setg(errp, "sep-dart requires modern-aic for DMA fault delivery");
+        return false;
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/dart-sep", "reg",
+                                   &reg, errp) ||
+        !apple_modern_adt_property(dtree, "/arm-io/dart-sep", "interrupts",
+                                   &ints, errp) ||
+        !apple_modern_adt_property(dtree, "/arm-io/sep", "iommu-parent",
+                                   &parents, errp)) {
+        return false;
+    }
+    if (reg.size != 16 || ints.size != 4 || parents.size != 8) {
+        error_setg(errp, "unsupported SEP DART reg/IRQ/mapper schema");
+        return false;
+    }
+    offset = ldq_le_p(reg.data);
+    span = ldq_le_p(reg.data + 8);
+    if (span < 0x1800 || span > 0x400000 ||
+        ldl_le_p(ints.data) >= s->aic_num_irqs ||
+        !arm_io_translate(dtree, offset, span, &base, errp)) {
+        if (!errp || !*errp) {
+            error_setg(errp, "modern SEP DART geometry exceeds supported bounds");
+        }
+        return false;
+    }
+    if (apple_modern_adt_property(dtree, "/arm-io/dart-sep", "compatible",
+                                  &value, NULL) &&
+        (value.size < sizeof("dart,t8110") ||
+         memcmp(value.data, "dart,t8110", sizeof("dart,t8110")))) {
+        error_setg(errp, "modern SEP DART requires dart,t8110 compatible");
+        return false;
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/dart-sep", "page-size",
+                                   &value, errp)) {
+        return false;
+    }
+    if (value.size != 4 || ldl_le_p(value.data) != 0x4000) {
+        error_setg(errp, "modern SEP DART supports only 16 KiB pages");
+        return false;
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/dart-sep", "sid-count",
+                                   &value, errp)) {
+        return false;
+    }
+    if (value.size != 4 || !(num_streams = ldl_le_p(value.data)) ||
+        num_streams > APPLE_DART_T8110_STREAMS) {
+        error_setg(errp, "modern SEP DART sid-count is out of range");
+        return false;
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(mapper_paths); i++) {
+        if (!apple_modern_adt_property(dtree, mapper_paths[i], "AAPL,phandle",
+                                       &value, errp)) {
+            return false;
+        }
+        if (value.size != 4) {
+            error_setg(errp, "modern SEP DART mapper phandle must be u32");
+            return false;
+        }
+        mapper_phandles[i] = ldl_le_p(value.data);
+        if (!apple_modern_adt_property(dtree, mapper_paths[i], "reg",
+                                       &value, errp)) {
+            return false;
+        }
+        if (value.size != 4 ||
+            (streams[i] = ldl_le_p(value.data)) >= num_streams ||
+            ldl_le_p(parents.data + i * 4) != mapper_phandles[i]) {
+            error_setg(errp, "modern SEP iommu-parent must resolve to the two "
+                       "dart-sep mapper nubs with in-range streams");
+            return false;
+        }
+    }
+    if (streams[0] == streams[1] || mapper_phandles[0] == mapper_phandles[1]) {
+        error_setg(errp, "modern SEP DART mapper nubs must be distinct");
+        return false;
+    }
+
+    DeviceState *dev = qdev_new(TYPE_APPLE_DART_T8110);
+    s->sep_mapper = APPLE_DART_T8110(dev);
+    dev->id = g_strdup("modern-sep-dart");
+    object_property_add_child(OBJECT(s), "dart-sep", OBJECT(dev));
+    qdev_prop_set_uint32(dev, "mmio-size", span);
+    qdev_prop_set_uint32(dev, "num-streams", num_streams);
+    /* 42-bit VA covers the ADT's 1..4 TiB IOVA reservation; PA is declared. */
+    qdev_prop_set_uint32(dev, "va-bits", 42);
+    qdev_prop_set_uint32(dev, "pa-bits", 42);
+    qdev_prop_set_uint32(dev, "revision", 2);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                       qdev_get_gpio_in(s->aic, ldl_le_p(ints.data)));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
+    s->sep_dma_as = apple_dart_t8110_dma_as(s->sep_mapper, streams[0]);
+    if (!s->sep_dma_as) {
+        error_setg(errp, "modern SEP DART stream has no DMA address space");
+        return false;
+    }
+    warn_report("apple-modern: opt-in SEP t8110 DART at 0x%" PRIx64
+                " span 0x%" PRIx64 ", IRQ %u, mapper streams %u/%u; "
+                "42-bit VA/PA and revision 2 are declared; no DAPF/TZ model",
+                base, span, ldl_le_p(ints.data), streams[0], streams[1]);
+    return true;
+}
+
+/*
  * SEP ASC mailbox, opt-in (sep-mailbox) and default off.
  *
  * This is the inter-processor message FIFO and its doorbell interrupt, not a
@@ -744,15 +868,19 @@ static bool map_sep_mailbox(AppleModernMachine *s, Error **errp)
          * historical apple_sep_sim_from_node() boolean selects V4, which is
          * the wrong register layout for this board's ascwrap-v6 wrapper.
          *
-         * Out-of-line payloads are given the system address space. /arm-io/sep
+         * Without sep-dart, out-of-line payloads use the system address space.
+         * /arm-io/sep
          * names an iommu-parent and the tree has /arm-io/dart-sep, which this
          * board does not model, so an out-of-line address is treated as a
          * physical address rather than an IOVA. That is a declared
          * simplification: it is correct only while the guest's mapper is
-         * identity, and it is why the simulator stays opt-in.
+         * identity. With sep-dart the normal mapper-sep IOVA address space is
+         * used instead; disabled/invalid mappings reject DMA and raise the
+         * modeled DART faults. Both modes leave the protocol simulator opt-in.
          */
         s->sep_mbox = DEVICE(apple_sep_sim_new("SEP", size, APPLE_A7IOP_V6,
-                                               &address_space_memory));
+                             s->sep_dart ? s->sep_dma_as :
+                                           &address_space_memory));
     } else {
         s->sep_mbox = qdev_new(TYPE_APPLE_A7IOP);
         apple_a7iop_init(APPLE_A7IOP(s->sep_mbox), "SEP", size,
@@ -1035,6 +1163,7 @@ static void modern_init(MachineState *machine)
                                     &s->cpu_register_ram[i]);
     }
     if (!map_amcc(s, &error) || !map_aic(s, &error) || !map_sep(s, &error) ||
+        (s->sep_dart && !map_sep_dart(s, &error)) ||
         ((s->sep_mailbox || s->sep_sim) && !map_sep_mailbox(s, &error)) ||
         (s->sep_trace && !map_sep_trace(s, &error))) {
         error_report_err(error);
@@ -1165,6 +1294,7 @@ BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(sep_trace, sep_trace)
 BOOL_PROPERTY(sep_mailbox, sep_mailbox)
 BOOL_PROPERTY(sep_sim, sep_sim)
+BOOL_PROPERTY(sep_dart, sep_dart)
 BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
 BOOL_PROPERTY(boot_display, boot_display)
@@ -1263,6 +1393,7 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "sep-mailbox", get_sep_mailbox,
                                    set_sep_mailbox);
     object_class_property_add_bool(oc, "sep-sim", get_sep_sim, set_sep_sim);
+    object_class_property_add_bool(oc, "sep-dart", get_sep_dart, set_sep_dart);
     object_class_property_add_bool(oc, "aic-trace", get_aic_trace,
                                    set_aic_trace);
     object_class_property_add_bool(oc, "modern-aic", get_modern_aic,

@@ -50,6 +50,9 @@ struct AppleA7IOP {
     AppleA7IOPMailbox *iop_mailbox;
     uint32_t cpu_status;
     uint32_t cpu_ctrl;
+    /* Host diagnostics, reset with the device; excluded from migration ABI. */
+    uint64_t diagnostic_mmio_reads;
+    uint64_t diagnostic_mmio_writes;
 };
 
 void apple_a7iop_send_ap(AppleA7IOP *s, AppleA7IOPMessage *msg);
