@@ -24,6 +24,7 @@
 #include "hw/arm/apple-silicon/modern-mcc-dramcfg.h"
 #include "hw/arm/apple-silicon/modern-mcc-quota.h"
 #include "hw/arm/apple-silicon/modern-mcc-perf.h"
+#include "hw/arm/apple-silicon/modern-mcc-socni.h"
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
 #include "hw/intc/apple-modern-aic.h"
 #include "hw/arm/apple-silicon/sep-sim.h"
@@ -77,6 +78,9 @@ struct AppleModernMachine {
     bool modern_mcc_perf;
     uint64_t mcc_perf_reset;
     AppleModernMCCPerfPlan mcc_perf_plan;
+    bool modern_mcc_socni;
+    uint64_t mcc_socni_reset;
+    AppleModernMCCSocniPlan mcc_socni_plan;
     char *pmgr_aon_fuse_image;
     AppleModernPMGRFusePlan pmgr_fuse_plan;
     AppleDARTT8110State *sep_mapper;
@@ -489,7 +493,7 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
             return false;
         }
     }
-    /* Every append is bounded; the full declared profile uses at most 33 spans. */
+    /* Every append is bounded; the full declared profile uses at most 39 spans. */
     for (unsigned i = 0; i < APPLE_MODERN_MCC_DCS_COUNT; i++) {
         if (s->mcc_dramcfg_plan.addresses[i] &&
             !append_pmgr_exclusion(exclusions, &count,
@@ -510,6 +514,14 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
             !append_pmgr_exclusion(exclusions, &count,
                 (AppleModernAddressRange){s->mcc_perf_plan.addresses[i],
                     i % 2 ? APPLE_MODERN_MCC_PERF_COUNTER_SPAN : 8}, errp)) {
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < APPLE_MODERN_MCC_SOCNI_VIEWS; i++) {
+        if (s->mcc_socni_plan.addresses[i] &&
+            !append_pmgr_exclusion(exclusions, &count,
+                (AppleModernAddressRange){s->mcc_socni_plan.addresses[i],
+                                         s->mcc_socni_plan.spans[i]}, errp)) {
             return false;
         }
     }
@@ -624,6 +636,32 @@ static bool map_mcc_perf(AppleModernMachine *s, uint64_t uart,
     warn_report("apple-modern: opt-in sparse AMCC performance channels; "
                 "virtual reset 0x%016" PRIx64 "; no bus/cache event source connected",
                 s->mcc_perf_reset);
+    return true;
+}
+
+static bool map_mcc_socni(AppleModernMachine *s, uint64_t uart,
+                          uint64_t uart_span, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernMCCSocniPlan plan;
+    size_t count;
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp) ||
+        !apple_modern_mcc_socni_plan_build(dtree, s->components.dram_base,
+            s->components.dram_size, exclusions, count, &plan, errp)) {
+        return false;
+    }
+    DeviceState *dev = apple_modern_mcc_socni_new(s->mcc_socni_reset);
+    dev->id = g_strdup("mcc-socni");
+    object_property_add_child(OBJECT(s), "mcc-socni", OBJECT(dev));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    for (unsigned i = 0; i < APPLE_MODERN_MCC_SOCNI_VIEWS; i++) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), i, plan.addresses[i]);
+    }
+    s->mcc_socni_plan = plan;
+    warn_report("apple-modern: opt-in sparse SOCNI performance channels; "
+                "virtual reset 0x%016" PRIx64 "; no bus/cache event source connected",
+                s->mcc_socni_reset);
     return true;
 }
 
@@ -1433,6 +1471,7 @@ static void modern_init(MachineState *machine)
         (s->modern_mcc_dramcfg && !map_mcc_dramcfg(s, uart, uart_span, &error)) ||
         (s->modern_mcc_quota && !map_mcc_quota(s, uart, uart_span, &error)) ||
         (s->modern_mcc_perf && !map_mcc_perf(s, uart, uart_span, &error)) ||
+        (s->modern_mcc_socni && !map_mcc_socni(s, uart, uart_span, &error)) ||
         (s->pmgr_aon_fuse_image &&
          !map_pmgr_fuse(s, uart, uart_span, &error)) ||
         (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error))) {
@@ -1583,6 +1622,7 @@ BOOL_PROPERTY(modern_pmgr, modern_pmgr)
 BOOL_PROPERTY(modern_mcc_dramcfg, modern_mcc_dramcfg)
 BOOL_PROPERTY(modern_mcc_quota, modern_mcc_quota)
 BOOL_PROPERTY(modern_mcc_perf, modern_mcc_perf)
+BOOL_PROPERTY(modern_mcc_socni, modern_mcc_socni)
 BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
 BOOL_PROPERTY(boot_display, boot_display)
@@ -1635,6 +1675,23 @@ static void set_perf_reset(Object *obj, Visitor *visitor, const char *name,
     uint64_t value;
     if (check_mutable(s, errp) && visit_type_uint64(visitor, name, &value, errp)) {
         s->mcc_perf_reset = value;
+    }
+}
+
+static void get_socni_reset(Object *obj, Visitor *visitor, const char *name,
+                           void *opaque, Error **errp)
+{
+    uint64_t value = APPLE_MODERN_MACHINE(obj)->mcc_socni_reset;
+    visit_type_uint64(visitor, name, &value, errp);
+}
+
+static void set_socni_reset(Object *obj, Visitor *visitor, const char *name,
+                           void *opaque, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    uint64_t value;
+    if (check_mutable(s, errp) && visit_type_uint64(visitor, name, &value, errp)) {
+        s->mcc_socni_reset = value;
     }
 }
 
@@ -1717,6 +1774,10 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_modern_mcc_perf);
     object_class_property_add(oc, "mcc-perf-reset", "uint64",
                              get_perf_reset, set_perf_reset, NULL, NULL);
+    object_class_property_add_bool(oc, "modern-mcc-socni", get_modern_mcc_socni,
+                                   set_modern_mcc_socni);
+    object_class_property_add(oc, "mcc-socni-reset", "uint64",
+                             get_socni_reset, set_socni_reset, NULL, NULL);
     object_class_property_add(oc, "mcc-quota-reset", "uint32",
                               get_display_geometry, set_display_geometry,
                               NULL, (void *)offsetof(AppleModernMachine,
