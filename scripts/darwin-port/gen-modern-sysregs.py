@@ -77,6 +77,36 @@ def inject_el2(regs):
                 regs.append(alt)
 
 
+# Apple's fast-IPI registers. Their encodings are already in the pinned Darwin
+# name table (sysregs.py: IPI_RR_LOCAL_EL1 S3_5_c15_c0_0, IPI_RR_GLOBAL_EL1
+# S3_5_c15_c0_1, IPI_CR S3_5_c15_c3_1), but Darwin's dumpregs storage list only
+# carries IPI_SR, so the other three were never emitted. The modern kernel
+# writes IPI_RR_LOCAL and the boot dies in its own trap handler:
+#   panic(...): Undefined kernel instruction: pc=0xfffffff02b3ce1cc
+#               instr=d51df008 @sleh.c:1930
+# d51df008 disassembles as "msr s3_5_c15_c0_0, x8" (verified with radare2 and by
+# field decode: L=0, op0=3, op1=5, CRn=15, CRm=0, op2=0, Rt=8).
+#
+# Asahi Linux documents the family: IPI_RR_LOCAL bits[3:0] target CPU and
+# bits[29:28] IPI type (0 immediate, 1 retract, 2 deferred, 3 nowake);
+# IPI_RR_GLOBAL adds bits[20:16] target cluster; IPI_SR bit[0] is "IPI pending,
+# write 1 to clear"; IPI_CR bits[15:0] are a deferred-IPI countdown in REFCLK
+# ticks. https://asahilinux.org/docs/hw/cpu/system-registers/
+#
+# These are COMPATIBILITY STORES, like the rest of this table: a write is
+# accepted and read back, and NO inter-processor interrupt is delivered. That is
+# a declared limitation, defensible only because the modern board is
+# single-CPU (modern_init refuses smp.cpus != 1), so there is no second core for
+# an IPI to reach. A guest that writes IPI_RR and then waits for IPI_SR bit 0
+# will wait forever rather than panic -- a different and more informative
+# failure than an undefined instruction, and the reason this is a measurement
+# step rather than a finished IPI model.
+IPI_FAST = ['IPI_RR_LOCAL_EL1', 'IPI_RR_GLOBAL_EL1', 'IPI_CR']
+missing_ipi = [n for n in IPI_FAST if n not in all_regs]
+if missing_ipi:
+    sys.exit(f'fast-IPI registers absent from the pinned table: {missing_ipi}')
+opaque += IPI_FAST
+
 inject_el2(opaque)
 
 
