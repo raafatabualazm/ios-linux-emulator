@@ -109,14 +109,23 @@ static void cells_gate(const AppleModernPMGRPlan *plan)
     apple_modern_pmgr_core_write(&core, w, off, 0xf0);
     CHECK(apple_modern_pmgr_core_read(&core, w, off) == 0);
     CHECK(core.transitions == 2);
-    /* Hardware minimum prevents requests from taking it below retention. */
+    /*
+     * With AUTO_ENABLE clear, MIN is stored and does NOT raise ACTUAL: all three
+     * reference drivers poll ACTUAL for equality with the request.
+     */
     apple_modern_pmgr_core_write(&core, w, off, 0x40000);
-    CHECK(apple_modern_pmgr_core_read(&core, w, off) == 0x40040);
+    CHECK(apple_modern_pmgr_core_read(&core, w, off) == 0x40000);
+    /* With AUTO_ENABLE set, MIN is the auto-PM floor and does raise ACTUAL. */
+    apple_modern_pmgr_core_write(&core, w, off, 0x10040000);
+    CHECK(apple_modern_pmgr_core_read(&core, w, off) == 0x10040040);
+    /* NO_WAKEUP is an interface bit XNU writes, reads and branches on. */
+    apple_modern_pmgr_core_write(&core, w, off, 0x40000000);
+    CHECK(apple_modern_pmgr_core_read(&core, w, off) == 0x40000000);
     /* Disable/reset controls are retained; they do not alter the target. */
     apple_modern_pmgr_core_write(&core, w, off, 0x8000040f);
     CHECK(apple_modern_pmgr_core_read(&core, w, off) == 0x800004ff);
     apple_modern_pmgr_core_write(&core, w, off, 0x4000000f);
-    CHECK(apple_modern_pmgr_core_read(&core, w, off) == 0xff);
+    CHECK(apple_modern_pmgr_core_read(&core, w, off) == 0x400000ff);
     for (unsigned target = 0; target < 16; target++) {
         for (unsigned minimum = 0; minimum < 16; minimum++) {
             uint32_t input = (minimum << 16) | target;
@@ -124,10 +133,14 @@ static void cells_gate(const AppleModernPMGRPlan *plan)
             uint32_t got = apple_modern_pmgr_core_read(&core, w, off);
             CHECK((got & 15) == target);
             CHECK(((got >> 16) & 15) == minimum);
-            CHECK(((got >> 4) & 15) >= target);
-            CHECK(((got >> 4) & 15) >= minimum);
-            CHECK(((got >> 4) & 15) == target ||
-                  ((got >> 4) & 15) == minimum);
+            /* AUTO_ENABLE clear: ACTUAL tracks the request exactly. */
+            CHECK(((got >> 4) & 15) == target);
+            /* AUTO_ENABLE set: MIN becomes the floor. */
+            apple_modern_pmgr_core_write(&core, w, off,
+                                         input | UINT32_C(0x10000000));
+            uint32_t aut = apple_modern_pmgr_core_read(&core, w, off);
+            CHECK((aut & 15) == target);
+            CHECK(((aut >> 4) & 15) == (minimum > target ? minimum : target));
         }
     }
     uint32_t before = apple_modern_pmgr_core_read(&core, w, off);

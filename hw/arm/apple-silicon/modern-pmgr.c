@@ -307,10 +307,33 @@ void apple_modern_pmgr_core_write(AppleModernPMGRCore *core,
         increment(&core->unknown_writes);
         return;
     }
-    /* Controls: RESET, AUTO_ENABLE, MIN, DEV_DISABLE, TARGET. */
-    uint32_t controls = value & UINT32_C(0x900f040f);
+    /*
+     * Controls: RESET(31), NO_WAKEUP(30), AUTO_ENABLE(28), MIN(19:16),
+     * DEV_DISABLE(10), TARGET(3:0).
+     *
+     * ACTUAL follows TARGET exactly. Every driver that polls this register
+     * waits for equality, not for "at least": XNU's _setPSLevel polls mask 0xf0
+     * for level << 4, Linux's apple-pmgr-pwrstate.c polls
+     * FIELD_GET(APPLE_PMGR_PS_ACTUAL, reg) == pstate, and m1n1's pmgr.c polls
+     * PMGR_PS_ACTUAL against FIELD_PREP(..., target_mode). A floor applied to
+     * an explicit request would make those polls time out instead of
+     * converging. MIN is the floor for AUTOMATIC power management -- the Linux
+     * binding reads "Specifies the minimum power state for auto-PM" -- so it is
+     * applied only while AUTO_ENABLE is set.
+     *
+     * NO_WAKEUP is stored rather than dropped. XNU's _enablePSNoWakeup sets it
+     * with a read-modify-write, _setPSLevel tests it and clears it, and
+     * _setPSLevel's fast path early-returns only when the target already
+     * matches AND bits 30 and 10 are both clear (mask 0x40000400). A bit that
+     * always read zero therefore changed which branch the driver took.
+     *
+     * Whether T8140 silicon clamps ACTUAL when AUTO_ENABLE is clear is NOT
+     * measured; this follows the three reference drivers' poll contract.
+     */
+    uint32_t controls = value & UINT32_C(0xd00f040f);
     unsigned target = controls & 15, minimum = (controls >> 16) & 15;
-    unsigned actual = target > minimum ? target : minimum;
+    bool auto_pm = (controls & UINT32_C(0x10000000)) != 0;
+    unsigned actual = (auto_pm && minimum > target) ? minimum : target;
     if (((core->values[i] >> 4) & 15) != actual) {
         increment(&core->transitions);
     }

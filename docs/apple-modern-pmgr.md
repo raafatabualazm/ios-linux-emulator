@@ -20,9 +20,18 @@ The normal device layout comes from these primary implementation sources:
 
 These are an ordinary Apple power-controller interface basis, **not an Apple
 T8140 specification or a measured T8140 reset-state capture**. Synchronous
-completion and minimum-state clamping are declared device abstractions. The
-minimum clamp implements the meaning of Linux's `apple,min-state` field;
-hardware timing and the exact T8140 minimum-state policy have not been measured.
+completion is a declared device abstraction.
+
+ACTUAL follows TARGET exactly, and MIN is applied as a floor only while
+AUTO_ENABLE is set. That is not a free choice: XNU's `_setPSLevel` polls mask
+0xf0 for `level << 4`, Linux's `apple-pmgr-pwrstate.c` polls
+`FIELD_GET(APPLE_PMGR_PS_ACTUAL, reg) == pstate`, and m1n1's `pmgr.c` polls
+`PMGR_PS_ACTUAL` against `FIELD_PREP(..., target_mode)` -- all three wait for
+equality, so a floor on an explicit request makes them time out rather than
+converge. Restricting the floor to AUTO_ENABLE follows the Linux binding's own
+wording for `apple,min-state`: "Specifies the minimum power state for auto-PM."
+**Whether T8140 silicon clamps ACTUAL when AUTO_ENABLE is clear has not been
+measured**, and no public source states it.
 
 ## Matched ADT geometry
 

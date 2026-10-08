@@ -28,7 +28,10 @@ mailbox, board = transport.mailbox, transport.board
 require, digest = mailbox.require, mailbox.digest
 COUNTERS = ('mmio-read-count', 'mmio-write-count', 'unknown-read-count',
             'unknown-write-count', 'power-transition-count')
-FINAL = dict(zip(COUNTERS, (16, 13, 2, 2, 7)))
+# Exact MMIO pin. Moved from (16, 13, 2, 2, 7) on 2026-10-08 when this gate gained
+# three checks for the corrected ACTUAL/MIN semantics and for NO_WAKEUP storage:
+# +2 reads, +2 writes and one more power transition.
+FINAL = dict(zip(COUNTERS, (18, 15, 2, 2, 8)))
 COMPLETION = 0xfacefeed12345678
 AON = 0x300700060
 SEP = 0x300700c00
@@ -86,15 +89,23 @@ class ROM(mailbox.ROM):
         self.check('sep_disable_control', SEP, 0x000004ff)
         self.write32(SEP, 0x0000000f)
         self.check('sep_controls_cleared', SEP, 0xff)
+        # AUTO_ENABLE clear: MIN is stored but does not raise ACTUAL, because
+        # XNU, Linux and m1n1 all poll ACTUAL for equality with the request.
         self.write32(SEP, 0x00040000)
-        self.check('sep_minimum_retention', SEP, 0x00040040)
+        self.check('sep_minimum_stored_not_applied', SEP, 0x00040000)
+        # AUTO_ENABLE set: MIN is the auto-PM floor and does raise ACTUAL.
+        self.write32(SEP, 0x10040000)
+        self.check('sep_minimum_floors_auto_pm', SEP, 0x10040040)
+        # NO_WAKEUP is stored, not dropped; XNU branches on it.
+        self.write32(SEP, 0x40000000)
+        self.check('sep_no_wakeup_stored', SEP, 0x40000000)
         self.write32(SEP, 0x000000f0)
         self.check('sep_actual_readonly', SEP, 0)
         self.write64(SEP, 0xffffffffffffffff)
-        self.check('sep_doubleword', SEP, 0x900f04ff, wide=True)
+        self.check('sep_doubleword', SEP, 0xd00f04ff, wide=True)
         self.write32(SEP + 4, 0xabcdef01)
         self.check('unknown_neighbor', SEP + 4, 0)
-        self.check('sep_neighbor_write_ignored', SEP, 0x900f04ff)
+        self.check('sep_neighbor_write_ignored', SEP, 0xd00f04ff)
         self.write32(AON, 0)
         self.check('aon_off', AON, 0)
         self.write32(SEP, 0)
