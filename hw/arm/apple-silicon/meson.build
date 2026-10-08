@@ -15,6 +15,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'modern-pmgr-fuse.c',
     'modern-mcc-dramcfg.c',
     'modern-mcc-quota.c',
+    'modern-mcc-perf.c',
     'modern-kc-patch.c',
     'modern-boot-layout.c',
     'modern-boot-metadata.c',
