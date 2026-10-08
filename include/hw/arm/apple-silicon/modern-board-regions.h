@@ -5,7 +5,8 @@
 #include "hw/arm/apple-silicon/modern-boot-metadata.h"
 
 #define APPLE_MODERN_CPU_REGISTER_WINDOWS 2
-#define APPLE_MODERN_MAX_BOARD_EXCLUSIONS 64
+/* The full declared apple-modern profile appends at most 68 spans. */
+#define APPLE_MODERN_MAX_BOARD_EXCLUSIONS 96
 #define APPLE_MODERN_MAX_REGISTER_WINDOW (UINT64_C(1) << 20)
 #define APPLE_MODERN_MAX_REGISTER_TOTAL (UINT64_C(2) << 20)
 

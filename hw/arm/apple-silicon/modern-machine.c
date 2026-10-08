@@ -26,6 +26,9 @@
 #include "hw/arm/apple-silicon/modern-mcc-perf.h"
 #include "hw/arm/apple-silicon/modern-mcc-socni.h"
 #include "hw/arm/apple-silicon/modern-mcc-socni-command.h"
+#include "hw/arm/apple-silicon/modern-mcc-dcs-perf.h"
+#include "hw/arm/apple-silicon/modern-mcc-dsid.h"
+#include "hw/arm/apple-silicon/modern-mcc-slc.h"
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
 #include "hw/intc/apple-modern-aic.h"
 #include "hw/arm/apple-silicon/sep-sim.h"
@@ -84,6 +87,14 @@ struct AppleModernMachine {
     AppleModernMCCSocniPlan mcc_socni_plan;
     bool modern_mcc_socni_command;
     AppleModernMCCSocniCommandPlan mcc_socni_command_plan;
+    bool modern_mcc_dcs_perf;
+    uint64_t mcc_dcs_perf_reset;
+    AppleModernDCSPERFPlan mcc_dcs_perf_plan;
+    bool modern_mcc_dsid;
+    uint64_t mcc_dsid_reset;
+    AppleModernMCCDSIDPlan mcc_dsid_plan;
+    bool modern_mcc_slc;
+    AppleModernMCCSLCPlan mcc_slc_plan;
     char *pmgr_aon_fuse_image;
     AppleModernPMGRFusePlan pmgr_fuse_plan;
     AppleDARTT8110State *sep_mapper;
@@ -496,7 +507,7 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
             return false;
         }
     }
-    /* Every append is bounded; the full declared profile uses at most 42 spans. */
+    /* Every append is bounded; the full declared profile uses at most 68 spans. */
     for (unsigned i = 0; i < APPLE_MODERN_MCC_DCS_COUNT; i++) {
         if (s->mcc_dramcfg_plan.addresses[i] &&
             !append_pmgr_exclusion(exclusions, &count,
@@ -534,6 +545,30 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
                 (AppleModernAddressRange){s->mcc_socni_command_plan.addresses[i],
                                          APPLE_MODERN_MCC_SOCNI_COMMAND_SPAN},
                 errp)) {
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < APPLE_MODERN_DCS_PERF_VIEWS; i++) {
+        if (s->mcc_dcs_perf_plan.addresses[i] &&
+            !append_pmgr_exclusion(exclusions, &count,
+                (AppleModernAddressRange){s->mcc_dcs_perf_plan.addresses[i],
+                                         s->mcc_dcs_perf_plan.spans[i]}, errp)) {
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < APPLE_MODERN_MCC_DSID_VIEWS; i++) {
+        if (s->mcc_dsid_plan.addresses[i] &&
+            !append_pmgr_exclusion(exclusions, &count,
+                (AppleModernAddressRange){s->mcc_dsid_plan.addresses[i],
+                                         s->mcc_dsid_plan.spans[i]}, errp)) {
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < APPLE_MODERN_MCC_SLC_VIEWS; i++) {
+        if (s->mcc_slc_plan.addresses[i] &&
+            !append_pmgr_exclusion(exclusions, &count,
+                (AppleModernAddressRange){s->mcc_slc_plan.addresses[i],
+                                         APPLE_MODERN_MCC_SLC_SPAN}, errp)) {
             return false;
         }
     }
@@ -706,6 +741,166 @@ static bool map_mcc_socni_command(AppleModernMachine *s, uint64_t uart,
     s->mcc_socni_command_plan = plan;
     warn_report("apple-modern: SOCNI command uses declared bank-arm semantics; "
                 "no physical event source or cache/power readiness is supplied");
+    return true;
+}
+
+static bool map_mcc_dcs_perf(AppleModernMachine *s, uint64_t uart,
+                             uint64_t uart_span, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernDCSPERFPlan plan;
+    size_t count;
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp) ||
+        !apple_modern_dcs_perf_plan_build(dtree, s->components.dram_base,
+            s->components.dram_size, exclusions, count, &plan, errp)) {
+        return false;
+    }
+    DeviceState *dev = apple_modern_dcs_perf_new(s->mcc_dcs_perf_reset);
+    dev->id = g_strdup("mcc-dcs-perf");
+    object_property_add_child(OBJECT(s), "mcc-dcs-perf", OBJECT(dev));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    for (unsigned i = 0; i < APPLE_MODERN_DCS_PERF_VIEWS; i++) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), i, plan.addresses[i]);
+    }
+    s->mcc_dcs_perf_plan = plan;
+    warn_report("apple-modern: opt-in sparse DCS performance block on DCS0-2; "
+                "declared profile: virtual reset 0x%016" PRIx64 " (all counters), "
+                "clear bits complete at once and zero their duration counter, "
+                "counter stores abort; no DRAM event source connected",
+                s->mcc_dcs_perf_reset);
+    return true;
+}
+
+static bool map_mcc_dsid(AppleModernMachine *s, uint64_t uart,
+                         uint64_t uart_span, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernMCCDSIDPlan plan;
+    size_t count;
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp) ||
+        !apple_modern_mcc_dsid_plan_build(dtree, s->components.dram_base,
+            s->components.dram_size, exclusions, count, &plan, errp)) {
+        return false;
+    }
+    DeviceState *dev = apple_modern_mcc_dsid_new(s->mcc_dsid_reset);
+    dev->id = g_strdup("mcc-dsid");
+    object_property_add_child(OBJECT(s), "mcc-dsid", OBJECT(dev));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    for (unsigned i = 0; i < APPLE_MODERN_MCC_DSID_VIEWS; i++) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), i, plan.addresses[i]);
+    }
+    s->mcc_dsid_plan = plan;
+    warn_report("apple-modern: opt-in sparse AMCC DSID profile cells; counter "
+                "virtual reset 0x%016" PRIx64 "; no DSID event source connected",
+                s->mcc_dsid_reset);
+    return true;
+}
+
+/* Darwin's compatibility AMCC aperture reads zero across plane 0's SLC
+ * status cells, which the driver polls without a bound. Replace its
+ * exclusion with the aperture minus exactly the SLC views that lie inside
+ * it. A view straddling its edge, or overlapping its lock word at offset 0
+ * or a CTRR bound register, fails, so those stay with the aperture. */
+static bool carve_amcc_aperture(AppleModernMachine *s,
+    const AppleModernMCCSLCPlan *plan, AppleModernAddressRange *exclusions,
+    size_t *count, Error **errp)
+{
+    uint64_t base = s->amcc.base, end = s->amcc.base + s->amcc.size;
+    uint64_t cells[APPLE_MODERN_MCC_SLC_VIEWS];
+    size_t inside = 0;
+    for (unsigned i = 0; i < APPLE_MODERN_MCC_SLC_VIEWS; i++) {
+        uint64_t cell = plan->addresses[i];
+        if (cell + APPLE_MODERN_MCC_SLC_SPAN <= base || cell >= end) {
+            continue;
+        }
+        if (cell < base || cell + APPLE_MODERN_MCC_SLC_SPAN > end) {
+            error_setg(errp, "MCC SLC view straddles the compatibility AMCC aperture");
+            return false;
+        }
+        for (unsigned b = 0; b <= APPLE_MODERN_AMCC_BANKS; b++) {
+            /* Bank index APPLE_MODERN_AMCC_BANKS stands for offset 0. */
+            for (unsigned r = 0; r < 2; r++) {
+                uint32_t reg = b == APPLE_MODERN_AMCC_BANKS ? 0 :
+                               r ? s->amcc.upr_reg[b] : s->amcc.lwr_reg[b];
+                if ((reg || b == APPLE_MODERN_AMCC_BANKS) &&
+                    cell < base + reg + 8 && base + reg < cell + APPLE_MODERN_MCC_SLC_SPAN) {
+                    error_setg(errp, "MCC SLC view overlaps a compatibility AMCC "
+                               "lock or CTRR bound register");
+                    return false;
+                }
+            }
+        }
+        /* Views are planned in plane order; keep the list ascending. */
+        size_t j = inside++;
+        for (; j && cells[j - 1] > cell; j--) {
+            cells[j] = cells[j - 1];
+        }
+        cells[j] = cell;
+    }
+    for (size_t c = 0; c <= inside; c++) {
+        uint64_t stop = c < inside ? cells[c] : end;
+        if (stop > base && !append_pmgr_exclusion(exclusions, count,
+                (AppleModernAddressRange){base, stop - base}, errp)) {
+            return false;
+        }
+        base = stop + APPLE_MODERN_MCC_SLC_SPAN;
+    }
+    return true;
+}
+
+static bool map_mcc_slc(AppleModernMachine *s, uint64_t uart,
+                        uint64_t uart_span, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernMCCSLCPlan plan;
+    size_t count;
+    bool carved = false;
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp)) {
+        return false;
+    }
+    for (size_t i = 0; s->has_amcc && i < count; i++) {
+        if (exclusions[i].physical_address == s->amcc.base &&
+            exclusions[i].size == s->amcc.size) {
+            exclusions[i] = exclusions[--count];
+            carved = true;
+            break;
+        }
+    }
+    if (s->has_amcc && !carved) {
+        error_setg(errp, "MCC SLC cannot find the compatibility AMCC exclusion");
+        return false;
+    }
+    /* Plan against every other device first, then re-check the views
+     * against what remains of the aperture after the carve. */
+    if (!apple_modern_mcc_slc_plan_build(dtree, s->components.dram_base,
+            s->components.dram_size, exclusions, count, &plan, errp) ||
+        (carved && (!carve_amcc_aperture(s, &plan, exclusions, &count, errp) ||
+                    !apple_modern_mcc_slc_plan_build(dtree, s->components.dram_base,
+                        s->components.dram_size, exclusions, count, &plan, errp)))) {
+        return false;
+    }
+    DeviceState *dev = apple_modern_mcc_slc_new();
+    dev->id = g_strdup("mcc-slc");
+    object_property_add_child(OBJECT(s), "mcc-slc", OBJECT(dev));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    for (unsigned i = 0; i < APPLE_MODERN_MCC_SLC_VIEWS; i++) {
+        uint64_t cell = plan.addresses[i];
+        if (carved && cell >= s->amcc.base && cell < s->amcc.base + s->amcc.size) {
+            /* Above the compatibility aperture, which is mapped at priority 0. */
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(dev), i, cell, 1);
+        } else {
+            sysbus_mmio_map(SYS_BUS_DEVICE(dev), i, cell);
+        }
+    }
+    s->mcc_slc_plan = plan;
+    warn_report("apple-modern: opt-in AMCC SLC way/flush cells; declared profile: "
+                "12-way handover state (per-plane readback on t604x/t8140-family "
+                "Macs, m1n1 PR #664, analogy), "
+                "global writes broadcast and requested ways report powered at once; "
+                "no cache model");
     return true;
 }
 
@@ -1518,6 +1713,10 @@ static void modern_init(MachineState *machine)
         (s->modern_mcc_socni && !map_mcc_socni(s, uart, uart_span, &error)) ||
         (s->modern_mcc_socni_command &&
          !map_mcc_socni_command(s, uart, uart_span, &error)) ||
+        (s->modern_mcc_dcs_perf &&
+         !map_mcc_dcs_perf(s, uart, uart_span, &error)) ||
+        (s->modern_mcc_dsid && !map_mcc_dsid(s, uart, uart_span, &error)) ||
+        (s->modern_mcc_slc && !map_mcc_slc(s, uart, uart_span, &error)) ||
         (s->pmgr_aon_fuse_image &&
          !map_pmgr_fuse(s, uart, uart_span, &error)) ||
         (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error))) {
@@ -1670,6 +1869,9 @@ BOOL_PROPERTY(modern_mcc_quota, modern_mcc_quota)
 BOOL_PROPERTY(modern_mcc_perf, modern_mcc_perf)
 BOOL_PROPERTY(modern_mcc_socni, modern_mcc_socni)
 BOOL_PROPERTY(modern_mcc_socni_command, modern_mcc_socni_command)
+BOOL_PROPERTY(modern_mcc_dcs_perf, modern_mcc_dcs_perf)
+BOOL_PROPERTY(modern_mcc_dsid, modern_mcc_dsid)
+BOOL_PROPERTY(modern_mcc_slc, modern_mcc_slc)
 BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
 BOOL_PROPERTY(boot_display, boot_display)
@@ -1739,6 +1941,40 @@ static void set_socni_reset(Object *obj, Visitor *visitor, const char *name,
     uint64_t value;
     if (check_mutable(s, errp) && visit_type_uint64(visitor, name, &value, errp)) {
         s->mcc_socni_reset = value;
+    }
+}
+
+static void get_dcs_perf_reset(Object *obj, Visitor *visitor, const char *name,
+                               void *opaque, Error **errp)
+{
+    uint64_t value = APPLE_MODERN_MACHINE(obj)->mcc_dcs_perf_reset;
+    visit_type_uint64(visitor, name, &value, errp);
+}
+
+static void set_dcs_perf_reset(Object *obj, Visitor *visitor, const char *name,
+                               void *opaque, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    uint64_t value;
+    if (check_mutable(s, errp) && visit_type_uint64(visitor, name, &value, errp)) {
+        s->mcc_dcs_perf_reset = value;
+    }
+}
+
+static void get_dsid_reset(Object *obj, Visitor *visitor, const char *name,
+                           void *opaque, Error **errp)
+{
+    uint64_t value = APPLE_MODERN_MACHINE(obj)->mcc_dsid_reset;
+    visit_type_uint64(visitor, name, &value, errp);
+}
+
+static void set_dsid_reset(Object *obj, Visitor *visitor, const char *name,
+                           void *opaque, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    uint64_t value;
+    if (check_mutable(s, errp) && visit_type_uint64(visitor, name, &value, errp)) {
+        s->mcc_dsid_reset = value;
     }
 }
 
@@ -1828,6 +2064,17 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_modern_mcc_socni_command);
     object_class_property_add(oc, "mcc-socni-reset", "uint64",
                              get_socni_reset, set_socni_reset, NULL, NULL);
+    object_class_property_add_bool(oc, "modern-mcc-dcs-perf",
+                                   get_modern_mcc_dcs_perf,
+                                   set_modern_mcc_dcs_perf);
+    object_class_property_add(oc, "mcc-dcs-perf-reset", "uint64",
+                             get_dcs_perf_reset, set_dcs_perf_reset, NULL, NULL);
+    object_class_property_add_bool(oc, "modern-mcc-dsid", get_modern_mcc_dsid,
+                                   set_modern_mcc_dsid);
+    object_class_property_add(oc, "mcc-dsid-reset", "uint64",
+                             get_dsid_reset, set_dsid_reset, NULL, NULL);
+    object_class_property_add_bool(oc, "modern-mcc-slc", get_modern_mcc_slc,
+                                   set_modern_mcc_slc);
     object_class_property_add(oc, "mcc-quota-reset", "uint32",
                               get_display_geometry, set_display_geometry,
                               NULL, (void *)offsetof(AppleModernMachine,
