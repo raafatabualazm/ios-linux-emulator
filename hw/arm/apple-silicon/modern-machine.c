@@ -20,6 +20,7 @@
 #include "hw/arm/apple-silicon/modern-board-regions.h"
 #include "hw/arm/apple-silicon/modern-amcc.h"
 #include "hw/arm/apple-silicon/modern-pmgr.h"
+#include "hw/arm/apple-silicon/modern-pmgr-fuse.h"
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
 #include "hw/intc/apple-modern-aic.h"
 #include "hw/arm/apple-silicon/sep-sim.h"
@@ -64,6 +65,8 @@ struct AppleModernMachine {
     bool sep_sim;
     bool sep_dart;
     bool modern_pmgr;
+    char *pmgr_aon_fuse_image;
+    AppleModernPMGRFusePlan pmgr_fuse_plan;
     AppleDARTT8110State *sep_mapper;
     AddressSpace *sep_dma_as;
     DeviceState *sep_mbox;
@@ -99,7 +102,8 @@ static bool read_asset(const char *path, AppleModernBlob *blob,
     if (fstat(fd, &before) || !S_ISREG(before.st_mode) || before.st_size <= 0 ||
         before.st_size > (512 * MiB) || (uint64_t)before.st_size > budget) {
         error_setg(errp, "modern asset must be a regular nonempty file of at "
-                   "most 512 MiB within the 1 GiB total input budget: %s", path);
+                   "most 512 MiB within the %zu-byte caller budget: %s",
+                   budget, path);
         close(fd);
         return false;
     }
@@ -396,12 +400,11 @@ static bool adt_u32(AppleModernBlob dtree, const char *path, const char *name,
 }
 
 /* Power-state cells only: preserving the tree does not supply MCC or DVFS. */
-static bool map_pmgr(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
-                       Error **errp)
+static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
+    uint64_t uart_span, AppleModernAddressRange *exclusions,
+    size_t *output_count, Error **errp)
 {
     AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
-    AppleModernPMGRPlan plan;
-    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
     size_t count = 0;
     static const char *const paths[] = {
         "/arm-io/aic", "/arm-io/sep", "/arm-io/dart-sep",
@@ -450,7 +453,24 @@ static bool map_pmgr(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
         exclusions[count++] = (AppleModernAddressRange){ldq_le_p(hmac.data),
                                                        ldq_le_p(hmac.data + 8)};
     }
-    if (!apple_modern_pmgr_plan_build(dtree, s->components.dram_base,
+    /* At most 18 fixed mapped spans fit this 32-entry board budget. */
+    if (s->pmgr_fuse_plan.size) {
+        exclusions[count++] = (AppleModernAddressRange){s->pmgr_fuse_plan.base,
+                                                       s->pmgr_fuse_plan.size};
+    }
+    *output_count = count;
+    return true;
+}
+
+static bool map_pmgr(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
+                       Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernPMGRPlan plan;
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    size_t count;
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp) ||
+        !apple_modern_pmgr_plan_build(dtree, s->components.dram_base,
                                       s->components.dram_size, exclusions,
                                       count, &plan, errp)) {
         return false;
@@ -465,6 +485,36 @@ static bool map_pmgr(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
     warn_report("apple-modern: opt-in PMGR power cells: %u windows, %u cells, "
                 "%u virtual domains; no MCC, DVFS, PMP or PMGR IRQ model",
                 plan.window_count, plan.cell_count, plan.virtual_count);
+    return true;
+}
+
+static bool map_pmgr_fuse(AppleModernMachine *s, uint64_t uart,
+                           uint64_t uart_span, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernBlob image = {0};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernPMGRFusePlan plan;
+    size_t count;
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp) ||
+        !apple_modern_pmgr_fuse_plan_build(dtree, s->components.dram_base,
+                s->components.dram_size, exclusions, count, &plan, errp) ||
+        !read_asset(s->pmgr_aon_fuse_image, &image,
+                     APPLE_MODERN_PMGR_FUSE_SIZE, errp)) {
+        return false;
+    }
+    DeviceState *dev = apple_modern_pmgr_fuse_new(image, errp);
+    g_free((void *)image.data);
+    if (!dev) {
+        return false;
+    }
+    dev->id = g_strdup("pmgr-fuse");
+    object_property_add_child(OBJECT(s), "pmgr-fuse", OBJECT(dev));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, plan.base);
+    s->pmgr_fuse_plan = plan;
+    warn_report("apple-modern: PMGR_AON_FUSE uses an explicit immutable input; "
+                "its authenticity and hardware calibration are not established");
     return true;
 }
 
@@ -1241,6 +1291,8 @@ static void modern_init(MachineState *machine)
         (s->sep_dart && !map_sep_dart(s, &error)) ||
         ((s->sep_mailbox || s->sep_sim) && !map_sep_mailbox(s, &error)) ||
         (s->sep_trace && !map_sep_trace(s, &error)) ||
+        (s->pmgr_aon_fuse_image &&
+         !map_pmgr_fuse(s, uart, uart_span, &error)) ||
         (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error))) {
         error_report_err(error);
         exit(EXIT_FAILURE);
@@ -1338,6 +1390,20 @@ static void set_boot_command_line(Object *obj, const char *value, Error **errp)
     if (check_mutable(s, errp)) {
         g_free(s->boot_command_line);
         s->boot_command_line = g_strdup(value);
+    }
+}
+
+static char *get_pmgr_aon_fuse_image(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->pmgr_aon_fuse_image);
+}
+
+static void set_pmgr_aon_fuse_image(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->pmgr_aon_fuse_image);
+        s->pmgr_aon_fuse_image = g_strdup(value);
     }
 }
 
@@ -1441,6 +1507,7 @@ static void modern_finalize(Object *obj)
     AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
     apple_modern_boot_metadata_clear(&s->metadata);
     g_free(s->boot_command_line);
+    g_free(s->pmgr_aon_fuse_image);
     for (size_t i = 0; i < ASSET_COUNT; i++) {
         g_free(s->paths[i]);
         g_free((void *)s->blobs[i].data);
@@ -1461,6 +1528,9 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "dtree", get_dtree, set_dtree);
     object_class_property_add_str(oc, "tc", get_tc, set_tc);
     object_class_property_add_str(oc, "ramdisk", get_ramdisk, set_ramdisk);
+    object_class_property_add_str(oc, "pmgr-aon-fuse-image",
+                                   get_pmgr_aon_fuse_image,
+                                   set_pmgr_aon_fuse_image);
     object_class_property_add_str(oc, "boot-command-line", get_boot_command_line,
                                   set_boot_command_line);
     object_class_property_add_bool(oc, "pauth-compat", get_pauth_compat,
