@@ -17,6 +17,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'modern-mcc-quota.c',
     'modern-mcc-perf.c',
     'modern-mcc-socni.c',
+    'modern-mcc-socni-command.c',
     'modern-kc-patch.c',
     'modern-boot-layout.c',
     'modern-boot-metadata.c',
