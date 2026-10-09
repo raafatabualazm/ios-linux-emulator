@@ -33,10 +33,10 @@ mailbox, board = helper.mailbox, helper.board
 require, digest = helper.require, helper.digest
 
 SENTINEL = 0x5e57e11a5e57e11a
-FLAG = 0x500          # fault flag written by the owned vector handler
-LAST_ESR = 0x508
-LAST_ELR = 0x510
-RESULT_BYTES = 0x518
+FLAG = 0x800          # fault flag written by the owned vector handler
+LAST_ESR = 0x808
+LAST_ELR = 0x810
+RESULT_BYTES = 0x818
 DONE = 0xf05e1234face5678
 ESR_DATA_ABORT_SAME_EL = 0x25
 ESR_SYNC_EXTERNAL_ABORT = 0x10     # DFSC
@@ -47,6 +47,7 @@ WAKE = 0x308004008                 # NUB_FR_GLOBAL_AP_CONTROLS + 0x8
 PTD = 0x3003c0000                  # PMS_PTS_PTD: banks at +0x18200, +0x18300, config +0x18400
 CLUSTER = 0x300780000              # PMGR_SOC_CLUSTER_CTL +0x0 and +0x4
 PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40
+DPE = 0x300208000                  # PMGR_SOC_DPE: ten channels of 3 registers (channel 7: 2)
 DVFM_WINDOWS = (0x210e78000, 0x211e78000, 0x210e70000, 0x211e70000)
 DVFM_SPAN = 0x1000
 
@@ -60,6 +61,11 @@ def storage_registers():
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
     regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40}
+    for channel in range(10):
+        base = DPE + 0x2400 + 0x400 * channel
+        regs |= {base + 0x200, base + 0x300}
+        if channel != 7:
+            regs.add(base)
     return regs
 
 
@@ -187,6 +193,23 @@ PROGRAM = [
     ('r32', PWRGATE + 4, None),                 # neighbours: not listed
     ('r32', PWRGATE + 0x44, None),
     ('r32', PWRGATE + 0x3c, None),
+    ('r32', DPE + 0x2600, None),                # the step-8 frontier (channel 0, +0x200)
+    ('w32', DPE + 0x2600, 1),
+    ('r32', DPE + 0x2600, None),
+    ('r32', DPE + 0x2400, None),
+    ('w32', DPE + 0x2400, 1),
+    ('r32', DPE + 0x2700, None),
+    ('r32', DPE + 0x2404, None),                # hole
+    ('r32', DPE + 0x2500, None),                # hole
+    ('r64', DPE + 0x2600, None),                # 8 bytes over a hole
+    ('r32', DPE + 0x4000, None),                # channel 7 has no +0x0
+    ('r32', DPE + 0x4200, None),
+    ('w32', DPE + 0x4300, 1),
+    ('r32', DPE + 0x4300, None),
+    ('r32', DPE + 0x4400, None),                # channel 8
+    ('r32', DPE + 0x4b00, None),                # last register
+    ('r32', DPE + 0x4b04, None),                # past it
+    ('r32', DPE + 0x23fc, None),                # before the first channel
 ]
 
 

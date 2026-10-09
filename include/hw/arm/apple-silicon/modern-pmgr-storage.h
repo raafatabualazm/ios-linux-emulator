@@ -50,7 +50,7 @@
  * unmodelled register shows up as the next frontier. The machine announces the
  * first access to each register so a run shows which ones the guest touched.
  */
-#define APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS 16
+#define APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS 32
 #define APPLE_MODERN_PMGR_STORAGE_MAX_SPAN 0x1000
 #define APPLE_MODERN_PMGR_STORAGE_SLOTS (APPLE_MODERN_PMGR_STORAGE_MAX_SPAN / 4)
 #define APPLE_MODERN_PMGR_STORAGE_MASKS (APPLE_MODERN_PMGR_STORAGE_SLOTS / 64)

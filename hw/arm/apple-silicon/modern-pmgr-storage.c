@@ -173,19 +173,35 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     read-modify-write with no wait. The code after it (0xfffffff00984812c: a
  *     read-modify-write of PMGR_SOC_TVM +0xc00 followed by an unbounded poll for bit
  *     11 clear, and a mask-driven loop at 0xfffffff009848214) is NOT covered here.
+ *  7-16: PMGR_SOC_DPE (reg 32, RegMap selector 78 = 0x4e, 0x300208000), ten channels
+ *     at +0x2400 + 0x400 * n (the byte table at 0xfffffff0077b1f70 holds
+ *     0x2400, 0x2800, ... 0x4800). AppleT8140PMGR's energy-accumulator routine at
+ *     0xfffffff00984c1d0 (running only when the object byte at this+0x738e8 has bit 0
+ *     set, which it had in the measured guest) loops 10 times over that table. Per
+ *     channel it does a read-modify-write setting bit 0 at t + 0x200, then at t, then
+ *     at t + 0x300; the middle one is skipped for exactly one iteration, the eighth
+ *     (its countdown register x23 reaches 0 only there), so channel 7 lists only
+ *     +0x200 and +0x300. Plain RMW, no wait: 29 registers in all.
  */
 typedef struct FixedWindow {
     unsigned reg_index;
     uint32_t offset, size;
+    unsigned nregs;         /* 0: every 4-byte slot of the window is a register */
+    uint16_t regs[3];       /* else: register offsets inside the window (multiples of 4) */
 } FixedWindow;
+#define DPE_CHANNEL(n) {32, 0x2400 + 0x400 * (n), 0x304, 3, {0, 0x200, 0x300}}
 static const FixedWindow fixed_windows[] = {
-    {4, 0x8, 0x20},
-    {34, 0x18200, 0x80},
-    {34, 0x18300, 0x80},
-    {34, 0x18400, 0x400},
-    {28, 0x0, 0x8},
-    {22, 0x0, 0x4},
-    {22, 0x40, 0x4},
+    {4, 0x8, 0x20, 0, {0}},
+    {34, 0x18200, 0x80, 0, {0}},
+    {34, 0x18300, 0x80, 0, {0}},
+    {34, 0x18400, 0x400, 0, {0}},
+    {28, 0x0, 0x8, 0, {0}},
+    {22, 0x0, 0x4, 0, {0}},
+    {22, 0x40, 0x4, 0, {0}},
+    DPE_CHANNEL(0), DPE_CHANNEL(1), DPE_CHANNEL(2), DPE_CHANNEL(3), DPE_CHANNEL(4),
+    DPE_CHANNEL(5), DPE_CHANNEL(6),
+    {32, 0x4200, 0x104, 2, {0, 0x100}},     /* channel 7 has no +0x0 register */
+    DPE_CHANNEL(8), DPE_CHANNEL(9),
 };
 
 /* Append one window after the geometry checks; *plan is unchanged on failure. */
@@ -354,8 +370,14 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
                        "/arm-io bus ranges", i);
             return false;
         }
-        for (unsigned slot = 0; slot < f->size / 4; slot++) {
-            valid[slot / 64] |= UINT64_C(1) << (slot % 64);
+        if (f->nregs) {
+            for (unsigned r = 0; r < f->nregs; r++) {
+                valid[f->regs[r] / 4 / 64] |= UINT64_C(1) << ((f->regs[r] / 4) % 64);
+            }
+        } else {
+            for (unsigned slot = 0; slot < f->size / 4; slot++) {
+                valid[slot / 64] |= UINT64_C(1) << (slot % 64);
+            }
         }
         if (!place(&plan, base + f->offset, f->size, FIXED_TAG_BASE + i, valid,
                    dram_base, dram_size, exclusions, exclusion_count, errp)) {
