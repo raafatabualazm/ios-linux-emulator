@@ -43,6 +43,9 @@ static void error_setg(Error **errp, const char *format, ...)
 #define MAX_REG_ENTRIES 64
 #define VOTER_RAILS 4
 #define VOTER_RAIL_RECORD 24
+#define SOC_CLUSTERS 5
+#define SOC_CLUSTER_RECORD 28
+#define SOC_CLUSTER_AVE 2
 /* perf-groups word 2 bit 1: ApplePMGR programs this group after initDriver. */
 #define GROUP_PROGRAMMED 2
 
@@ -271,7 +274,22 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     +0xcd0 = 1 (flag 0 writes 3 and 0). Nothing reads them back on this path.
  *     The guest's first rejected access was the +0xc8c write (MEASURED: 0x300724c8c, the
  *     value 0, selector 0x65 in the faulting frame).
- *  22-31: ten block-local register pairs the T8140 PS-write hook read-modify-writes. The
+ *  22: PMGR_SOC_TVM (reg 25, RegMap selector 0x67, physical 0x300760000) +0x400 and +0x7e0.
+ *     The perf-domain routine at 0xfffffff0092b5670 (reached from the slot-0x5a0 routine's
+ *     helper 0xfffffff0092ab0b8 through vtable slot 0xc18) calls AppleT8140PMGR's
+ *     setTVMEnable (vtable slot 0xa50, 0xfffffff009849284) with enable 0 and wait 1 for every
+ *     /arm-io/pmgr soc-clusters record (ADT, 28 bytes: id, flags in byte 2, TVM index in
+ *     byte 0xb, name at +0xc) whose flags bit 2 is set and whose TVM index is not 4 or 5. In the
+ *     stock ADT only the AVE record (flags 5, index 0xb) qualifies (the plan builder checks
+ *     that). setTVMEnable maps index 0xb to control register +0x400 and status register
+ *     +0x7e0: read-modify-write (v & ~1) | enable, then, because wait is set and enable
+ *     is clear, a POLL of +0x7e0 until bit 1 is clear (readPMGRSOCTVMReg stubs at
+ *     0xfffffff00984ebb0 / 0xfffffff00984ec20). THE POLL passes on the first read only because
+ *     bit 1 of +0x7e0 is never set (declared: the TVM never reports busy). The other TVM
+ *     indices (1: +0x0/+0x3e0, 2: +0xc00/+0xfe0, 6: +0x800/+0xbe0, 9: +0x1000/+0x13e0) are
+ *     NOT listed: no soc-clusters record selects them. The guest's first rejected access was
+ *     the +0x400 read (MEASURED: 0x300760400, selector 0x67).
+ *  23-32: ten block-local register pairs the T8140 PS-write hook read-modify-writes. The
  *     AppleT8140PMGR write32 override (vtable slot 0xd20, 0xfffffff00984b768; ApplePMGR's
  *     PS-level writer 0xfffffff00929fe20 calls it) runs when this+0x738f0 is non-zero
  *     (0x3ff, MEASURED in the guest: all ten entries enabled). It searches the static table
@@ -316,9 +334,10 @@ static const FixedWindow fixed_windows[] = {
     {43, 0x8a4000, 0x24, 2, {0, 0x20}},     /* PMC DVMR state +0xa4000, busy +0xa4020 */
     {43, 0x8a9c14, 0x4, 0, {0}},            /* PMC DVMR popcount +0xa9c14 */
     {22, 0xc8c, 0x48, 2, {0, 0x44}},        /* PwrGate +0xc8c and +0xcd0 (hook table 2) */
+    {25, 0x400, 0x3e4, 2, {0, 0x3e0}},      /* PMGR_SOC_TVM index 0xb: control +0x400, status +0x7e0 */
 };
 
-/* Block bases of the T8140 PS-write hook table (see item 22-31 above), in table order. The window
+/* Block bases of the T8140 PS-write hook table (see item 23-32 above), in table order. The window
  * of block b is the register pair at b + 0x104 and b + 0x108; each must lie inside the /arm-io
  * bus ranges. Their tags continue the fixed windows' (FIXED_TAG_BASE + count + index). */
 #define ACG_OFFSET 0x104
@@ -375,7 +394,7 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
     const AppleModernAddressRange *exclusions, size_t exclusion_count,
     AppleModernPMGRStoragePlan *output, Error **errp)
 {
-    AppleModernBlob reg, groups_blob, counters, ranges, rails;
+    AppleModernBlob reg, groups_blob, counters, ranges, rails, clusters;
     Group groups[MAX_GROUPS];
     AppleModernPMGRStoragePlan plan;
     unsigned group_count, counter_count;
@@ -417,6 +436,22 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
     for (unsigned i = 0; i < VOTER_RAILS; i++) {
         if (rails.data[VOTER_RAIL_RECORD * i] != i || rails.data[VOTER_RAIL_RECORD * i + 1]) {
             error_setg(errp, "PMGR voter rail %u has an index the vote-register window does not list", i);
+            return false;
+        }
+    }
+    /* Only the AVE record (index 2) selects a TVM, with index 0xb: that is what the TVM window lists. */
+    if (!apple_modern_adt_property(tree, "/arm-io/pmgr", "soc-clusters", &clusters, errp)) {
+        return false;
+    }
+    if (clusters.size != SOC_CLUSTERS * SOC_CLUSTER_RECORD) {
+        error_setg(errp, "unsupported PMGR soc-clusters schema");
+        return false;
+    }
+    for (unsigned i = 0; i < SOC_CLUSTERS; i++) {
+        const uint8_t *c = clusters.data + SOC_CLUSTER_RECORD * i;
+        bool selects = (c[2] & 4) && (c[0xb] & 0xfe) != 4;
+        if (selects != (i == SOC_CLUSTER_AVE) || (selects && c[0xb] != 0xb)) {
+            error_setg(errp, "PMGR soc-clusters record %u selects a TVM the window does not list", i);
             return false;
         }
     }

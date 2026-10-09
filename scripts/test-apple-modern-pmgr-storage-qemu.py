@@ -47,6 +47,7 @@ WAKE = 0x308004008                 # NUB_FR_GLOBAL_AP_CONTROLS + 0x8
 PTD = 0x3003c0000                  # PMS_PTS_PTD: banks at +0x18200, +0x18300, config +0x18400
 CLUSTER = 0x300780000              # PMGR_SOC_CLUSTER_CTL +0x0 and +0x4
 PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40, and +0xc8c, +0xcd0
+TVM = 0x300760400                  # PMGR_SOC_TVM +0x400 (control, index 0xb) and +0x7e0 (status)
 DPE = 0x300208000                  # PMGR_SOC_DPE: ten channels of 3 registers (channel 7: 2)
 PMC = 0x3028ac000                  # reg[43] (0x302000000) + 0x8ac000: PMC vote registers 0..3 and +0x24
 PMC2 = 0x302860000                 # reg[43] + 0x860000: PMC +0x60000
@@ -70,7 +71,7 @@ def storage_registers():
     regs |= {PTD + 0x18200 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
-    regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40, PWRGATE + 0xc8c, PWRGATE + 0xcd0}
+    regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40, PWRGATE + 0xc8c, PWRGATE + 0xcd0, TVM, TVM + 0x3e0}
     regs |= {PMC + 4 * i for i in range(4)} | {PMC + 0x20, PMC + 0x24, PMC + 0x28, PMC2, PMC3, PMC3 + 0x20, PMC4}
     for block in ACG_BLOCKS:
         regs |= {block + 0x104, block + 0x108}
@@ -345,6 +346,28 @@ PROGRAM.extend([
     ('r32', PWRGATE + 0xccc, None),
     ('r64', PWRGATE + 0xc88, None),             # 8 bytes over a hole and the register
     ('r64', PWRGATE + 0xcd0, None),
+])
+PROGRAM.extend([
+    ('r32', TVM, None),                         # the step-8 frontier (control, index 0xb)
+    ('w32', TVM, 0),                            # (v & ~1) | enable with enable 0
+    ('r32', TVM + 0x3e0, None),                 # polled until bit 1 is clear
+    ('w32', TVM, 1),
+    ('r32', TVM, None),
+    ('w32', TVM + 0x3e0, 2),
+    ('r32', TVM + 0x3e0, None),
+    ('w32', TVM + 0x3e0, 0),
+    ('r32', TVM + 4, None),                     # everything else in the TVM block
+    ('r32', TVM + 0x3dc, None),
+    ('r32', TVM + 0x3e4, None),
+    ('w32', TVM + 0x3e4, 1),
+    ('r32', TVM - 4, None),
+    ('r32', TVM - 0x400, None),                 # the other TVM indices' control registers (+0x0, +0x800 ...)
+    ('r32', TVM + 0x400, None),
+    ('r32', TVM + 0x800, None),
+    ('r32', TVM - 0x400 + 0x3e0, None),
+    ('r32', TVM + 0x800 + 0x3e0, None),
+    ('r64', TVM, None),
+    ('r64', TVM + 0x3e0, None),
 ])
 for _block in ACG_BLOCKS:
     if _block != 0x413000000:                   # the other nine pairs: RMW and the edges
