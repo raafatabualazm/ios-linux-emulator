@@ -5,6 +5,14 @@
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
+#ifdef APPLE_MODERN_LAYOUT_STANDALONE
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#else
+#include "qemu/osdep.h"
+#endif
 #include "hw/arm/apple-silicon/modern-pmgr-ungate.h"
 
 /* Presence-only marker: AppleH17PPlatformIO::start only tests for non-NULL. */
