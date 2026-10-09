@@ -46,6 +46,7 @@ G7 = 0x3082b4000                   # PMGR_AON + 0x34000
 WAKE = 0x308004008                 # NUB_FR_GLOBAL_AP_CONTROLS + 0x8
 PTD = 0x3003c0000                  # PMS_PTS_PTD: banks at +0x18200, +0x18300, config +0x18400
 CLUSTER = 0x300780000              # PMGR_SOC_CLUSTER_CTL +0x0 and +0x4
+PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40
 DVFM_WINDOWS = (0x210e78000, 0x211e78000, 0x210e70000, 0x211e70000)
 DVFM_SPAN = 0x1000
 
@@ -58,7 +59,7 @@ def storage_registers():
     regs |= {PTD + 0x18200 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
-    regs |= {CLUSTER, CLUSTER + 4}
+    regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40}
     return regs
 
 
@@ -177,6 +178,15 @@ PROGRAM = [
     ('r32', CLUSTER + 8, None),                 # past them
     ('r64', CLUSTER + 8, None),
     ('r32', CLUSTER - 4, None),
+    ('r32', PWRGATE, None),                     # the step-7 frontier
+    ('w32', PWRGATE, 0x80000000),
+    ('r32', PWRGATE, None),
+    ('r32', PWRGATE + 0x40, None),
+    ('w32', PWRGATE + 0x40, 0x80000000),
+    ('r32', PWRGATE + 0x40, None),
+    ('r32', PWRGATE + 4, None),                 # neighbours: not listed
+    ('r32', PWRGATE + 0x44, None),
+    ('r32', PWRGATE + 0x3c, None),
 ]
 
 

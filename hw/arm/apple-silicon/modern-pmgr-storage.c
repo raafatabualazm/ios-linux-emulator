@@ -164,6 +164,15 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     a driver that ever wrote bit 4 would hang here. The routine is called a second
  *     time with index 1, which does the identical read, write ((v & ~0xf) | 0xf) and
  *     wait at +0x4 (measured as the next frontier after +0x0 alone was listed).
+ *  5-6: PMGR_SOC_PWRGATE (reg 22, RegMap selector 101, 0x300724000) +0x0 and +0x40.
+ *     Right after the two cluster calls the same AppleT8140PMGR wrapper
+ *     (0xfffffff009847d84, ApplePMGR start's vtable slot 0x590) reads PwrGate +0x0
+ *     through vtable slot 0xd38 (readPMGRSOCPwrGateReg, 0xfffffff0092b0668) and writes
+ *     it back with bit 31 set through slot 0xd40 (0xfffffff0092b06d8), then does the
+ *     same at +0x40 (0xfffffff009847e44 .. 0xfffffff009847f34). Plain
+ *     read-modify-write with no wait. The code after it (0xfffffff00984812c: a
+ *     read-modify-write of PMGR_SOC_TVM +0xc00 followed by an unbounded poll for bit
+ *     11 clear, and a mask-driven loop at 0xfffffff009848214) is NOT covered here.
  */
 typedef struct FixedWindow {
     unsigned reg_index;
@@ -175,6 +184,8 @@ static const FixedWindow fixed_windows[] = {
     {34, 0x18300, 0x80},
     {34, 0x18400, 0x400},
     {28, 0x0, 0x8},
+    {22, 0x0, 0x4},
+    {22, 0x40, 0x4},
 };
 
 /* Append one window after the geometry checks; *plan is unchanged on failure. */
