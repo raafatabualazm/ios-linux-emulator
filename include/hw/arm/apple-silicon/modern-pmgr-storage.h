@@ -47,8 +47,13 @@
  * consecutive 32-bit registers (writer 0xfffffff009848b10). Writes only, never
  * read back or polled on this path.
  *
+ * Further fixed windows (PTD interrupt banks, SOC cluster control, PwrGate, DPE, and
+ * the PMC static-voter vote registers in reg[43]) are documented next to the table in
+ * modern-pmgr-storage.c. The PMC window is checked against the ADT voter-rail-data
+ * (four records, rail indices 0..3) and lists +0x8ac000..+0x8ac00f of reg[43].
+ *
  * The plan lists exactly those registers (one window per programmed group, plus the
- * wake-mask window); a
+ * fixed windows); a
  * 4- or 8-byte access that touches any other slot is rejected, so the next
  * unmodelled register shows up as the next frontier. The machine announces the
  * first access to each register so a run shows which ones the guest touched.

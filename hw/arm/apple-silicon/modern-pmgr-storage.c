@@ -41,6 +41,8 @@ static void error_setg(Error **errp, const char *format, ...)
 #define MAX_GROUPS 32
 #define MAX_COUNTERS 1024
 #define MAX_REG_ENTRIES 64
+#define VOTER_RAILS 4
+#define VOTER_RAIL_RECORD 24
 /* perf-groups word 2 bit 1: ApplePMGR programs this group after initDriver. */
 #define GROUP_PROGRAMMED 2
 
@@ -182,6 +184,23 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     at t + 0x300; the middle one is skipped for exactly one iteration, the eighth
  *     (its countdown register x23 reaches 0 only there), so channel 7 lists only
  *     +0x200 and +0x300. Plain RMW, no wait: 29 registers in all.
+ *  17: the PMC static-voter vote registers, in /arm-io/pmgr reg[43] (child 0xf2000000,
+ *     physical 0x302000000, 16 MiB; RegMap selector 0x81, which the 43 pairs of initRegMap
+ *     as decoded do not list), at offset 0x8ac000: ApplePMC register group
+ *     kRegGroupPMCDVFM has base offset 0x800000 (MEASURED in guest memory at pmgr+0x6088)
+ *     and AppleT8140PMC adds 0xac000. Four 32-bit registers at +0x0 .. +0xc. Reached
+ *     from the base slot-0x5a0 routine 0xfffffff0092aac90 (called by the wrapper
+ *     0xfffffff009847d84 at 0x9847fd0): for each die i < this+0x631c it calls the PMC
+ *     object at this+0x738a0 through vtable slot 0x28, which reaches ApplePMC::restorePMC
+ *     (0xfffffff0092e39e0); for each of the PMC's three voter agents (this+8, +0xc, +0x10 =
+ *     PMP 0, CLPC 1, AP 3 here) it calls _enableStaticVoterInterface (0xfffffff0092e3b5c),
+ *     which for every rail of the agent's mask does a read-modify-write of the register at
+ *     0xac000 + 4 * rail (AppleT8140PMC read/write thunks 0xfffffff00984ccac and
+ *     0xfffffff00984cc18, kind 0), setting the agent's bit (voter-agent byte 2). The rail
+ *     index is the first u16 of the ADT voter-rail-data record (DCS 0, SOC 1, DISP 2,
+ *     AVE 3), which the plan builder checks. Plain RMW, no wait: 4 registers. The other
+ *     restorePMC branch (flag bit 4, the dynamic voter interface) and the kind 1..3
+ *     registers (0xac020, 0xac024, 0xac028) are NOT listed.
  */
 typedef struct FixedWindow {
     unsigned reg_index;
@@ -202,6 +221,7 @@ static const FixedWindow fixed_windows[] = {
     DPE_CHANNEL(5), DPE_CHANNEL(6),
     {32, 0x4200, 0x104, 2, {0, 0x100}},     /* channel 7 has no +0x0 register */
     DPE_CHANNEL(8), DPE_CHANNEL(9),
+    {43, 0x8ac000, 0x10, 0, {0}},           /* PMC static-voter vote registers, 4 rails */
 };
 
 /* Append one window after the geometry checks; *plan is unchanged on failure. */
@@ -250,7 +270,7 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
     const AppleModernAddressRange *exclusions, size_t exclusion_count,
     AppleModernPMGRStoragePlan *output, Error **errp)
 {
-    AppleModernBlob reg, groups_blob, counters, ranges;
+    AppleModernBlob reg, groups_blob, counters, ranges, rails;
     Group groups[MAX_GROUPS];
     AppleModernPMGRStoragePlan plan;
     unsigned group_count, counter_count;
@@ -280,6 +300,20 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
         !apple_modern_adt_property(tree, "/arm-io/pmgr", "perf-counters", &counters, errp) ||
         !apple_modern_adt_property(tree, "/arm-io", "ranges", &ranges, errp)) {
         return false;
+    }
+    if (!apple_modern_adt_property(tree, "/arm-io/pmgr", "voter-rail-data", &rails, errp)) {
+        return false;
+    }
+    /* The vote-register window lists exactly rails 0..3 (24-byte records, u16 rail index first). */
+    if (rails.size != VOTER_RAILS * VOTER_RAIL_RECORD) {
+        error_setg(errp, "unsupported PMGR voter-rail-data schema");
+        return false;
+    }
+    for (unsigned i = 0; i < VOTER_RAILS; i++) {
+        if (rails.data[VOTER_RAIL_RECORD * i] != i || rails.data[VOTER_RAIL_RECORD * i + 1]) {
+            error_setg(errp, "PMGR voter rail %u has an index the vote-register window does not list", i);
+            return false;
+        }
     }
     if (!reg.size || reg.size % 16 || reg.size > MAX_REG_ENTRIES * 16 ||
         !groups_blob.size || groups_blob.size % GROUP_RECORD ||

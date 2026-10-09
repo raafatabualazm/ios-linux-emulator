@@ -33,10 +33,10 @@ mailbox, board = helper.mailbox, helper.board
 require, digest = helper.require, helper.digest
 
 SENTINEL = 0x5e57e11a5e57e11a
-FLAG = 0x800          # fault flag written by the owned vector handler
-LAST_ESR = 0x808
-LAST_ELR = 0x810
-RESULT_BYTES = 0x818
+FLAG = 0x1000         # fault flag written by the owned vector handler (up to 512 result slots)
+LAST_ESR = 0x1008
+LAST_ELR = 0x1010
+RESULT_BYTES = 0x1018
 DONE = 0xf05e1234face5678
 ESR_DATA_ABORT_SAME_EL = 0x25
 ESR_SYNC_EXTERNAL_ABORT = 0x10     # DFSC
@@ -48,6 +48,7 @@ PTD = 0x3003c0000                  # PMS_PTS_PTD: banks at +0x18200, +0x18300, c
 CLUSTER = 0x300780000              # PMGR_SOC_CLUSTER_CTL +0x0 and +0x4
 PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40
 DPE = 0x300208000                  # PMGR_SOC_DPE: ten channels of 3 registers (channel 7: 2)
+PMC = 0x3028ac000                  # reg[43] (0x302000000) + 0x8ac000: PMC static-voter vote registers 0..3
 DVFM_WINDOWS = (0x210e78000, 0x211e78000, 0x210e70000, 0x211e70000)
 DVFM_SPAN = 0x1000
 # The control pages (windows 2 and 3) accept only the BootKC-attested 64-bit reads;
@@ -64,6 +65,7 @@ def storage_registers():
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
     regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40}
+    regs |= {PMC + 4 * i for i in range(4)}
     for channel in range(10):
         base = DPE + 0x2400 + 0x400 * channel
         regs |= {base + 0x200, base + 0x300}
@@ -240,6 +242,27 @@ PROGRAM = [
     ('r32', DPE + 0x4b00, None),                # last register
     ('r32', DPE + 0x4b04, None),                # past it
     ('r32', DPE + 0x23fc, None),                # before the first channel
+    ('r32', PMC, None),                         # the step-1 frontier (rail 0, 0x3028ac000)
+    ('w32', PMC, 1),                            # agent PMP (bit 0)
+    ('r32', PMC, None),
+    ('w32', PMC, 3),                            # agent CLPC (bit 1)
+    ('w32', PMC, 0xb),                          # agent AP (bit 3)
+    ('r32', PMC, None),
+    ('r32', PMC + 4, None),                     # rails 1..3
+    ('w32', PMC + 4, 0xb),
+    ('r32', PMC + 8, None),
+    ('w32', PMC + 8, 0xb),
+    ('r32', PMC + 0xc, None),
+    ('w32', PMC + 0xc, 0xb),
+    ('r64', PMC + 8, None),                     # rails 2 and 3 in one access
+    ('r64', PMC, None),
+    ('r32', PMC + 0x10, None),                  # past the four rails
+    ('w32', PMC + 0x10, 1),
+    ('r64', PMC + 0xc, None),                   # 8 bytes over the end
+    ('r32', PMC - 4, None),
+    ('r32', PMC + 0x20, None),                  # kind 1..3 registers: not listed
+    ('r32', PMC + 0x24, None),
+    ('r32', PMC + 0x28, None),
 ]
 
 
