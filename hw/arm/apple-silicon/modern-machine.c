@@ -113,12 +113,16 @@ struct AppleModernMachine {
     char *pmgr_boot_on;
     /* Publish the modelled counter frequency as /cpus/cpu0 timebase-frequency. */
     bool adt_timebase_match;
+    /* Serve a unique dart-id on every dart,t8110 node (ADT order, declared). */
+    bool adt_dart_ids;
     AppleModernPMGRFusePlan pmgr_fuse_plan;
     AppleDARTT8110State *sep_mapper;
     AddressSpace *sep_dma_as;
     DeviceState *sep_mbox;
     bool aic_trace;
     bool modern_aic;
+    /* Opt-in: accept and record nonzero IRQ_CFG words (see apple-modern-aic.h). */
+    bool aic_record_irq_config;
     DeviceState *aic;
     uint32_t uart_irq;
     uint32_t aic_num_irqs;
@@ -1310,11 +1314,19 @@ static bool map_aic(AppleModernMachine *s, Error **errp)
         }
         qdev_prop_set_uint32(s->aic, "mmio-size", size);
         qdev_prop_set_bit(s->aic, "trace", s->aic_trace);
+        qdev_prop_set_bit(s->aic, "record-irq-config",
+                          s->aic_record_irq_config);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(s->aic), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(s->aic), 0, base);
         s->aic_num_irqs = num_irqs;
         warn_report("apple-modern: AIC%u enabled, %u IRQs, config at 0x%x "
                     "(opt-in modern-aic)", revision, num_irqs, extint);
+        if (s->aic_record_irq_config) {
+            warn_report("apple-modern: AIC records IRQ_CFG words and delivers "
+                        "every interrupt to CPU0 whatever target is written "
+                        "(opt-in aic-record-irq-config; delay groups are not "
+                        "modelled)");
+        }
         return true;
     }
     if (s->aic_trace) {
@@ -1802,6 +1814,12 @@ static void modern_init(MachineState *machine)
                      "otherwise there are no power cells to reset");
         exit(EXIT_FAILURE);
     }
+    if (s->aic_record_irq_config && !s->modern_aic) {
+        error_report("apple-modern: aic-record-irq-config needs "
+                     "modern-aic=on; otherwise there is no controller to "
+                     "record IRQ_CFG words");
+        exit(EXIT_FAILURE);
+    }
     if (s->pmgr_voltage_states) {
         profile = apple_modern_pmgr_voltage_profile(s->pmgr_voltage_states,
                                                     &profile_count);
@@ -1833,11 +1851,18 @@ static void modern_init(MachineState *machine)
         metadata_input.overrides = overrides;
         metadata_input.override_count = override_count;
     }
+    metadata_input.assign_dart_ids = s->adt_dart_ids;
     if (!apple_modern_boot_metadata_build(&metadata_input, &s->metadata, &error) ||
         !uart_address(s->components.dtree, &uart, &uart_span, &s->uart_irq,
                       &error)) {
         error_report_err(error);
         exit(EXIT_FAILURE);
+    }
+    if (s->adt_dart_ids) {
+        warn_report("apple-modern: served dart-id 0..%u on %u dart,t8110 "
+                    "nodes in ADT order (declared: SPTM requires the "
+                    "property, iBoot's own numbering is unmeasured)",
+                    s->metadata.dart_id_count - 1, s->metadata.dart_id_count);
     }
     {
         AppleModernBlob tb;
@@ -2113,6 +2138,7 @@ BOOL_PROPERTY(modern_mcc_socni, modern_mcc_socni)
 BOOL_PROPERTY(modern_mcc_socni_command, modern_mcc_socni_command)
 BOOL_PROPERTY(modern_mcc_dcs_perf, modern_mcc_dcs_perf)
 BOOL_PROPERTY(adt_timebase_match, adt_timebase_match)
+BOOL_PROPERTY(adt_dart_ids, adt_dart_ids)
 BOOL_PROPERTY(modern_pmp_ptd, modern_pmp_ptd)
 BOOL_PROPERTY(modern_cpu_dvfm, modern_cpu_dvfm)
 BOOL_PROPERTY(modern_pmgr_storage, modern_pmgr_storage)
@@ -2120,6 +2146,7 @@ BOOL_PROPERTY(modern_mcc_dsid, modern_mcc_dsid)
 BOOL_PROPERTY(modern_mcc_slc, modern_mcc_slc)
 BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
+BOOL_PROPERTY(aic_record_irq_config, aic_record_irq_config)
 BOOL_PROPERTY(boot_display, boot_display)
 BOOL_PROPERTY(prepare_only, prepare_only)
 BOOL_PROPERTY(mte, mte)
@@ -2286,6 +2313,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    get_modern_pmgr_storage, set_modern_pmgr_storage);
     object_class_property_add_bool(oc, "adt-timebase-match", get_adt_timebase_match,
                                    set_adt_timebase_match);
+    object_class_property_add_bool(oc, "adt-dart-ids", get_adt_dart_ids,
+                                   set_adt_dart_ids);
     object_class_property_add_str(oc, "pmgr-boot-on", get_pmgr_boot_on,
                                   set_pmgr_boot_on);
     object_class_property_add_str(oc, "pmgr-voltage-states",
@@ -2344,6 +2373,9 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_aic_trace);
     object_class_property_add_bool(oc, "modern-aic", get_modern_aic,
                                    set_modern_aic);
+    object_class_property_add_bool(oc, "aic-record-irq-config",
+                                   get_aic_record_irq_config,
+                                   set_aic_record_irq_config);
     object_class_property_add(oc, "aic-revision", "uint32",
                               get_display_geometry, set_display_geometry,
                               NULL, (void *)offsetof(AppleModernMachine,

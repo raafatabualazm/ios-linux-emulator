@@ -53,6 +53,14 @@ typedef struct Tree {
     const AppleModernBootLayout *layout;
     unsigned chosen_count, map_count, vram_count, aic_count;
     uint32_t aic_iack_offset;
+    /*
+     * dart-id generation. dart_pending and dart_value describe only the node
+     * whose properties are being emitted: walk() sets them after reading the
+     * node's properties and clears them once emit_normal() has run, before any
+     * child is walked.
+     */
+    bool assign_dart_ids, dart_pending;
+    uint32_t dart_value, dart_count;
     const AppleModernAdtOverride *overrides;
     size_t override_count;
     unsigned override_hits[APPLE_MODERN_MAX_ADT_OVERRIDES];
@@ -151,9 +159,31 @@ static size_t override_nodes_at(const Tree *tree, const char *path)
     return n;
 }
 
+/* True when the NUL-separated "compatible" list has an entry equal to wanted. */
+static bool compatible_has(const uint8_t *list, uint32_t length,
+                           const char *wanted)
+{
+    size_t wanted_length = strlen(wanted);
+    size_t start = 0;
+
+    while (start < length) {
+        const uint8_t *end = memchr(list + start, 0, length - start);
+        size_t entry = end ? (size_t)(end - (list + start)) : length - start;
+
+        if (entry == wanted_length && !memcmp(list + start, wanted, entry)) {
+            return true;
+        }
+        start += entry + 1;
+    }
+    return false;
+}
+
 static bool normal_property(const Tree *tree, const char *path,
                             const char *name)
 {
+    if (tree->dart_pending && !strcmp(name, "dart-id")) {
+        return true;
+    }
     for (size_t i = 0; i < tree->override_count; i++) {
         if (!strcmp(path, tree->overrides[i].path) &&
             !strcmp(name, tree->overrides[i].name)) {
@@ -182,6 +212,14 @@ static bool normal_property(const Tree *tree, const char *path,
 
 static bool emit_normal(Tree *tree, const char *path, Error **errp)
 {
+    if (tree->dart_pending) {
+        uint8_t bytes[4];
+
+        put32(bytes, tree->dart_value);
+        if (!property(tree, "dart-id", bytes, sizeof(bytes), errp)) {
+            return false;
+        }
+    }
     /* Overrides never target the loader-owned nodes handled below. */
     for (size_t i = 0; i < tree->override_count; i++) {
         const AppleModernAdtOverride *o = &tree->overrides[i];
@@ -233,7 +271,7 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
     uint32_t count, children, replaced = 0;
     size_t start, end, output_header = tree->used;
     char name[128] = "", path[512];
-    bool chosen, map, vram, aic;
+    bool chosen, map, vram, aic, dart = false;
     if (depth > 32 || ++tree->nodes > 8192 ||
         !span(tree->cursor, 8, tree->input.size)) {
         return fail(errp, "ADT node depth/count/bounds exceeded");
@@ -267,6 +305,10 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
         tree->cursor += 36;
         if (!span(tree->cursor, rounded, tree->input.size)) {
             return fail(errp, "ADT property exceeds input");
+        }
+        if (tree->assign_dart_ids && !strcmp((const char *)p, "compatible")) {
+            dart = compatible_has(tree->input.data + tree->cursor, length,
+                                  "dart,t8110");
         }
         if (!strcmp((const char *)p, "name")) {
             nul = memchr(tree->input.data + tree->cursor, 0, length);
@@ -306,6 +348,11 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
             return fail(errp, "ambiguous ADT override path");
         }
     }
+    if (dart) {
+        /* Generation order is the depth-first order of the input blob. */
+        tree->dart_pending = true;
+        tree->dart_value = tree->dart_count++;
+    }
     if (tree->output) {
         uint8_t header[8];
         put32(header, count);
@@ -336,6 +383,7 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
         size_t added = chosen ? 2 : map ? tree->normal_count : vram ? 1 :
                        aic ? 1 : 0;
         added += override_nodes_at(tree, path);
+        added += tree->dart_pending;
         if (count - replaced + added > 4096) {
             return fail(errp, "generated ADT node property count exceeds bound");
         }
@@ -344,6 +392,7 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
         }
         put32(tree->output + output_header, count - replaced + added);
     }
+    tree->dart_pending = false;
     for (uint32_t i = 0; i < children; i++) {
         if (!walk(tree, path, depth + 1, errp)) {
             return false;
@@ -521,6 +570,9 @@ static bool valid_overrides(const AppleModernBootMetadataInput *input,
                 return fail(errp, "ADT override targets a loader-owned node");
             }
         }
+        if (input->assign_dart_ids && !strcmp(o->name, "dart-id")) {
+            return fail(errp, "ADT override conflicts with generated dart-id");
+        }
         for (size_t j = 0; j < i; j++) {
             if (!strcmp(o->path, input->overrides[j].path) &&
                 !strcmp(o->name, input->overrides[j].name)) {
@@ -649,6 +701,7 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     tree.output = prepared.dtree;
     tree.capacity = capacity;
     tree.aic_iack_offset = input->aic_iack_offset;
+    tree.assign_dart_ids = input->assign_dart_ids;
     tree.overrides = input->overrides;
     tree.override_count = input->override_count;
     prepare_normal(&tree, &prepared.layout);
@@ -666,6 +719,13 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
             goto failed;
         }
     }
+    if (tree.assign_dart_ids && !tree.dart_count) {
+        fail(errp, "dart-id assignment requested but the ADT has no "
+                   "dart,t8110 node (Darwin-derived trees strip every DART "
+                   "compatible)");
+        goto failed;
+    }
+    prepared.dart_id_count = tree.dart_count;
     prepared.dtree_size = tree.used;
     prepared.layout.dtree_node_count = tree.nodes;
     prepared.trustcache_size = components->trustcache.size + 8;

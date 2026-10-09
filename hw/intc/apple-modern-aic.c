@@ -15,8 +15,11 @@
  *
  * One CPU, one die, level inputs ORed with independent software latches.
  * Event reads select the lowest active IRQ and automatically mask it.
- * IRQ_CFG accepts only zero (the declared default CPU0 route). Nonzero routes,
- * delay groups, reserved registers, fast IPIs and timer routing are unsupported.
+ * IRQ_CFG accepts only zero (the declared default CPU0 route) unless the
+ * opt-in record_irq_config geometry flag is set. With it, every IRQ_CFG word
+ * is stored and read back verbatim and delivery stays on CPU0 (the layout and
+ * its provenance are in apple-modern-aic.h). Delay groups, reserved registers,
+ * fast IPIs and timer routing are unsupported.
  * The declared revision value and SW/MASK alias readback are compatibility
  * interfaces, not claims about undocumented hardware revision/reset bits.
  * No target IRQ count or event-register location is inferred here.
@@ -145,6 +148,8 @@ void apple_modern_aic_core_reset(AppleModernAICCore *s)
 {
     memset(s->software, 0, sizeof(s->software));
     memset(s->masked, 0xff, sizeof(s->masked));
+    /* Declared: routing words return to the zero (CPU0, no delay) default. */
+    memset(s->irq_config, 0, sizeof(s->irq_config));
     s->enabled = false;
 }
 
@@ -196,6 +201,12 @@ uint32_t apple_modern_aic_core_ack(AppleModernAICCore *s)
     return APPLE_MODERN_AIC_EVENT_IRQ | irq;
 }
 
+uint32_t apple_modern_aic_core_irq_config(const AppleModernAICCore *s,
+                                          uint32_t irq)
+{
+    return irq < s->geometry.max_irqs ? s->irq_config[irq] : 0;
+}
+
 static bool valid_access(const AppleModernAICCore *s, uint64_t offset,
                          unsigned size)
 {
@@ -243,7 +254,8 @@ bool apple_modern_aic_core_read(AppleModernAICCore *s, uint64_t offset,
     } else if (offset >= s->geometry.irq_config_offset &&
                offset - s->geometry.irq_config_offset <
                (uint64_t)s->geometry.max_irqs * 4) {
-        *value = 0; /* only declared default CPU0 routing is supported */
+        /* Zero unless record_irq_config stored something (reset clears it). */
+        *value = s->irq_config[(offset - s->geometry.irq_config_offset) / 4];
     } else if (bank_word(s, offset, s->sw_set_offset, &word) ||
                bank_word(s, offset, s->sw_clear_offset, &word)) {
         *value = s->software[word];
@@ -286,6 +298,10 @@ bool apple_modern_aic_core_write(AppleModernAICCore *s, uint64_t offset,
     } else if (offset >= s->geometry.irq_config_offset &&
                offset - s->geometry.irq_config_offset <
                (uint64_t)s->geometry.max_irqs * 4) {
+        if (s->geometry.record_irq_config) {
+            s->irq_config[(offset - s->geometry.irq_config_offset) / 4] = value;
+            return true;
+        }
         return value == 0; /* refuse unsupported routing/delay/reserved bits */
     } else if (bank_word(s, offset, s->sw_set_offset, &word)) {
         if (word < s->geometry.num_irqs / 32) {
@@ -333,6 +349,26 @@ static void apple_modern_aic_trace(AppleModernAICState *s, const char *what,
                   s->traced == APPLE_MODERN_AIC_TRACE_LIMIT ? " (limit)" : "");
 }
 
+static void apple_modern_aic_trace_config(AppleModernAICState *s,
+                                          hwaddr offset, uint64_t value)
+{
+    uint32_t base = s->geometry.irq_config_offset;
+
+    if (!s->trace || offset < base ||
+        offset - base >= (uint64_t)s->geometry.max_irqs * 4 ||
+        s->config_traced >= APPLE_MODERN_AIC_TRACE_LIMIT) {
+        return;
+    }
+    s->config_traced++;
+    qemu_log_mask(LOG_UNIMP, "apple-modern-aic: irq-config irq %u value "
+                  "0x%08" PRIx64 " target %u delay-index %u%s\n",
+                  (unsigned)((offset - base) / 4), value,
+                  (unsigned)(value & APPLE_MODERN_AIC_IRQ_CFG_TARGET_MASK),
+                  (unsigned)((value & APPLE_MODERN_AIC_IRQ_CFG_DELAY_MASK) >>
+                             APPLE_MODERN_AIC_IRQ_CFG_DELAY_SHIFT),
+                  s->geometry.record_irq_config ? "" : " (not recorded)");
+}
+
 static void apple_modern_aic_update(AppleModernAICState *s)
 {
     bool level = apple_modern_aic_core_output(&s->core);
@@ -375,6 +411,9 @@ static MemTxResult apple_modern_aic_write(void *opaque, hwaddr offset,
     AppleModernAICState *s = opaque;
 
     apple_modern_aic_trace(s, "write", offset, size, value);
+    if (size == 4) {
+        apple_modern_aic_trace_config(s, offset, value);
+    }
     if (!apple_modern_aic_core_write(&s->core, offset, size, value)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "apple-modern-aic: unsupported write at 0x%" HWADDR_PRIx
@@ -463,6 +502,8 @@ static const Property apple_modern_aic_properties[] = {
     DEFINE_PROP_UINT32("timestamp-size", AppleModernAICState,
                        geometry.timestamp_size, 0),
     DEFINE_PROP_BOOL("trace", AppleModernAICState, trace, false),
+    DEFINE_PROP_BOOL("record-irq-config", AppleModernAICState,
+                     geometry.record_irq_config, false),
     DEFINE_PROP_UINT32("mmio-size", AppleModernAICState, geometry.mmio_size, 0),
 };
 

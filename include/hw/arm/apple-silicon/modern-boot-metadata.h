@@ -57,6 +57,22 @@ typedef struct AppleModernBootMetadataInput {
      */
     const AppleModernAdtOverride *overrides;
     size_t override_count;
+    /*
+     * Declared, default off. Give every node whose "compatible" list contains
+     * "dart,t8110" a 4-byte "dart-id" property: 0, 1, 2, ... in ADT order
+     * (depth-first, as the nodes appear in the blob), replacing a property the
+     * input already carries. Provenance: attested (measured in a guest) that
+     * SPTM's t8110dart_bootstrap_instance panics "error -1 getting dart-id"
+     * for a restored dart,t8110 node without it, and that none of the 25 nodes
+     * in the stock iPhone17,3 tree carries one; analogy (Cody Ho's SPTM DART
+     * notes, Darwin-VM dt_fixup) that it is the logical DART object id every
+     * SPTM DART endpoint takes in x0, so it must be unique; declared that
+     * iBoot numbers in ADT order from zero, which is not measured.
+     * Keyed on the INPUT tree: a tree that strips every DART compatible (the
+     * Darwin-derived one) has no such node and the build is refused, as is an
+     * override that names "dart-id". Nothing else in the tree changes.
+     */
+    bool assign_dart_ids;
 } AppleModernBootMetadataInput;
 
 typedef struct AppleModernBootMetadata {
@@ -67,6 +83,8 @@ typedef struct AppleModernBootMetadata {
     /* Ordinary 8-byte offsets header followed by the unchanged stock catalog. */
     uint8_t *trustcache;
     size_t trustcache_size;
+    /* Number of dart-id properties generated (zero unless assign_dart_ids). */
+    uint32_t dart_id_count;
 } AppleModernBootMetadata;
 
 /*
