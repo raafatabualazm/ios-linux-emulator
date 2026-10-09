@@ -40,6 +40,7 @@
 #include "hw/misc/apple-silicon/a7iop/core.h"
 #include "hw/qdev-properties.h"
 #include "hw/arm/apple-silicon/modern-boot-display.h"
+#include "hw/arm/apple-silicon/modern-disp0.h"
 #include "hw/arm/apple-silicon/modern-large-ramdisk.h"
 #include "hw/char/apple_uart.h"
 #include "system/address-spaces.h"
@@ -144,6 +145,9 @@ struct AppleModernMachine {
      */
     uint32_t aic_iack_offset;
     bool boot_display;
+    /* Opt-in T8140 disp0 unified display pipe (W-08). */
+    bool disp0_pipe;
+    DeviceState *disp0;
     bool prepare_only, mte, initialized;
     uint64_t timebase_frequency;
     uint32_t display_width, display_height, display_stride;
@@ -672,6 +676,60 @@ static bool map_mcc_dramcfg(AppleModernMachine *s, uint64_t uart,
     warn_report("apple-modern: opt-in four sparse MCC DRAM configuration words; "
                 "declared virtual reset 0x%08x, no DRAM timing/cache-way model",
                 s->mcc_dramcfg_reset);
+    return true;
+}
+
+/*
+ * Opt-in T8140 disp0 unified display pipe (ledger item W-08). The plan comes
+ * from the served ADT; only the windows this model owns are mapped, and every
+ * offset it does not represent FAULTS so the next real guest requirement shows
+ * up as a frontier record instead of a silent zero.
+ */
+static bool map_disp0(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
+                      Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernDisp0Plan plan;
+    size_t count;
+    uint32_t stride = s->display_stride ? s->display_stride :
+                                          s->display_width * 4;
+
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp) ||
+        !apple_modern_disp0_plan_build(dtree, s->components.dram_base,
+            s->components.dram_size, exclusions, count, &plan, errp)) {
+        return false;
+    }
+    if (!s->metadata.layout.framebuffer_size) {
+        error_setg(errp, "disp0-pipe needs a framebuffer reservation");
+        return false;
+    }
+    s->disp0 = apple_modern_disp0_new(&plan, s->ram,
+        s->metadata.layout.framebuffer_physical - s->components.dram_base,
+        s->display_width, s->display_height, stride, serial_hd(0));
+    s->disp0->id = g_strdup("disp0");
+    object_property_add_child(OBJECT(s), "disp0", OBJECT(s->disp0));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(s->disp0), &error_fatal);
+    for (unsigned i = 0, slot = 0; i < APPLE_MODERN_DISP0_WINDOWS; i++) {
+        if (plan.windows[i].mapped) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(s->disp0), slot++,
+                            plan.windows[i].address);
+        }
+    }
+    if (s->aic) {
+        for (unsigned i = 0; i < APPLE_MODERN_DISP0_IRQS; i++) {
+            if (plan.interrupts[i] < s->aic_num_irqs) {
+                sysbus_connect_irq(SYS_BUS_DEVICE(s->disp0), i,
+                    qdev_get_gpio_in(s->aic, plan.interrupts[i]));
+            }
+        }
+    }
+    warn_report("apple-modern: opt-in disp0 pipe, %u of %u windows mapped, "
+                "%u shadow aliases, dot pitch %u; every unmodelled offset "
+                "faults. Register offsets are ANALOGY from the in-tree "
+                "A13/t8030 model, not attested for T8140",
+                plan.mapped_count, APPLE_MODERN_DISP0_WINDOWS,
+                plan.shadow_copies, plan.dot_pitch);
     return true;
 }
 
@@ -1793,6 +1851,15 @@ static void modern_init(MachineState *machine)
         error_report("apple-modern: large-ramdisk needs a ramdisk asset");
         exit(EXIT_FAILURE);
     }
+    /*
+     * The pipe owns the same framebuffer reservation and the same QEMU
+     * console as the fixed boot scanout, so exactly one of them may run.
+     */
+    if (s->disp0_pipe && s->boot_display) {
+        error_report("apple-modern: disp0-pipe replaces boot-display; "
+                     "enable one, not both");
+        exit(EXIT_FAILURE);
+    }
     for (size_t i = 0; i < ASSET_COUNT; i++) {
         if (i == ASSET_RAMDISK && (!s->paths[i] || s->large_ramdisk)) {
             continue;
@@ -1814,9 +1881,12 @@ static void modern_init(MachineState *machine)
         .trustcache = s->blobs[ASSET_TC], .ramdisk = s->blobs[ASSET_RAMDISK],
         .large_ramdisk = s->large_ramdisk,
         .dram_base = UINT64_C(1) << 40, .dram_size = machine->ram_size,
-        .framebuffer_width = s->boot_display ? s->display_width : 0,
-        .framebuffer_height = s->boot_display ? s->display_height : 0,
-        .framebuffer_stride = s->boot_display ? s->display_stride : 0,
+        .framebuffer_width = (s->boot_display || s->disp0_pipe) ?
+                                 s->display_width : 0,
+        .framebuffer_height = (s->boot_display || s->disp0_pipe) ?
+                                  s->display_height : 0,
+        .framebuffer_stride = (s->boot_display || s->disp0_pipe) ?
+                                  s->display_stride : 0,
         .trustcache_v2 = s->trustcache_v2,
     };
     if (s->large_ramdisk) {
@@ -2033,7 +2103,8 @@ static void modern_init(MachineState *machine)
          !map_pmgr_storage(s, uart, uart_span, &error)) ||
         (s->pmgr_aon_fuse_image &&
          !map_pmgr_fuse(s, uart, uart_span, &error)) ||
-        (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error))) {
+        (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error)) ||
+        (s->disp0_pipe && !map_disp0(s, uart, uart_span, &error))) {
         error_report_err(error);
         exit(EXIT_FAILURE);
     }
@@ -2225,6 +2296,7 @@ BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
 BOOL_PROPERTY(aic_record_irq_config, aic_record_irq_config)
 BOOL_PROPERTY(boot_display, boot_display)
+BOOL_PROPERTY(disp0_pipe, disp0_pipe)
 BOOL_PROPERTY(prepare_only, prepare_only)
 BOOL_PROPERTY(mte, mte)
 #undef BOOL_PROPERTY
@@ -2479,6 +2551,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "prepare-only", get_prepare_only, set_prepare_only);
     object_class_property_add_bool(oc, "boot-display", get_boot_display,
                                    set_boot_display);
+    object_class_property_add_bool(oc, "disp0-pipe", get_disp0_pipe,
+                                   set_disp0_pipe);
     object_class_property_add(oc, "boot-display-width", "uint32",
                               get_display_geometry, set_display_geometry,
                               NULL, (void *)offsetof(AppleModernMachine,
