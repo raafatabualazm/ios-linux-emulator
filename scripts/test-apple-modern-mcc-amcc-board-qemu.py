@@ -501,6 +501,28 @@ def check_slc_carve(qmp, aperture, regs, values):
             'slc_mmio_read_count': count}
 
 
+TIMEBASE_WARNINGS = (
+    # Served Darwin tree: /cpus/cpu0 carries 1,048,576 Hz against the 24 MHz counter.
+    'warning: apple-modern: served ADT /cpus/cpu0 timebase-frequency is 1048576 Hz '
+    'but the modelled counter runs at 24000000 Hz; guest time will run 22.89x real '
+    'time (set adt-timebase-match=on to publish the counter frequency)',
+    # Stock matched tree: iBoot supplies the property, so the ADT has none.
+    'warning: apple-modern: served ADT has no /cpus/cpu0 timebase-frequency '
+    '(iBoot normally supplies it)',
+)
+
+
+def split_timebase_warning(lines):
+    """The board prints one always-on warning (514b604) before any device warning when
+    the served /cpus/cpu0 timebase-frequency is absent or differs from the 24 MHz
+    counter. Strip it only when it is exactly one of the two known texts and first;
+    everything else is still matched exactly."""
+    if lines and lines[0].startswith('warning: apple-modern: served ADT ') and 'timebase' in lines[0]:
+        require(lines[0] in TIMEBASE_WARNINGS, 'Timebase warning has an exact expected text: ' + lines[0])
+        return True, lines[1:]
+    return False, lines
+
+
 def expected_log(devices, rejection):
     """Warnings of the devices constructed (in construction order) and, for a
     refused board, the refusal line; the refusing device is named by the
@@ -545,7 +567,8 @@ def run_case(binary, components, tree_path, devices, rejection, output, aperture
                 # error_report() prints the message alone (no program prefix
                 # here). v4: the whole log is matched; only warnings of the
                 # devices constructed before the refusing one may precede it.
-                lines = [line for line in text.splitlines() if line.strip()]
+                result['timebase_warning'], lines = split_timebase_warning(
+                    [line for line in text.splitlines() if line.strip()])
                 result['expected_log'] = expected_log(devices, rejection)
                 require(lines == result['expected_log'],
                         'Exactly the expected warnings and plan error: ' + repr(lines))
@@ -585,8 +608,10 @@ def run_case(binary, components, tree_path, devices, rejection, output, aperture
             require((SLC_ANNOUNCEMENT in text) == ('slc' in devices),
                     'SLC declared profile announced exactly when mapped')
             result['expected_log'] = expected_log(devices, None)
-            require([line for line in text.splitlines() if line.strip()] ==
-                    result['expected_log'], 'Log is exactly the constructed devices\' warnings')
+            result['timebase_warning'], lines = split_timebase_warning(
+                [line for line in text.splitlines() if line.strip()])
+            require(lines == result['expected_log'],
+                    'Log is exactly the constructed devices\' warnings')
             result['passed'] = True
             return result
     except Exception as error:
