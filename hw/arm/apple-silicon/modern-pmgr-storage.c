@@ -259,7 +259,19 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     because bit 0 of 0xa4020 is never set (declared: busy never asserted; a driver or
  *     firmware that set it would hang until the timeout).
  *  20: the population-count destination +0xa9c14 (reg[43] +0x8a9c14), write-only here.
- *  21-30: ten block-local register pairs the T8140 PS-write hook read-modify-writes. The
+ *  21: PMGR_SOC_PWRGATE +0xc8c and +0xcd0 (reg 22, RegMap selector 0x65, physical
+ *     0x300724c8c and 0x300724cd0), write-only here. The tail of the T8140 write32 override
+ *     (0xfffffff00984b768) consults a second static table at 0xfffffff00b925950 (24-byte
+ *     records: trigger selector and offset, target selector and offset, two values; the
+ *     two records both trigger on PMGR_SOC +0x10000). When the check at 0xfffffff00984bab4
+ *     returns 1 it polls the written register for (v & 0xf0) == 0xf0 and then (v & 0x800) == 0
+ *     (generic wait 0xfffffff0092afba0, timeout 0x2ee00; both are reads of the modelled
+ *     PMGR_SOC power cell, MEASURED to pass) and calls 0xfffffff00984bbb0 with flag 1, which
+ *     does two plain writes through the base vtable slot 0xd30: PwrGate +0xc8c = 0 then
+ *     +0xcd0 = 1 (flag 0 writes 3 and 0). Nothing reads them back on this path.
+ *     The guest's first rejected access was the +0xc8c write (MEASURED: 0x300724c8c, the
+ *     value 0, selector 0x65 in the faulting frame).
+ *  22-31: ten block-local register pairs the T8140 PS-write hook read-modify-writes. The
  *     AppleT8140PMGR write32 override (vtable slot 0xd20, 0xfffffff00984b768; ApplePMGR's
  *     PS-level writer 0xfffffff00929fe20 calls it) runs when this+0x738f0 is non-zero
  *     (0x3ff, MEASURED in the guest: all ten entries enabled). It searches the static table
@@ -303,9 +315,10 @@ static const FixedWindow fixed_windows[] = {
     {43, 0x860000, 0x4, 0, {0}},            /* PMC +0x60000 (kRegGroupPMCDVFM + 0x60000) */
     {43, 0x8a4000, 0x24, 2, {0, 0x20}},     /* PMC DVMR state +0xa4000, busy +0xa4020 */
     {43, 0x8a9c14, 0x4, 0, {0}},            /* PMC DVMR popcount +0xa9c14 */
+    {22, 0xc8c, 0x48, 2, {0, 0x44}},        /* PwrGate +0xc8c and +0xcd0 (hook table 2) */
 };
 
-/* Block bases of the T8140 PS-write hook table (see item 21-30 above), in table order. The window
+/* Block bases of the T8140 PS-write hook table (see item 22-31 above), in table order. The window
  * of block b is the register pair at b + 0x104 and b + 0x108; each must lie inside the /arm-io
  * bus ranges. Their tags continue the fixed windows' (FIXED_TAG_BASE + count + index). */
 #define ACG_OFFSET 0x104

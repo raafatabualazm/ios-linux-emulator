@@ -46,7 +46,7 @@ G7 = 0x3082b4000                   # PMGR_AON + 0x34000
 WAKE = 0x308004008                 # NUB_FR_GLOBAL_AP_CONTROLS + 0x8
 PTD = 0x3003c0000                  # PMS_PTS_PTD: banks at +0x18200, +0x18300, config +0x18400
 CLUSTER = 0x300780000              # PMGR_SOC_CLUSTER_CTL +0x0 and +0x4
-PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40
+PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40, and +0xc8c, +0xcd0
 DPE = 0x300208000                  # PMGR_SOC_DPE: ten channels of 3 registers (channel 7: 2)
 PMC = 0x3028ac000                  # reg[43] (0x302000000) + 0x8ac000: PMC vote registers 0..3 and +0x24
 PMC2 = 0x302860000                 # reg[43] + 0x860000: PMC +0x60000
@@ -70,7 +70,7 @@ def storage_registers():
     regs |= {PTD + 0x18200 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
-    regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40}
+    regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40, PWRGATE + 0xc8c, PWRGATE + 0xcd0}
     regs |= {PMC + 4 * i for i in range(4)} | {PMC + 0x20, PMC + 0x24, PMC + 0x28, PMC2, PMC3, PMC3 + 0x20, PMC4}
     for block in ACG_BLOCKS:
         regs |= {block + 0x104, block + 0x108}
@@ -328,6 +328,23 @@ PROGRAM.extend([
     ('r32', PMC4 - 4, None),
     ('r64', PMC4, None),
     ('r32', PMC4 + 0x4c0, None),
+])
+PROGRAM.extend([
+    ('r32', PWRGATE + 0xc8c, None),             # write-only on the driver's path; storage allows a read-back
+    ('w32', PWRGATE + 0xc8c, 0),                # the step-7 frontier (flag 1: 0 then 1)
+    ('w32', PWRGATE + 0xcd0, 1),
+    ('r32', PWRGATE + 0xc8c, None),
+    ('r32', PWRGATE + 0xcd0, None),
+    ('w32', PWRGATE + 0xc8c, 3),                # flag 0: 3 then 0
+    ('w32', PWRGATE + 0xcd0, 0),
+    ('r32', PWRGATE + 0xcd0, None),
+    ('r32', PWRGATE + 0xc88, None),             # neighbours
+    ('r32', PWRGATE + 0xc90, None),
+    ('r32', PWRGATE + 0xcd4, None),
+    ('w32', PWRGATE + 0xcd4, 1),
+    ('r32', PWRGATE + 0xccc, None),
+    ('r64', PWRGATE + 0xc88, None),             # 8 bytes over a hole and the register
+    ('r64', PWRGATE + 0xcd0, None),
 ])
 for _block in ACG_BLOCKS:
     if _block != 0x413000000:                   # the other nine pairs: RMW and the edges
