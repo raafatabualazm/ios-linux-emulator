@@ -30,6 +30,7 @@
 #include "hw/arm/apple-silicon/modern-pmgr-voltage.h"
 #include "hw/arm/apple-silicon/modern-pmp-ptd.h"
 #include "hw/arm/apple-silicon/modern-cpu-dvfm.h"
+#include "hw/arm/apple-silicon/modern-pmgr-storage.h"
 #include "hw/arm/apple-silicon/modern-mcc-dsid.h"
 #include "hw/arm/apple-silicon/modern-mcc-slc.h"
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
@@ -105,6 +106,9 @@ struct AppleModernMachine {
     AppleModernPTDPlan pmp_ptd_plan;
     bool modern_cpu_dvfm;
     AppleModernDVFMPlan cpu_dvfm_plan;
+    /* Declared storage for the PMGR perf-counter registers ApplePMGR programs. */
+    bool modern_pmgr_storage;
+    AppleModernPMGRStoragePlan pmgr_storage_plan;
     /* Declared reset profile naming PMGR domains iBoot leaves powered on. */
     char *pmgr_boot_on;
     /* Publish the modelled counter frequency as /cpus/cpu0 timebase-frequency. */
@@ -601,6 +605,14 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
             return false;
         }
     }
+    for (unsigned i = 0; i < s->pmgr_storage_plan.count; i++) {
+        if (!append_pmgr_exclusion(exclusions, &count,
+                (AppleModernAddressRange){s->pmgr_storage_plan.windows[i].address,
+                                         s->pmgr_storage_plan.windows[i].size},
+                errp)) {
+            return false;
+        }
+    }
     if (s->pmgr_fuse_plan.size &&
         !append_pmgr_exclusion(exclusions, &count,
             (AppleModernAddressRange){s->pmgr_fuse_plan.base,
@@ -1004,6 +1016,34 @@ static bool map_cpu_dvfm(AppleModernMachine *s, uint64_t uart,
                 "boot-progress diagnostic profile)",
                 plan.addresses[0], plan.addresses[1], plan.addresses[2],
                 plan.addresses[3]);
+    return true;
+}
+
+static bool map_pmgr_storage(AppleModernMachine *s, uint64_t uart,
+                             uint64_t uart_span, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernPMGRStoragePlan plan;
+    size_t count;
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp) ||
+        !apple_modern_pmgr_storage_plan_build(dtree, s->components.dram_base,
+            s->components.dram_size, exclusions, count, &plan, errp)) {
+        return false;
+    }
+    DeviceState *dev = apple_modern_pmgr_storage_new(&plan);
+    dev->id = g_strdup("pmgr-storage");
+    object_property_add_child(OBJECT(s), "pmgr-storage", OBJECT(dev));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    for (unsigned i = 0; i < plan.count; i++) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), i, plan.windows[i].address);
+    }
+    s->pmgr_storage_plan = plan;
+    warn_report("apple-modern: opt-in PMGR perf-counter register storage (%u windows, "
+                "%u 32-bit registers derived from the ADT perf-groups/perf-counters); "
+                "declared zero-reset storage, NOT calibration data and no counting "
+                "behaviour (a boot-progress diagnostic profile)",
+                plan.count, plan.registers);
     return true;
 }
 
@@ -1889,6 +1929,8 @@ static void modern_init(MachineState *machine)
         (s->modern_mcc_slc && !map_mcc_slc(s, uart, uart_span, &error)) ||
         (s->modern_pmp_ptd && !map_pmp_ptd(s, uart, uart_span, &error)) ||
         (s->modern_cpu_dvfm && !map_cpu_dvfm(s, uart, uart_span, &error)) ||
+        (s->modern_pmgr_storage &&
+         !map_pmgr_storage(s, uart, uart_span, &error)) ||
         (s->pmgr_aon_fuse_image &&
          !map_pmgr_fuse(s, uart, uart_span, &error)) ||
         (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error))) {
@@ -2073,6 +2115,7 @@ BOOL_PROPERTY(modern_mcc_dcs_perf, modern_mcc_dcs_perf)
 BOOL_PROPERTY(adt_timebase_match, adt_timebase_match)
 BOOL_PROPERTY(modern_pmp_ptd, modern_pmp_ptd)
 BOOL_PROPERTY(modern_cpu_dvfm, modern_cpu_dvfm)
+BOOL_PROPERTY(modern_pmgr_storage, modern_pmgr_storage)
 BOOL_PROPERTY(modern_mcc_dsid, modern_mcc_dsid)
 BOOL_PROPERTY(modern_mcc_slc, modern_mcc_slc)
 BOOL_PROPERTY(aic_trace, aic_trace)
@@ -2239,6 +2282,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_modern_pmp_ptd);
     object_class_property_add_bool(oc, "modern-cpu-dvfm", get_modern_cpu_dvfm,
                                    set_modern_cpu_dvfm);
+    object_class_property_add_bool(oc, "modern-pmgr-storage",
+                                   get_modern_pmgr_storage, set_modern_pmgr_storage);
     object_class_property_add_bool(oc, "adt-timebase-match", get_adt_timebase_match,
                                    set_adt_timebase_match);
     object_class_property_add_str(oc, "pmgr-boot-on", get_pmgr_boot_on,
