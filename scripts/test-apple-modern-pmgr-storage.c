@@ -60,7 +60,7 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
  * and the vector-config array, windows 3..5 (tags 0x101..0x103). */
 #define PTD_BASE UINT64_C(0x3003c0000)
 #define FIXED_WINDOWS 31
-#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 2 + 2 + 29 + 6 + 1 + 2 + 1 + 20)
+#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 2 + 2 + 29 + 7 + 1 + 2 + 1 + 20)
 /* PMGR_SOC_CLUSTER_CTL (reg_index 28, 0x300780000) +0x0 and +0x4: window 6, tag 0x104. */
 #define CLUSTER_BASE UINT64_C(0x300780000)
 #define CLUSTER_TAG 0x104
@@ -115,7 +115,7 @@ static bool expected_valid(unsigned group, uint64_t offset)
         return offset == 0;
     }
     if (group == PMC_TAG) {
-        return offset < 0x10 || offset == 0x24 || offset == 0x28;
+        return offset < 0x10 || offset == 0x20 || offset == 0x24 || offset == 0x28;
     }
     if (group == PMC_TAG + 1) {
         return offset == 0;
@@ -623,8 +623,17 @@ static void core_stock(AppleModernBlob tree)
         CHECK(!apple_modern_pmgr_storage_core_write(&core, PMC_WINDOW, 0x10, 4, 1));
         CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0xc, 8, &v));
         CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x1c, 4, &v));
-        CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x20, 4, &v));
-        CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x20, 8, &v));
+        CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x18, 8, &v));
+        CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x1c, 8, &v));
+        /* The BWR interface (stateChange bit 3): read-modify-write of +0x20, setting then
+         * clearing the record's bit (bit 7 as an example); +0x20 and +0x24 pair up as one
+         * naturally aligned 8-byte access. */
+        CHECK(apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x20, 4, &v) && v == 0);
+        CHECK(apple_modern_pmgr_storage_core_write(&core, PMC_WINDOW, 0x20, 4, v | (1u << 7)));
+        CHECK(apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x20, 4, &v) && v == 0x80);
+        CHECK(apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x20, 8, &v) && v == 0x300000080ULL);
+        CHECK(apple_modern_pmgr_storage_core_write(&core, PMC_WINDOW, 0x20, 4, 0x80 & ~(1u << 7)));
+        CHECK(apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x20, 8, &v) && v == 0x300000000ULL);
         CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x2c, 4, &v));
         CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x24, 8, &v));
         CHECK(!apple_modern_pmgr_storage_core_write(&core, PMC_WINDOW, 0x2c, 4, 1));

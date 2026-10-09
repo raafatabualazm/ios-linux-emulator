@@ -233,8 +233,20 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     map entry (this+0x106ec + 2 * id) is not -1, a read-modify-write of 0xac028: set
  *     (enable) or clear the bit given by byte 2 of the device's 24-byte record at
  *     [this+0x98]. No poll. The guest's first stateChange that reached a register had
- *     device id 0x3a (MEASURED: saved x22 in the faulting frame). The kind 1 register
- *     (0xac020), the DVMR registers and the LTR write are NOT listed.
+ *     device id 0x3a (MEASURED: saved x22 in the faulting frame).
+ *  17 (third time): +0x20 (0x3028ac020, AppleT8140PMC kind 1, the BWR interface). The BWR
+ *     handler of stateChange (bit 3, 0xfffffff0092e44e4) scans the BWR table at [this+0x88]
+ *     (24-byte records, count [this+0x90]) for records whose u32 at +4 equals
+ *     (device id | die << 28); each match is a read-modify-write of 0xac020 setting
+ *     (enable) or clearing the bit in record byte 2, through the same T8140PMC kind
+ *     thunks. No poll. The sixth stateChange call of the guest reached it (MEASURED:
+ *     breakpoints on the handlers, 5 calls passed without a match and the sixth
+ *     stopped on this read; the rejection was invisible to -d invalid_mem because the
+ *     address lies inside the window, see announce_reject).
+ *     NOT listed, deliberately: the LTR handler (bit 5, 0xfffffff0092e45f8) read-modify-writes
+ *     +0xa9c18 and then POLLS +0xa9c1c for (reg & mask) == (enable ? mask : 0), an ack bit
+ *     that zero storage would never set; it needs a behavioural model, not storage. The
+ *     T8140 wrapper's +0x78000 write (devices 0x153..0x157) is not listed either.
  *  19: the DVMR state register +0xa4000 and its busy flag +0xa4020 of the same PMC group
  *     (reg[43] +0x8a4000 and +0x8a4020; window 0x24 bytes with those two registers listed).
  *     ApplePMC::stateChange's DVMR handler (bit 2, 0xfffffff0092e43ec) reads the state
@@ -287,7 +299,7 @@ static const FixedWindow fixed_windows[] = {
     DPE_CHANNEL(5), DPE_CHANNEL(6),
     {32, 0x4200, 0x104, 2, {0, 0x100}},     /* channel 7 has no +0x0 register */
     DPE_CHANNEL(8), DPE_CHANNEL(9),
-    {43, 0x8ac000, 0x2c, 6, {0, 4, 8, 0xc, 0x24, 0x28}},  /* PMC votes 0..3, dynamic control, boost */
+    {43, 0x8ac000, 0x2c, 7, {0, 4, 8, 0xc, 0x20, 0x24, 0x28}},  /* PMC votes 0..3, bwr, dynamic, boost */
     {43, 0x860000, 0x4, 0, {0}},            /* PMC +0x60000 (kRegGroupPMCDVFM + 0x60000) */
     {43, 0x8a4000, 0x24, 2, {0, 0x20}},     /* PMC DVMR state +0xa4000, busy +0xa4020 */
     {43, 0x8a9c14, 0x4, 0, {0}},            /* PMC DVMR popcount +0xa9c14 */

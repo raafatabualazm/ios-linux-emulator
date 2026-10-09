@@ -71,7 +71,7 @@ def storage_registers():
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
     regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40}
-    regs |= {PMC + 4 * i for i in range(4)} | {PMC + 0x24, PMC + 0x28, PMC2, PMC3, PMC3 + 0x20, PMC4}
+    regs |= {PMC + 4 * i for i in range(4)} | {PMC + 0x20, PMC + 0x24, PMC + 0x28, PMC2, PMC3, PMC3 + 0x20, PMC4}
     for block in ACG_BLOCKS:
         regs |= {block + 0x104, block + 0x108}
     for channel in range(10):
@@ -268,7 +268,13 @@ PROGRAM = [
     ('w32', PMC + 0x10, 1),
     ('r64', PMC + 0xc, None),                   # 8 bytes over the end
     ('r32', PMC - 4, None),
-    ('r32', PMC + 0x20, None),                  # kind 1 register: not listed
+    ('r32', PMC + 0x20, None),                  # the step-6 frontier (kind 1, bwr)
+    ('w32', PMC + 0x20, 0x80),                  # set the record's bit
+    ('r32', PMC + 0x20, None),
+    ('r64', PMC + 0x20, None),                  # +0x20 and +0x24 in one aligned access
+    ('w32', PMC + 0x20, 0),                     # clear it
+    ('r32', PMC + 0x1c, None),                  # the hole before it
+    ('r64', PMC + 0x18, None),
     ('r32', PMC + 0x28, None),                  # the step-4 frontier (kind 3, boost)
     ('w32', PMC + 0x28, 0x20),                  # set the device's bit
     ('r32', PMC + 0x28, None),
@@ -279,8 +285,8 @@ PROGRAM = [
     ('r32', PMC + 0x24, None),                  # the step-2 frontier (kind 2, dynamic control)
     ('w32', PMC + 0x24, 3),                     # (v & ~3) | 2 | 1
     ('r32', PMC + 0x24, None),
-    ('r64', PMC + 0x20, None),                  # 8 bytes over a hole and the register
-    ('r64', PMC + 0x24, None),                  # both adjacent registers (+0x24, +0x28) in one access
+    ('r64', PMC + 0x28, None),                  # 8 bytes running past the end
+    ('r64', PMC + 0x24, None),                  # unaligned 8-byte access: faults
     ('w32', PMC2, 0xffffffff),                  # PMC +0x60000: write only on the driver's path
     ('r32', PMC2, None),
     ('r32', PMC2 + 4, None),
@@ -495,10 +501,10 @@ def run(binary, components, output, no_device):
             require(process.wait(timeout=10) == 0, 'Clean emulator exit')
             process = None
             # A rejected access INSIDE a window is announced once per 4-byte slot (-d invalid_mem
-            # does not report it); probes 'r32 PMC+0x20' and 'w64 0x210e700a8' make two such rejections.
+            # does not report it); probes 'r32 PMC+0x1c' and 'w64 0x210e700a8' make two such rejections.
             text = (output / 'emulator.log').read_text(errors='replace')
             announced = [line for line in text.splitlines() if 'REJECTED' in line]
-            wanted = ['pmgr-storage: REJECTED read of window 19 (group 273) +0x20 (4 bytes, address 0x3028ac020)',
+            wanted = ['pmgr-storage: REJECTED read of window 19 (group 273) +0x1c (4 bytes, address 0x3028ac01c)',
                       'cpu-dvfm: REJECTED write of window 2 +0xa8 (8 bytes)']
             if enabled:
                 for item in wanted:
