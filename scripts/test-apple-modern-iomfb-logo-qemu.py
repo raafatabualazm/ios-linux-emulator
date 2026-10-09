@@ -226,8 +226,16 @@ def boot_arm(arm, args, detector, out, extra_boot_args=''):
 
             qmp = board.QMP(None, guard, process)
 
-            def uart():
-                return serial.read_bytes() if serial.exists() else b''
+            def uart(cap=32 << 20):
+                """Last `cap` bytes of the UART log. Capped because the optional
+                iokit-log arm can make XNU extremely chatty and the host is shared."""
+                if not serial.exists():
+                    return b''
+                size = serial.stat().st_size
+                with serial.open('rb') as fh:
+                    if size > cap:
+                        fh.seek(size - cap)
+                    return fh.read()
 
             shot = [0]
 
