@@ -30,6 +30,7 @@
 #include "hw/arm/apple-silicon/modern-pmgr-voltage.h"
 #include "hw/arm/apple-silicon/modern-pmp-ptd.h"
 #include "hw/arm/apple-silicon/modern-cpu-dvfm.h"
+#include "hw/arm/apple-silicon/modern-disp-trace.h"
 #include "hw/arm/apple-silicon/modern-pmgr-storage.h"
 #include "hw/arm/apple-silicon/modern-mcc-dsid.h"
 #include "hw/arm/apple-silicon/modern-mcc-slc.h"
@@ -106,6 +107,13 @@ struct AppleModernMachine {
     AppleModernPTDPlan pmp_ptd_plan;
     bool modern_cpu_dvfm;
     AppleModernDVFMPlan cpu_dvfm_plan;
+    /*
+     * Declared disp0 bind probe (default off): restores the display nodes'
+     * stock "compatible" strings and maps the disp0 / dcp0-expert register
+     * windows as logging apertures. See modern-disp-trace.h.
+     */
+    char *disp0_probe;
+    AppleModernDispTracePlan disp_trace_plan;
     /* Declared storage for the PMGR perf-counter registers ApplePMGR programs. */
     bool modern_pmgr_storage;
     AppleModernPMGRStoragePlan pmgr_storage_plan;
@@ -609,6 +617,14 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
             return false;
         }
     }
+    for (unsigned i = 0; i < s->disp_trace_plan.count; i++) {
+        const AppleModernDispTraceWindow *w = &s->disp_trace_plan.windows[i];
+        if (w->status == APPLE_MODERN_DISP_TRACE_MAPPED &&
+            !append_pmgr_exclusion(exclusions, &count,
+                (AppleModernAddressRange){w->physical_address, w->size}, errp)) {
+            return false;
+        }
+    }
     for (unsigned i = 0; i < s->pmgr_storage_plan.count; i++) {
         if (!append_pmgr_exclusion(exclusions, &count,
                 (AppleModernAddressRange){s->pmgr_storage_plan.windows[i].address,
@@ -1020,6 +1036,48 @@ static bool map_cpu_dvfm(AppleModernMachine *s, uint64_t uart,
                 "boot-progress diagnostic profile)",
                 plan.addresses[0], plan.addresses[1], plan.addresses[2],
                 plan.addresses[3]);
+    return true;
+}
+
+static bool map_disp_trace(AppleModernMachine *s, uint64_t uart,
+                           uint64_t uart_span, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernDispTracePlan plan;
+    size_t count;
+    unsigned region = 0;
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp) ||
+        !apple_modern_disp_trace_plan_build(dtree, s->components.dram_base,
+            s->components.dram_size, exclusions, count, &plan, errp)) {
+        return false;
+    }
+    DeviceState *dev = apple_modern_disp_trace_new(&plan);
+    dev->id = g_strdup("disp-trace");
+    object_property_add_child(OBJECT(s), "disp-trace", OBJECT(dev));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    for (unsigned i = 0; i < plan.count; i++) {
+        if (plan.windows[i].status == APPLE_MODERN_DISP_TRACE_MAPPED) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(dev), region++,
+                            plan.windows[i].physical_address);
+        }
+    }
+    s->disp_trace_plan = plan;
+    for (unsigned i = 0; i < plan.count; i++) {
+        const AppleModernDispTraceWindow *w = &plan.windows[i];
+        static const char *const why[] = {"mapped", "skipped: in DRAM",
+            "skipped: another device", "skipped: inside an earlier window",
+            "skipped: partly overlaps an earlier window"};
+        warn_report("apple-modern: disp-trace %s reg[%u] 0x%" PRIx64 "+0x%"
+                    PRIx64 " %s", apple_modern_disp_trace_node_name(w->node),
+                    w->reg_index, w->physical_address, w->size,
+                    w->status < 5 ? why[w->status] : "?");
+    }
+    warn_report("apple-modern: opt-in disp0 bind probe '%s': %u of %u display "
+                "register windows mapped as LOGGING APERTURES (reads answer "
+                "zero, writes are discarded, nothing is modelled); ADT "
+                "\"compatible\" restored from the stock tree so AppleCLCD2 "
+                "can match", s->disp0_probe, plan.mapped, plan.count);
     return true;
 }
 
@@ -1820,6 +1878,35 @@ static void modern_init(MachineState *machine)
                      "record IRQ_CFG words");
         exit(EXIT_FAILURE);
     }
+    if (s->disp0_probe) {
+        size_t disp_count = 0;
+        const AppleModernAdtOverride *disp =
+            apple_modern_disp_probe_profile(s->disp0_probe, &disp_count);
+        if (!disp) {
+            error_report("apple-modern: unknown disp0-probe arm '%s' "
+                         "(supported: %s)", s->disp0_probe,
+                         APPLE_MODERN_DISP_PROBE_NAMES);
+            exit(EXIT_FAILURE);
+        }
+        if (apple_modern_disp_probe_supplies_dart_id(s->disp0_probe) &&
+            s->adt_dart_ids) {
+            error_report("apple-modern: disp0-probe='%s' serves its own "
+                         "declared dart-id and cannot be combined with "
+                         "adt-dart-ids=on", s->disp0_probe);
+            exit(EXIT_FAILURE);
+        }
+        for (size_t i = 0; i < disp_count; i++) {
+            if (override_count >= APPLE_MODERN_MAX_ADT_OVERRIDES) {
+                error_report("apple-modern: too many ADT overrides");
+                exit(EXIT_FAILURE);
+            }
+            overrides[override_count++] = disp[i];
+        }
+        warn_report("apple-modern: disp0-probe '%s' restores %zu declared ADT "
+                    "property values on the display nodes (stock bytes; the "
+                    "distribution tree file is never written)",
+                    s->disp0_probe, disp_count);
+    }
     if (s->pmgr_voltage_states) {
         profile = apple_modern_pmgr_voltage_profile(s->pmgr_voltage_states,
                                                     &profile_count);
@@ -1954,6 +2041,7 @@ static void modern_init(MachineState *machine)
         (s->modern_mcc_slc && !map_mcc_slc(s, uart, uart_span, &error)) ||
         (s->modern_pmp_ptd && !map_pmp_ptd(s, uart, uart_span, &error)) ||
         (s->modern_cpu_dvfm && !map_cpu_dvfm(s, uart, uart_span, &error)) ||
+        (s->disp0_probe && !map_disp_trace(s, uart, uart_span, &error)) ||
         (s->modern_pmgr_storage &&
          !map_pmgr_storage(s, uart, uart_span, &error)) ||
         (s->pmgr_aon_fuse_image &&
@@ -2063,6 +2151,23 @@ static char *get_pmgr_aon_fuse_image(Object *obj, Error **errp)
     return g_strdup(APPLE_MODERN_MACHINE(obj)->pmgr_aon_fuse_image);
 }
 
+static char *get_disp0_probe(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->disp0_probe);
+}
+
+static void set_disp0_probe(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (value && *value && strcmp(value, "off")) {
+        g_free(s->disp0_probe);
+        s->disp0_probe = g_strdup(value);
+    } else {
+        g_free(s->disp0_probe);
+        s->disp0_probe = NULL;
+    }
+}
+
 static char *get_pmgr_voltage_states(Object *obj, Error **errp)
 {
     return g_strdup(APPLE_MODERN_MACHINE(obj)->pmgr_voltage_states);
@@ -2073,6 +2178,7 @@ static void set_pmgr_voltage_states(Object *obj, const char *value, Error **errp
     AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
     if (check_mutable(s, errp)) {
         g_free(s->pmgr_voltage_states);
+    g_free(s->disp0_probe);
         s->pmgr_voltage_states = g_strdup(value);
     }
 }
@@ -2317,6 +2423,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_adt_dart_ids);
     object_class_property_add_str(oc, "pmgr-boot-on", get_pmgr_boot_on,
                                   set_pmgr_boot_on);
+    object_class_property_add_str(oc, "disp0-probe", get_disp0_probe,
+                                  set_disp0_probe);
     object_class_property_add_str(oc, "pmgr-voltage-states",
                                   get_pmgr_voltage_states,
                                   set_pmgr_voltage_states);
