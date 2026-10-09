@@ -40,6 +40,7 @@
 #include "hw/misc/apple-silicon/a7iop/core.h"
 #include "hw/qdev-properties.h"
 #include "hw/arm/apple-silicon/modern-boot-display.h"
+#include "hw/arm/apple-silicon/modern-large-ramdisk.h"
 #include "hw/char/apple_uart.h"
 #include "system/address-spaces.h"
 #include "system/reset.h"
@@ -63,7 +64,16 @@ struct AppleModernMachine {
     AppleModernBootMetadata metadata;
     AppleModernBoardRegions board_regions;
     ARMCPU *cpu;
-    MemoryRegion ram, tag_memory, tag_ram;
+    /* Created by the machine core (mc->default_ram_id), not by the board. */
+    MemoryRegion *ram;
+    MemoryRegion tag_memory, tag_ram;
+    /*
+     * Opt-in: the ramdisk is a read-only host file mapping published as its
+     * own RAM region over the DRAM window, never copied into guest RAM.
+     */
+    bool large_ramdisk;
+    AppleModernLargeRamdisk large_ramdisk_file;
+    MemoryRegion large_ramdisk_mr;
     MemoryRegion cpu_register_ram[APPLE_MODERN_CPU_REGISTER_WINDOWS];
     MemoryRegion aic_ram, sep_ram;
     MemoryRegion sep_trace_mr[2];
@@ -207,6 +217,14 @@ static void load_prepared_memory(AppleModernMachine *s)
     /* Reservations and BSS are restored on reset, not left as prior guest data. */
     for (size_t i = 0; i < layout->region_count; i++) {
         AppleModernBootRegion *r = &layout->regions[i];
+        /*
+         * The mapped ramdisk region is its own read-only host file mapping:
+         * zero-filling or copying it would fault in and privately dirty every
+         * page of a multi-gigabyte image on each reset.
+         */
+        if (s->large_ramdisk && !strcmp(r->name, "RAMDisk")) {
+            continue;
+        }
         if (address_space_set(&address_space_memory, r->physical_address, 0,
                               r->size, MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
             error_report("apple-modern region initialization failed");
@@ -222,6 +240,9 @@ static void load_prepared_memory(AppleModernMachine *s)
         AppleModernBlob source = sources[copy->image];
         if (copy->image == APPLE_MODERN_TRUSTCACHE) {
             continue; /* Written above with the normal offsets header. */
+        }
+        if (s->large_ramdisk && copy->image == APPLE_MODERN_RAMDISK) {
+            continue; /* Already in guest RAM as a host file mapping. */
         }
         write_memory(copy->physical_address, source.data + copy->source_offset,
                      copy->file_size);
@@ -1767,8 +1788,12 @@ static void modern_init(MachineState *machine)
                      "assets; -kernel/-dtb/-initrd are not accepted");
         exit(EXIT_FAILURE);
     }
+    if (s->large_ramdisk && !s->paths[ASSET_RAMDISK]) {
+        error_report("apple-modern: large-ramdisk needs a ramdisk asset");
+        exit(EXIT_FAILURE);
+    }
     for (size_t i = 0; i < ASSET_COUNT; i++) {
-        if (i == ASSET_RAMDISK && !s->paths[i]) {
+        if (i == ASSET_RAMDISK && (!s->paths[i] || s->large_ramdisk)) {
             continue;
         }
         if (!s->paths[i] || !read_asset(s->paths[i], &s->blobs[i],
@@ -1786,11 +1811,27 @@ static void modern_init(MachineState *machine)
         .bootkc = s->blobs[ASSET_BOOTKC], .sptm = s->blobs[ASSET_SPTM],
         .txm = s->blobs[ASSET_TXM], .dtree = s->blobs[ASSET_DTREE],
         .trustcache = s->blobs[ASSET_TC], .ramdisk = s->blobs[ASSET_RAMDISK],
+        .large_ramdisk = s->large_ramdisk,
         .dram_base = UINT64_C(1) << 40, .dram_size = machine->ram_size,
         .framebuffer_width = s->boot_display ? s->display_width : 0,
         .framebuffer_height = s->boot_display ? s->display_height : 0,
         .framebuffer_stride = s->boot_display ? s->display_stride : 0,
     };
+    if (s->large_ramdisk) {
+        if (!apple_modern_large_ramdisk_map(s->paths[ASSET_RAMDISK],
+                                            &s->large_ramdisk_file, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        s->components.ramdisk = (AppleModernBlob){
+            s->large_ramdisk_file.host, s->large_ramdisk_file.file_size };
+        warn_report("apple-modern: opt-in large-ramdisk maps %" PRIu64
+                    " bytes of %s read-only and privately (the file is never "
+                    "written; guest stores become host copy-on-write pages, "
+                    "and the mapping is lazy, so the file must stay "
+                    "unchanged while the guest runs)",
+                    s->large_ramdisk_file.file_size, s->paths[ASSET_RAMDISK]);
+    }
     metadata_input.components = &s->components;
     metadata_input.command_line = s->boot_command_line;
     metadata_input.command_line_length = s->boot_command_line ?
@@ -1917,13 +1958,45 @@ static void modern_init(MachineState *machine)
         error_report_err(error);
         exit(EXIT_FAILURE);
     }
-    /* Migratable RAM's owner must be a DeviceState or NULL, not MachineState. */
-    memory_region_init_ram(&s->ram, NULL, "apple-modern.ram",
-                           machine->ram_size, &error_fatal);
+    /*
+     * mc->default_ram_id makes the machine core own the DRAM region: by
+     * default a memory-backend-ram of machine->ram_size named exactly as the
+     * board's old region ("apple-modern.ram", same migration ramblock id), or
+     * the user's "-object memory-backend-file,... -machine memory-backend=..."
+     * when one is given. Migratable RAM's owner must be a DeviceState or
+     * NULL, not MachineState, which the backend satisfies.
+     */
+    s->ram = machine->ram;
+    if (!s->ram || memory_region_size(s->ram) != machine->ram_size) {
+        error_report("apple-modern: machine RAM region is missing or sized "
+                     "differently from -m");
+        exit(EXIT_FAILURE);
+    }
     memory_region_add_subregion(get_system_memory(), s->components.dram_base,
-                                &s->ram);
+                                s->ram);
+    if (s->large_ramdisk) {
+        uint64_t rounded = s->metadata.layout.ramdisk_size;
+        rounded = (rounded + APPLE_MODERN_PAGE_SIZE - 1) &
+                  ~(APPLE_MODERN_PAGE_SIZE - 1);
+        if (rounded > s->large_ramdisk_file.map_size) {
+            error_report("apple-modern: mapped ramdisk is shorter than its "
+                         "reservation");
+            exit(EXIT_FAILURE);
+        }
+        /*
+         * Published over the DRAM window at a higher priority, so the guest
+         * reads the file's bytes at the layout's RAMDisk address with no copy
+         * and no second allocation. Not registered for migration.
+         */
+        memory_region_init_ram_ptr(&s->large_ramdisk_mr, NULL,
+                                   "apple-modern.large-ramdisk", rounded,
+                                   s->large_ramdisk_file.host);
+        memory_region_add_subregion_overlap(get_system_memory(),
+                                            s->metadata.layout.ramdisk_physical,
+                                            &s->large_ramdisk_mr, 1);
+    }
     if (s->boot_display && !apple_modern_boot_display_create(
-            &s->ram, s->metadata.layout.framebuffer_physical -
+            s->ram, s->metadata.layout.framebuffer_physical -
                      s->components.dram_base,
             s->display_width, s->display_height,
             s->display_stride ? s->display_stride : s->display_width * 4,
@@ -2139,6 +2212,7 @@ BOOL_PROPERTY(modern_mcc_socni_command, modern_mcc_socni_command)
 BOOL_PROPERTY(modern_mcc_dcs_perf, modern_mcc_dcs_perf)
 BOOL_PROPERTY(adt_timebase_match, adt_timebase_match)
 BOOL_PROPERTY(adt_dart_ids, adt_dart_ids)
+BOOL_PROPERTY(large_ramdisk, large_ramdisk)
 BOOL_PROPERTY(modern_pmp_ptd, modern_pmp_ptd)
 BOOL_PROPERTY(modern_cpu_dvfm, modern_cpu_dvfm)
 BOOL_PROPERTY(modern_pmgr_storage, modern_pmgr_storage)
@@ -2281,6 +2355,7 @@ static void modern_finalize(Object *obj)
 {
     AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
     apple_modern_boot_metadata_clear(&s->metadata);
+    apple_modern_large_ramdisk_unmap(&s->large_ramdisk_file);
     g_free(s->boot_command_line);
     g_free(s->pmgr_aon_fuse_image);
     g_free(s->pmgr_voltage_states);
@@ -2298,6 +2373,13 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     mc->init = modern_init;
     mc->max_cpus = 1;
     mc->default_ram_size = 8 * GiB;
+    /*
+     * Same name as the region the board used to create itself, so the
+     * migration ramblock id is unchanged and "-object
+     * memory-backend-file,id=X,... -machine memory-backend=X" can back guest
+     * DRAM with a (sparse) host file instead of anonymous memory.
+     */
+    mc->default_ram_id = "apple-modern.ram";
     mc->default_cpu_type = ARM_CPU_TYPE_NAME("max");
     object_class_property_add_str(oc, "bootkc", get_bootkc, set_bootkc);
     object_class_property_add_str(oc, "sptm", get_sptm, set_sptm);
@@ -2315,6 +2397,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_adt_timebase_match);
     object_class_property_add_bool(oc, "adt-dart-ids", get_adt_dart_ids,
                                    set_adt_dart_ids);
+    object_class_property_add_bool(oc, "large-ramdisk", get_large_ramdisk,
+                                   set_large_ramdisk);
     object_class_property_add_str(oc, "pmgr-boot-on", get_pmgr_boot_on,
                                   set_pmgr_boot_on);
     object_class_property_add_str(oc, "pmgr-voltage-states",
