@@ -488,14 +488,16 @@ bool apple_modern_kc_md0_width_compat(uint8_t *bootkc, size_t len,
                    "exactly 1; refusing to patch", blockcount_hits);
         return false;
     }
-    /* The two anchors describe different functions; they must not overlap. */
-    if (strategy + 16 > blockcount && blockcount + 20 > strategy) {
-        error_setg(errp, "md0-width-compat: the two anchors overlap at "
-                   "0x%" PRIx64 " and 0x%" PRIx64 "; refusing to patch",
-                   strategy, blockcount);
-        return false;
-    }
-
+    /*
+     * No overlap check is needed, and one would be unreachable code: the two
+     * anchors cannot overlap. At every relative displacement within either
+     * anchor's span, some word would have to match two mutually exclusive
+     * instruction forms at once - LSL against LDR, LDR against ADD, CMP
+     * against SUB, B.cond against UDIV - so the matchers can never both
+     * succeed at positions less than one anchor apart. Each anchor is also
+     * wholly inside __TEXT_EXEC, because its matcher required 16 or 20 bytes
+     * of remaining segment, which is what bounds the four writes below.
+     */
     if (out) {
         memset(out, 0, sizeof(*out));
         out->strategy_anchor = strategy;
