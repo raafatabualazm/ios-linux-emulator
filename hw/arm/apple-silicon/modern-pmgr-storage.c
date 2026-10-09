@@ -112,6 +112,71 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
     return true;
 }
 
+#define ARRAY_ENTRIES(a) (sizeof(a) / sizeof((a)[0]))
+#define FIXED_TAG_BASE 0x100
+
+/*
+ * Windows whose registers are named by BootKC constants rather than by an ADT
+ * table. Each row is a RegMap reg_index (index into /arm-io/pmgr reg), an offset
+ * in that window and a byte size; every 4-byte slot is a listed register.
+ *  0: NUB_FR_GLOBAL_AP_CONTROLS (reg 4, RegMap selector 66, 0x308004000) +0x8..+0x24:
+ *     the AP wake-source mask. AppleT8140PMGR's routine at 0xfffffff009848954
+ *     (vtable slot 0x9c8; ApplePMGR's vtable+0x980 routine at 0xfffffff0092a5854
+ *     tail-calls it with this+0x6b1c4) checks the requested 8 words against the
+ *     supported ones, then writes supported & ~requested to offsets 0x4008 ..
+ *     0x4024 (minus 0x4000) through 0xfffffff009848b10. Writes only; no read-back
+ *     and no poll. The status words at +0x28..+0x44, read by 0xfffffff009848bb4,
+ *     are not listed: nothing on the start path was seen to read them.
+ */
+typedef struct FixedWindow {
+    unsigned reg_index;
+    uint32_t offset, size;
+} FixedWindow;
+static const FixedWindow fixed_windows[] = {
+    {4, 0x8, 0x20},
+};
+
+/* Append one window after the geometry checks; *plan is unchanged on failure. */
+static bool place(AppleModernPMGRStoragePlan *plan, uint64_t address, uint32_t size,
+                  uint32_t tag, const uint64_t *valid, uint64_t dram_base,
+                  uint64_t dram_size, const AppleModernAddressRange *exclusions,
+                  size_t exclusion_count, Error **errp)
+{
+    AppleModernPMGRStorageWindow *w;
+    if (plan->count == APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS) {
+        error_setg(errp, "too many PMGR storage windows");
+        return false;
+    }
+    if (!size || size > APPLE_MODERN_PMGR_STORAGE_MAX_SPAN || address > UINT64_MAX - size ||
+        overlaps(address, size, dram_base, dram_size)) {
+        error_setg(errp, "PMGR storage window %u is empty, too large, wraps or overlaps DRAM",
+                   tag);
+        return false;
+    }
+    for (size_t k = 0; k < exclusion_count; k++) {
+        if (overlaps(address, size, exclusions[k].physical_address, exclusions[k].size)) {
+            error_setg(errp, "PMGR storage window %u overlaps another device", tag);
+            return false;
+        }
+    }
+    for (unsigned k = 0; k < plan->count; k++) {
+        if (overlaps(address, size, plan->windows[k].address, plan->windows[k].size)) {
+            error_setg(errp, "PMGR storage windows %u and %u overlap",
+                       plan->windows[k].group, tag);
+            return false;
+        }
+    }
+    w = &plan->windows[plan->count++];
+    w->address = address;
+    w->size = size;
+    w->group = tag;
+    memcpy(w->valid, valid, sizeof(w->valid));
+    for (unsigned k = 0; k < APPLE_MODERN_PMGR_STORAGE_MASKS; k++) {
+        plan->registers += __builtin_popcountll(w->valid[k]);
+    }
+    return true;
+}
+
 bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
     uint64_t dram_base, uint64_t dram_size,
     const AppleModernAddressRange *exclusions, size_t exclusion_count,
@@ -206,14 +271,9 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
         }
     }
     for (unsigned i = 0; i < group_count; i++) {
-        AppleModernPMGRStorageWindow *w;
         uint64_t base;
         if (!(groups[i].flags & GROUP_PROGRAMMED)) {
             continue;
-        }
-        if (plan.count == APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS) {
-            error_setg(errp, "too many programmed PMGR perf groups");
-            return false;
         }
         if (!translate(ranges, le64(reg.data + 16 * groups[i].reg_index),
                        le64(reg.data + 16 * groups[i].reg_index + 8), &base) ||
@@ -221,39 +281,34 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
             error_setg(errp, "PMGR perf group %u is outside the /arm-io bus ranges", i);
             return false;
         }
-        w = &plan.windows[plan.count];
-        w->address = base + groups[i].base;
-        w->size = groups[i].end;
-        w->group = i;
-        memcpy(w->valid, groups[i].valid, sizeof(w->valid));
-        if (w->address > UINT64_MAX - w->size ||
-            overlaps(w->address, w->size, dram_base, dram_size)) {
-            error_setg(errp, "PMGR perf window %u wraps or overlaps DRAM", i);
+        if (!place(&plan, base + groups[i].base, groups[i].end, i, groups[i].valid,
+                   dram_base, dram_size, exclusions, exclusion_count, errp)) {
             return false;
         }
-        for (size_t k = 0; k < exclusion_count; k++) {
-            if (overlaps(w->address, w->size, exclusions[k].physical_address,
-                         exclusions[k].size)) {
-                error_setg(errp, "PMGR perf window %u overlaps another device", i);
-                return false;
-            }
-        }
-        for (unsigned k = 0; k < plan.count; k++) {
-            if (overlaps(w->address, w->size, plan.windows[k].address,
-                         plan.windows[k].size)) {
-                error_setg(errp, "PMGR perf windows %u and %u overlap",
-                           plan.windows[k].group, i);
-                return false;
-            }
-        }
-        for (unsigned k = 0; k < APPLE_MODERN_PMGR_STORAGE_MASKS; k++) {
-            plan.registers += __builtin_popcountll(w->valid[k]);
-        }
-        plan.count++;
     }
-    if (!plan.count) {
-        error_setg(errp, "PMGR perf-groups has no programmed group");
-        return false;
+    for (unsigned i = 0; i < ARRAY_ENTRIES(fixed_windows); i++) {
+        const FixedWindow *f = &fixed_windows[i];
+        uint64_t valid[APPLE_MODERN_PMGR_STORAGE_MASKS] = {0};
+        uint64_t base, reg_size;
+        if (f->reg_index >= reg.size / 16) {
+            error_setg(errp, "PMGR fixed window %u names a missing reg window", i);
+            return false;
+        }
+        reg_size = le64(reg.data + 16 * f->reg_index + 8);
+        if (f->offset > reg_size || reg_size - f->offset < f->size ||
+            !translate(ranges, le64(reg.data + 16 * f->reg_index), reg_size, &base) ||
+            base > UINT64_MAX - f->offset) {
+            error_setg(errp, "PMGR fixed window %u is outside its reg window or the "
+                       "/arm-io bus ranges", i);
+            return false;
+        }
+        for (unsigned slot = 0; slot < f->size / 4; slot++) {
+            valid[slot / 64] |= UINT64_C(1) << (slot % 64);
+        }
+        if (!place(&plan, base + f->offset, f->size, FIXED_TAG_BASE + i, valid,
+                   dram_base, dram_size, exclusions, exclusion_count, errp)) {
+            return false;
+        }
     }
     *output = plan;
     return true;

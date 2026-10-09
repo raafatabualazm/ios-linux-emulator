@@ -52,6 +52,10 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
  * read from the perf-groups property on 2026-10-09). */
 #define G6_BASE UINT64_C(0x30827b800)
 #define G7_BASE UINT64_C(0x3082b4000)
+/* NUB_FR_GLOBAL_AP_CONTROLS (reg_index 4, 0x308004000) +0x8, eight 32-bit words. */
+#define WAKE_BASE UINT64_C(0x308004008)
+#define WAKE_SIZE 0x20
+#define WAKE_TAG 0x100
 #define G6_COUNTERS 6
 #define G7_COUNTERS 69
 #define G6_END (0x100 + 0x20 * (G6_COUNTERS - 1) + 4)
@@ -60,6 +64,9 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
 static bool expected_valid(unsigned group, uint64_t offset)
 {
     unsigned n = group == 6 ? G6_COUNTERS : G7_COUNTERS;
+    if (group == WAKE_TAG) {
+        return offset < WAKE_SIZE;
+    }
     if (offset == 0) {
         return true;
     }
@@ -77,12 +84,14 @@ static void plan_exact(AppleModernBlob tree)
     Error *error = NULL;
     unsigned counted = 0;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &plan, &error));
-    CHECK(plan.count == 2 && plan.registers == 7 + 70);
+    CHECK(plan.count == 3 && plan.registers == 7 + 70 + 8);
     CHECK(plan.windows[0].group == 6 && plan.windows[0].address == G6_BASE &&
           plan.windows[0].size == G6_END);
     CHECK(plan.windows[1].group == 7 && plan.windows[1].address == G7_BASE &&
           plan.windows[1].size == G7_END + 0);
-    for (unsigned w = 0; w < 2; w++) {
+    CHECK(plan.windows[2].group == WAKE_TAG && plan.windows[2].address == WAKE_BASE &&
+          plan.windows[2].size == WAKE_SIZE);
+    for (unsigned w = 0; w < plan.count; w++) {
         const AppleModernPMGRStorageWindow *win = &plan.windows[w];
         CHECK(win->size % 4 == 0 && win->size <= APPLE_MODERN_PMGR_STORAGE_MAX_SPAN);
         for (uint64_t slot = 0; slot < APPLE_MODERN_PMGR_STORAGE_SLOTS; slot++) {
@@ -92,9 +101,13 @@ static void plan_exact(AppleModernBlob tree)
         }
     }
     CHECK(counted == plan.registers);
-    /* The two windows are disjoint and clear of every DRAM byte. */
-    CHECK(plan.windows[0].address + plan.windows[0].size <= plan.windows[1].address ||
-          plan.windows[1].address + plan.windows[1].size <= plan.windows[0].address);
+    /* The windows are pairwise disjoint (the planner also checks DRAM and exclusions). */
+    for (unsigned a = 0; a < plan.count; a++) {
+        for (unsigned b = a + 1; b < plan.count; b++) {
+            CHECK(plan.windows[a].address + plan.windows[a].size <= plan.windows[b].address ||
+                  plan.windows[b].address + plan.windows[b].size <= plan.windows[a].address);
+        }
+    }
 }
 
 static void plan_exclusions(AppleModernBlob tree)
@@ -167,16 +180,17 @@ static void plan_tamper(AppleModernBlob tree)
     /* Only group 7 programmed: one window, 70 registers. */
     g6[8] = 0;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    CHECK(junk.count == 1 && junk.registers == 70 && junk.windows[0].group == 7);
-    /* Neither programmed: nothing to model. */
+    CHECK(junk.count == 2 && junk.registers == 70 + 8 && junk.windows[0].group == 7 &&
+          junk.windows[1].group == WAKE_TAG);
+    /* Neither programmed: only the fixed wake-mask window remains. */
     g7[8] = 0;
-    CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    clear_error(&error);
+    CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
+    CHECK(junk.count == 1 && junk.registers == 8 && junk.windows[0].group == WAKE_TAG);
     g6[8] = 2; g7[8] = 2;
     /* Flag bit 0 alone (as groups 0-5 have) does not select a group. */
     g7[8] = 1;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    CHECK(junk.count == 1 && junk.windows[0].group == 6);
+    CHECK(junk.count == 2 && junk.windows[0].group == 6 && junk.windows[1].group == WAKE_TAG);
     g7[8] = 2;
 
     /* A type 3 counter is skipped: its register disappears. */
@@ -252,7 +266,15 @@ static void plan_tamper(AppleModernBlob tree)
     CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
     clear_error(&error);
     memcpy(reg, saved, 32);
-    CHECK(reg_size >= 32);
+    CHECK(reg_size >= 5 * 16);
+    /* The wake-mask window needs +0x8..+0x28 inside reg[4]. */
+    memcpy(saved, reg + 4 * 16, 16);
+    reg[4 * 16 + 8] = 0x28; reg[4 * 16 + 9] = 0;      /* size 0x28 just fits */
+    CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
+    reg[4 * 16 + 8] = 0x27;                             /* one byte short */
+    CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
+    clear_error(&error);
+    memcpy(reg + 4 * 16, saved, 16);
     free(copy);
 
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
@@ -297,6 +319,20 @@ static void core_stock(AppleModernBlob tree)
     CHECK(apple_modern_pmgr_storage_core_read(&core, 1, 0x140, 4, &v) && v == 0);
     CHECK(apple_modern_pmgr_storage_core_read(&core, 0, 0x100, 4, &v) && v == 0);
     CHECK(apple_modern_pmgr_storage_core_read(&core, 1, 0, 4, &v) && v == 0);
+    /* The wake-source mask: eight adjacent words, so 4- and 8-byte accesses both work. */
+    for (unsigned word = 0; word < 8; word++) {
+        CHECK(apple_modern_pmgr_storage_core_write(&core, 2, 4 * word, 4, 0x11111111u * (word + 1)));
+    }
+    for (unsigned word = 0; word < 8; word++) {
+        CHECK(apple_modern_pmgr_storage_core_read(&core, 2, 4 * word, 4, &v) &&
+              v == 0x11111111u * (word + 1));
+    }
+    CHECK(apple_modern_pmgr_storage_core_read(&core, 2, 8, 8, &v) && v == 0x4444444433333333ULL);
+    CHECK(apple_modern_pmgr_storage_core_write(&core, 2, 0x18, 8, 0xa5a5a5a55a5a5a5aULL));
+    CHECK(apple_modern_pmgr_storage_core_read(&core, 2, 0x1c, 4, &v) && v == 0xa5a5a5a5u);
+    CHECK(!apple_modern_pmgr_storage_core_read(&core, 2, WAKE_SIZE, 4, &v));   /* the status words */
+    CHECK(!apple_modern_pmgr_storage_core_read(&core, 2, 0x1c, 8, &v));        /* straddles the end */
+    CHECK(apple_modern_pmgr_storage_core_read(&core, 1, 0x100, 4, &v) && v == 0xdeadbeef);
     /* Holes between listed registers, past the end, 8-byte accesses over a hole,
      * unaligned, odd sizes and bad windows are refused. */
     before = core;
@@ -310,8 +346,8 @@ static void core_stock(AppleModernBlob tree)
     CHECK(!apple_modern_pmgr_storage_core_read(&core, 1, plan.windows[1].size, 4, &v));
     CHECK(!apple_modern_pmgr_storage_core_read(&core, 1, APPLE_MODERN_PMGR_STORAGE_MAX_SPAN, 4, &v));
     CHECK(!apple_modern_pmgr_storage_core_write(&core, 0, plan.windows[0].size, 4, 1));
-    CHECK(!apple_modern_pmgr_storage_core_read(&core, 2, 0, 4, &v));
-    CHECK(!apple_modern_pmgr_storage_core_write(&core, 2, 0, 4, 1));
+    CHECK(!apple_modern_pmgr_storage_core_read(&core, plan.count, 0, 4, &v));
+    CHECK(!apple_modern_pmgr_storage_core_write(&core, plan.count, 0, 4, 1));
     CHECK(!apple_modern_pmgr_storage_core_read(&core, APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS, 0, 4, &v));
     for (unsigned size = 0; size <= 16; size++) {
         if (size == 4 || size == 8) {
@@ -326,7 +362,7 @@ static void core_stock(AppleModernBlob tree)
     CHECK(!apple_modern_pmgr_storage_core_read(&core, 1, 0x100, 4, &core.reads));
     CHECK(v == 0x77 && !memcmp(&core, &before, sizeof(core)));
     CHECK(!apple_modern_pmgr_storage_core_touched(NULL, 1, 0x100) &&
-          !apple_modern_pmgr_storage_core_touched(&core, 2, 0x100) &&
+          !apple_modern_pmgr_storage_core_touched(&core, plan.count, 0x100) &&
           !apple_modern_pmgr_storage_core_touched(&core, 1, 0x104) &&
           !apple_modern_pmgr_storage_core_touched(&core, 1, 1ULL << 40));
     /* Counters saturate and a reset restores everything but the plan. */

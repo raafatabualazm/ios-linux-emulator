@@ -34,7 +34,18 @@
  * PMGRCLKGEN_AON_TOP, base 0x7b800, 7 registers) and 7 (reg 1 = PMGR_AON, base
  * 0x34000, 70 registers).
  *
- * The plan lists exactly those registers (one window per programmed group); a
+ * Fixed window "ap-wake-mask" (BootKC constants, no ADT table names it):
+ * NUB_FR_GLOBAL_AP_CONTROLS (reg 4, RegMap selector 66, 0x308004000) +0x8..+0x24.
+ * After the loops above, ApplePMGR's vtable+0x980 routine tail-calls
+ * AppleT8140PMGR's vtable slot 0x9c8 (0xfffffff009848954) with the eight wake
+ * source words it built from the ADT ap-wake-sources; that routine REQUIREs them to
+ * be a subset of the supported words (static array at 0xfffffff0077b1f98: seven
+ * 0xffffffff words and 0x1fffff) and writes supported & ~requested to eight
+ * consecutive 32-bit registers (writer 0xfffffff009848b10). Writes only, never
+ * read back or polled on this path.
+ *
+ * The plan lists exactly those registers (one window per programmed group, plus the
+ * wake-mask window); a
  * 4- or 8-byte access that touches any other slot is rejected, so the next
  * unmodelled register shows up as the next frontier. The machine announces the
  * first access to each register so a run shows which ones the guest touched.
@@ -47,7 +58,7 @@
 typedef struct AppleModernPMGRStorageWindow {
     uint64_t address;
     uint32_t size;      /* multiple of 4, at most APPLE_MODERN_PMGR_STORAGE_MAX_SPAN */
-    uint32_t group;     /* ADT perf-groups index the window came from */
+    uint32_t group;     /* ADT perf-groups index, or 0x100 + n for fixed window n */
     uint64_t valid[APPLE_MODERN_PMGR_STORAGE_MASKS]; /* bit per 4-byte register */
 } AppleModernPMGRStorageWindow;
 
