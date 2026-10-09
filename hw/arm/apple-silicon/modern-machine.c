@@ -27,6 +27,7 @@
 #include "hw/arm/apple-silicon/modern-mcc-socni.h"
 #include "hw/arm/apple-silicon/modern-mcc-socni-command.h"
 #include "hw/arm/apple-silicon/modern-mcc-dcs-perf.h"
+#include "hw/arm/apple-silicon/modern-pmgr-voltage.h"
 #include "hw/arm/apple-silicon/modern-mcc-dsid.h"
 #include "hw/arm/apple-silicon/modern-mcc-slc.h"
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
@@ -96,6 +97,8 @@ struct AppleModernMachine {
     bool modern_mcc_slc;
     AppleModernMCCSLCPlan mcc_slc_plan;
     char *pmgr_aon_fuse_image;
+    /* Declared profile for the iBoot-computed /arm-io/pmgr voltage-states*. */
+    char *pmgr_voltage_states;
     AppleModernPMGRFusePlan pmgr_fuse_plan;
     AppleDARTT8110State *sep_mapper;
     AddressSpace *sep_dma_as;
@@ -1650,6 +1653,19 @@ static void modern_init(MachineState *machine)
         exit(EXIT_FAILURE);
     }
     metadata_input.aic_iack_offset = s->aic_iack_offset;
+    if (s->pmgr_voltage_states) {
+        metadata_input.overrides = apple_modern_pmgr_voltage_profile(
+            s->pmgr_voltage_states, &metadata_input.override_count);
+        if (!metadata_input.overrides) {
+            error_report("apple-modern: unknown pmgr-voltage-states profile "
+                         "'%s' (supported: %s)", s->pmgr_voltage_states,
+                         APPLE_MODERN_PMGR_VOLTAGE_J700);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: pmgr voltage-states from the measured "
+                    "'%s' profile (MacBook Neo A18 Pro; analogy for "
+                    "iPhone17,3, not an attested value)", s->pmgr_voltage_states);
+    }
     if (!apple_modern_boot_metadata_build(&metadata_input, &s->metadata, &error) ||
         !uart_address(s->components.dtree, &uart, &uart_span, &s->uart_irq,
                       &error)) {
@@ -1822,6 +1838,20 @@ static void set_boot_command_line(Object *obj, const char *value, Error **errp)
 static char *get_pmgr_aon_fuse_image(Object *obj, Error **errp)
 {
     return g_strdup(APPLE_MODERN_MACHINE(obj)->pmgr_aon_fuse_image);
+}
+
+static char *get_pmgr_voltage_states(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->pmgr_voltage_states);
+}
+
+static void set_pmgr_voltage_states(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->pmgr_voltage_states);
+        s->pmgr_voltage_states = g_strdup(value);
+    }
 }
 
 static void set_pmgr_aon_fuse_image(Object *obj, const char *value, Error **errp)
@@ -2010,6 +2040,7 @@ static void modern_finalize(Object *obj)
     apple_modern_boot_metadata_clear(&s->metadata);
     g_free(s->boot_command_line);
     g_free(s->pmgr_aon_fuse_image);
+    g_free(s->pmgr_voltage_states);
     for (size_t i = 0; i < ASSET_COUNT; i++) {
         g_free(s->paths[i]);
         g_free((void *)s->blobs[i].data);
@@ -2030,6 +2061,9 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "dtree", get_dtree, set_dtree);
     object_class_property_add_str(oc, "tc", get_tc, set_tc);
     object_class_property_add_str(oc, "ramdisk", get_ramdisk, set_ramdisk);
+    object_class_property_add_str(oc, "pmgr-voltage-states",
+                                  get_pmgr_voltage_states,
+                                  set_pmgr_voltage_states);
     object_class_property_add_str(oc, "pmgr-aon-fuse-image",
                                    get_pmgr_aon_fuse_image,
                                    set_pmgr_aon_fuse_image);

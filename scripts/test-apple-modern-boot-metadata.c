@@ -307,7 +307,11 @@ static void verify_framebuffer_metadata(
     put32(dt + 4, 3);
 }
 
+#ifdef METADATA_REGRESSION_MAIN
+int METADATA_REGRESSION_MAIN(int argc, char **argv)
+#else
 int main(int argc, char **argv)
+#endif
 {
     AppleModernBootInput components = metadata_fixture(), changed;
     AppleModernBootMetadataInput input = {.components = &components,

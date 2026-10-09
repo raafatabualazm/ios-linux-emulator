@@ -53,10 +53,15 @@ typedef struct Tree {
     const AppleModernBootLayout *layout;
     unsigned chosen_count, map_count, vram_count, aic_count;
     uint32_t aic_iack_offset;
+    const AppleModernAdtOverride *overrides;
+    size_t override_count;
+    unsigned override_hits[APPLE_MODERN_MAX_ADT_OVERRIDES];
     const char *probe_path, *probe_name;
     AppleModernBlob probe_value;
     unsigned probe_nodes, probe_properties;
 } Tree;
+
+#define ARRAY_SIZE_LOCAL(a) (sizeof(a) / sizeof((a)[0]))
 
 static uint32_t get32(const uint8_t *p)
 {
@@ -137,9 +142,24 @@ static bool property(Tree *tree, const char *name, const void *bytes,
            emit(tree, zero, (4 - (size & 3)) & 3, errp);
 }
 
+static size_t override_nodes_at(const Tree *tree, const char *path)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < tree->override_count; i++) {
+        n += !strcmp(path, tree->overrides[i].path);
+    }
+    return n;
+}
+
 static bool normal_property(const Tree *tree, const char *path,
                             const char *name)
 {
+    for (size_t i = 0; i < tree->override_count; i++) {
+        if (!strcmp(path, tree->overrides[i].path) &&
+            !strcmp(name, tree->overrides[i].name)) {
+            return true;
+        }
+    }
     if (tree->layout && tree->layout->framebuffer_size &&
         !strcmp(path, "/vram")) {
         return !strcmp(name, "reg");
@@ -162,6 +182,14 @@ static bool normal_property(const Tree *tree, const char *path,
 
 static bool emit_normal(Tree *tree, const char *path, Error **errp)
 {
+    /* Overrides never target the loader-owned nodes handled below. */
+    for (size_t i = 0; i < tree->override_count; i++) {
+        const AppleModernAdtOverride *o = &tree->overrides[i];
+        if (!strcmp(path, o->path) &&
+            !property(tree, o->name, o->value, o->size, errp)) {
+            return false;
+        }
+    }
     if (tree->layout->framebuffer_size && !strcmp(path, "/vram")) {
         uint8_t bytes[16];
         put64(bytes, tree->layout->framebuffer_physical);
@@ -272,6 +300,12 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
     if (tree->probe_path && !strcmp(path, tree->probe_path)) {
         tree->probe_nodes++;
     }
+    for (size_t i = 0; i < tree->override_count; i++) {
+        if (!strcmp(path, tree->overrides[i].path) &&
+            ++tree->override_hits[i] > 1) {
+            return fail(errp, "ambiguous ADT override path");
+        }
+    }
     if (tree->output) {
         uint8_t header[8];
         put32(header, count);
@@ -301,6 +335,7 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
     if (tree->output) {
         size_t added = chosen ? 2 : map ? tree->normal_count : vram ? 1 :
                        aic ? 1 : 0;
+        added += override_nodes_at(tree, path);
         if (count - replaced + added > 4096) {
             return fail(errp, "generated ADT node property count exceeds bound");
         }
@@ -428,6 +463,74 @@ void apple_modern_boot_metadata_clear(AppleModernBootMetadata *output)
     }
 }
 
+/* Alias checks only; they must run before the output is touched. */
+static bool overrides_alias_output(const AppleModernBootMetadataInput *input,
+                                   const AppleModernBootMetadata *output)
+{
+    size_t n = input->override_count;
+    if (!n || !input->overrides) {
+        return false;
+    }
+    if (n > APPLE_MODERN_MAX_ADT_OVERRIDES) {
+        n = APPLE_MODERN_MAX_ADT_OVERRIDES;
+    }
+    if (overlap(output, sizeof(*output), input->overrides,
+                n * sizeof(*input->overrides))) {
+        return true;
+    }
+    for (size_t i = 0; i < n; i++) {
+        const AppleModernAdtOverride *o = &input->overrides[i];
+        if ((o->path && overlap(output, sizeof(*output), o->path,
+                                bounded_length(o->path, 256) + 1)) ||
+            (o->name && overlap(output, sizeof(*output), o->name,
+                                bounded_length(o->name, 32) + 1)) ||
+            (o->value && overlap(output, sizeof(*output), o->value, o->size))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool valid_overrides(const AppleModernBootMetadataInput *input,
+                            Error **errp)
+{
+    static const char *const owned[] = {"/chosen", "/chosen/memory-map",
+                                        "/vram", "/arm-io/aic"};
+    if (!input->override_count) {
+        return true;
+    }
+    if (!input->overrides || input->override_count > APPLE_MODERN_MAX_ADT_OVERRIDES) {
+        return fail(errp, "ADT override list missing or too long");
+    }
+    for (size_t i = 0; i < input->override_count; i++) {
+        const AppleModernAdtOverride *o = &input->overrides[i];
+        size_t path_length, name_length;
+        if (!o->path || !o->name || (o->size && !o->value)) {
+            return fail(errp, "ADT override has a missing path, name or value");
+        }
+        path_length = bounded_length(o->path, 256);
+        name_length = bounded_length(o->name, 32);
+        if (path_length == 256 || path_length < 2 || o->path[0] != '/' ||
+            o->path[path_length - 1] == '/' || !name_length ||
+            name_length == 32 || !strcmp(o->name, "name") ||
+            !o->size || o->size > APPLE_MODERN_MAX_ADT_OVERRIDE_BYTES) {
+            return fail(errp, "ADT override path, name or size is invalid");
+        }
+        for (size_t j = 0; j < ARRAY_SIZE_LOCAL(owned); j++) {
+            if (!strcmp(o->path, owned[j])) {
+                return fail(errp, "ADT override targets a loader-owned node");
+            }
+        }
+        for (size_t j = 0; j < i; j++) {
+            if (!strcmp(o->path, input->overrides[j].path) &&
+                !strcmp(o->name, input->overrides[j].name)) {
+                return fail(errp, "duplicate ADT override");
+            }
+        }
+    }
+    return true;
+}
+
 bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
                                      AppleModernBootMetadata *output,
                                      Error **errp)
@@ -462,11 +565,17 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
             }
         }
     }
+    if (input && overrides_alias_output(input, output)) {
+        return fail(errp, "metadata output aliases ADT override data");
+    }
     memset(output, 0, sizeof(*output));
     if (!input || !input->components) {
         return fail(errp, "missing metadata components");
     }
     components = input->components;
+    if (!valid_overrides(input, errp)) {
+        return false;
+    }
     if (input->command_line_length >= APPLE_MODERN_COMMAND_LINE_SIZE ||
         (!input->command_line && input->command_line_length) ||
         (input->command_line_length &&
@@ -540,6 +649,8 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     tree.output = prepared.dtree;
     tree.capacity = capacity;
     tree.aic_iack_offset = input->aic_iack_offset;
+    tree.overrides = input->overrides;
+    tree.override_count = input->override_count;
     prepare_normal(&tree, &prepared.layout);
     if (!walk(&tree, "", 0, errp) || tree.cursor != components->dtree.size ||
         tree.chosen_count != 1 || tree.map_count != 1 ||
@@ -548,6 +659,12 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
             fail(errp, "ADT chosen path missing or serialization incomplete");
         }
         goto failed;
+    }
+    for (size_t i = 0; i < tree.override_count; i++) {
+        if (tree.override_hits[i] != 1) {
+            fail(errp, "ADT override node does not exist");
+            goto failed;
+        }
     }
     prepared.dtree_size = tree.used;
     prepared.layout.dtree_node_count = tree.nodes;

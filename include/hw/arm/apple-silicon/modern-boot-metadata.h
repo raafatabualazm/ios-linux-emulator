@@ -10,6 +10,22 @@ typedef struct AppleModernBootVideo {
     uint64_t base_address, display, row_bytes, width, height, depth;
 } AppleModernBootVideo;
 
+#define APPLE_MODERN_MAX_ADT_OVERRIDES 64
+#define APPLE_MODERN_MAX_ADT_OVERRIDE_BYTES 4096
+
+/*
+ * One property to set on an existing node: replace it when the node already
+ * carries it, otherwise append it. Used for values iBoot normally computes
+ * at hand-off (for example /arm-io/pmgr voltage-states*) when the board
+ * supplies them from a declared profile.
+ */
+typedef struct AppleModernAdtOverride {
+    const char *path;          /* canonical slash path, node must exist once */
+    const char *name;          /* 1..31 bytes, unique within the node */
+    const uint8_t *value;      /* size bytes */
+    uint32_t size;             /* 1..APPLE_MODERN_MAX_ADT_OVERRIDE_BYTES */
+} AppleModernAdtOverride;
+
 typedef struct AppleModernBootMetadataInput {
     const AppleModernBootInput *components;
     /* Length excludes NUL; bytes must have no embedded NUL. NULL/0 is empty. */
@@ -33,6 +49,14 @@ typedef struct AppleModernBootMetadataInput {
      * and a nonzero value requires /arm-io/aic to exist.
      */
     uint32_t aic_iack_offset;
+    /*
+     * Optional property overrides. Every node must exist exactly once and the
+     * (path, name) pairs must be unique. Nodes the loader already rewrites
+     * (/chosen, /chosen/memory-map, /vram, /arm-io/aic) are refused; the
+     * property named "name" is refused so a node can never be renamed.
+     */
+    const AppleModernAdtOverride *overrides;
+    size_t override_count;
 } AppleModernBootMetadataInput;
 
 typedef struct AppleModernBootMetadata {
