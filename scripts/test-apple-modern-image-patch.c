@@ -254,6 +254,62 @@ static void test_no_targeted_patch(void)
     free(shadow);
 }
 
+/* ---- Test 8b: a match count past the result-slot budget is refused BEFORE any
+   write.  Regression for the stack-buffer-overflow the independent verifier of
+   413e27c reproduced: pass 1 budgeted one result slot per PATCH while pass 2
+   writes one per MATCH, so an entry with expected_count > the array size walked
+   off result->entries[].  The refusal must leave the image byte-identical. ---- */
+static void test_entry_budget(void)
+{
+    static const uint8_t anchor[] = "MANY!";
+    static const uint8_t repl[] = "many?";
+    const size_t over = APPLE_MODERN_MAX_IMAGE_PATCHES + 6;
+    const AppleModernImagePatch patch = {
+        .name = "over", .image = APPLE_MODERN_BOOTKC, .anchor = anchor,
+        .anchor_len = sizeof(anchor) - 1, .replacement = repl,
+        .replacement_len = sizeof(repl) - 1, .replace_offset = 0,
+        .expected_count = over, .changes = "c", .removes = "r",
+    };
+    const AppleModernImagePatchSet set = { "local", &patch, 1 };
+    AppleModernImagePatchResult result = {0};
+    Error *error = NULL;
+    size_t size = 8192;
+    /* Plant exactly as many real matches as the entry claims, so the refusal can
+     * only come from the slot budget and not from a count mismatch. */
+    uint8_t *buf = make_buf(size, "MANY!", 64, (unsigned)over);
+    uint8_t *shadow = malloc(size);
+
+    CHECK(shadow != NULL);
+    memcpy(shadow, buf, size);
+    CHECK(!apple_modern_image_patch_apply_image(&set, APPLE_MODERN_BOOTKC, buf,
+                                                size, &result, &error));
+    CHECK(error != NULL && strstr(error->message, "over") &&
+          strstr(error->message, "result slots left"));
+    clear_error(&error);
+    CHECK(result.count == 0);
+    /* The decisive assertion: nothing was written. */
+    CHECK(!memcmp(buf, shadow, size));
+    /* Exactly the array size still fits. */
+    result = (AppleModernImagePatchResult){0};
+    const AppleModernImagePatch fits = {
+        .name = "fits", .image = APPLE_MODERN_BOOTKC, .anchor = anchor,
+        .anchor_len = sizeof(anchor) - 1, .replacement = repl,
+        .replacement_len = sizeof(repl) - 1, .replace_offset = 0,
+        .expected_count = APPLE_MODERN_MAX_IMAGE_PATCHES,
+        .changes = "c", .removes = "r",
+    };
+    const AppleModernImagePatchSet ok_set = { "local", &fits, 1 };
+    uint8_t *exact = make_buf(size, "MANY!", 64,
+                              (unsigned)APPLE_MODERN_MAX_IMAGE_PATCHES);
+    CHECK(apple_modern_image_patch_apply_image(&ok_set, APPLE_MODERN_BOOTKC,
+                                               exact, size, &result, &error));
+    CHECK(error == NULL &&
+          result.count == APPLE_MODERN_MAX_IMAGE_PATCHES);
+    free(buf);
+    free(shadow);
+    free(exact);
+}
+
 /* ---- Test 8: expected_count > 1 applies to every match. ---- */
 static void test_multi_expected(void)
 {
@@ -299,6 +355,7 @@ int main(void)
     test_set_lookup();
     test_no_targeted_patch();
     test_multi_expected();
+    test_entry_budget();
     printf("PASS %u image-patch checks; no guest writes or execution\n", checks);
     return 0;
 }

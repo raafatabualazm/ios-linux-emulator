@@ -222,6 +222,9 @@ bool apple_modern_image_patch_apply_image(const AppleModernImagePatchSet *set,
     uint64_t matches[APPLE_MODERN_MAX_IMAGE_PATCHES];
     const AppleModernImagePatch *targeted[APPLE_MODERN_MAX_IMAGE_PATCHES];
     size_t n = 0;
+    /* Result slots already used by earlier images, plus those this image will
+     * need; pass 2 writes one entry per MATCH (see the budget check below). */
+    size_t entries = result->count;
 
     if (!set || !buf || !result) {
         error_setg(errp, "image-patch: null argument");
@@ -268,6 +271,22 @@ bool apple_modern_image_patch_apply_image(const AppleModernImagePatchSet *set,
             }
             return false;
         }
+        /*
+         * Budget the RESULT ENTRIES, which pass 2 writes one per MATCH, not one
+         * per patch: a single entry with expected_count > 1 consumes that many
+         * slots of result->entries[]. Checking it here keeps the two-pass
+         * contract - every refusal happens before any byte of the image is
+         * written - and it is the bound that the per-patch check below cannot
+         * express. (Found by the independent verifier of 413e27c, which
+         * reproduced a stack-buffer-overflow with a 70-match entry.)
+         */
+        if (p->expected_count > APPLE_MODERN_MAX_IMAGE_PATCHES - entries) {
+            error_setg(errp, "image-patch '%s': %zu matches exceed the %d "
+                       "result slots left", p->name, p->expected_count,
+                       (int)(APPLE_MODERN_MAX_IMAGE_PATCHES - entries));
+            return false;
+        }
+        entries += p->expected_count;
         targeted[n] = p;
         matches[n] = first;
         n++;

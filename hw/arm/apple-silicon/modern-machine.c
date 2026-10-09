@@ -1756,8 +1756,12 @@ static bool map_sep(AppleModernMachine *s, Error **errp)
 /*
  * Apply the selected declared image-patch set to the board's PRIVATE in-memory
  * image copies. Never touches a file: it snapshots each source file's stat
- * before patching and re-stats afterwards, failing if any changed (a sealed
- * proof that the facility cannot write back to a distribution image). The
+ * before patching and re-stats afterwards, failing if any changed.  That is a
+ * cheap TRIPWIRE on size and timestamps, not a cryptographic seal: a same-size,
+ * timestamp-preserving overwrite would pass it.  The real guarantee is
+ * structural - the facility only ever writes the board's private in-memory copy
+ * and never opens a distribution file for writing - and the whole-machine gate's
+ * SHA-256 before/after comparison is the authoritative check.  The
  * applied list is recorded in s->image_patch_result and each patch is
  * announced. Returns false on any refusal, leaving the buffers untouched.
  */
