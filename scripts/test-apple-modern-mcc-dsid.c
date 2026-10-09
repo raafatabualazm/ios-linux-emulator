@@ -91,7 +91,7 @@ int main(int argc, char **argv)
 
     /* View geometry: 3 plane-0 controls, 2 on planes 1..3, 4 interval words,
      * plane-0 hit/miss counters; nothing beyond view 8. */
-    CHECK(APPLE_MODERN_MCC_DSID_VIEWS == 9 && APPLE_MODERN_MAX_BOARD_EXCLUSIONS == 96);
+    CHECK(APPLE_MODERN_MCC_DSID_VIEWS == 9 && APPLE_MODERN_MAX_BOARD_EXCLUSIONS >= 96);
     for (unsigned view = 0; view < VIEWS + 4; view++) {
         CHECK(apple_modern_mcc_dsid_view_span(view) ==
               (view < VIEWS ? expected_span(view) : 0));

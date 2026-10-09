@@ -13,8 +13,11 @@
  * What is attested is which registers the driver touches and how:
  *
  * Provider "perf-groups" (the only provider so far). The /arm-io/pmgr ADT node
- * carries two tables the driver copies verbatim (observed in guest memory at
- * this+0x6108 and this+0x6528, equal byte for byte to the ADT properties):
+ * carries two tables the driver copies (observed in guest memory at this+0x6108
+ * and this+0x6528). perf-counters is equal byte for byte to the ADT property.
+ * perf-groups differs in word 0 only: the ADT holds the /arm-io/pmgr reg index
+ * (2, 0x2b, 3 for groups 0, 5, 6) while the driver copy holds the RegMap
+ * selector (0x5b, 0x81, 0x5d); the ADT form is what this model parses:
  *   perf-groups   36-byte records: u32 reg_index (into /arm-io/pmgr reg),
  *                 u32 base offset, u32 flags, u32 0x10, u32 3, u32 4, 3 x 0.
  *   perf-counters 64-byte records: u8 type, u8 flags, u16 id, u8 group,
