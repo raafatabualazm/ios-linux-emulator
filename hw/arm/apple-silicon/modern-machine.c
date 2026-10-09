@@ -52,6 +52,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(AppleModernMachine, APPLE_MODERN_MACHINE)
 
 enum ModernAsset {
     ASSET_BOOTKC, ASSET_SPTM, ASSET_TXM, ASSET_DTREE, ASSET_TC, ASSET_RAMDISK,
+    /*
+     * Optional: a second Apple trust-cache module, published behind the same
+     * catalog offsets header as `tc`. See the cryptex-trustcache property.
+     */
+    ASSET_CRYPTEX_TC,
     ASSET_COUNT,
 };
 
@@ -1798,6 +1803,9 @@ static void modern_init(MachineState *machine)
         if (i == ASSET_RAMDISK && (!s->paths[i] || s->large_ramdisk)) {
             continue;
         }
+        if (i == ASSET_CRYPTEX_TC && !s->paths[i]) {
+            continue; /* Default: a single-module trust-cache catalog. */
+        }
         if (!s->paths[i] || !read_asset(s->paths[i], &s->blobs[i],
                                        asset_budget, &error)) {
             if (!error) {
@@ -1813,6 +1821,7 @@ static void modern_init(MachineState *machine)
         .bootkc = s->blobs[ASSET_BOOTKC], .sptm = s->blobs[ASSET_SPTM],
         .txm = s->blobs[ASSET_TXM], .dtree = s->blobs[ASSET_DTREE],
         .trustcache = s->blobs[ASSET_TC], .ramdisk = s->blobs[ASSET_RAMDISK],
+        .cryptex_trustcache = s->blobs[ASSET_CRYPTEX_TC],
         .large_ramdisk = s->large_ramdisk,
         .dram_base = UINT64_C(1) << 40, .dram_size = machine->ram_size,
         .framebuffer_width = s->boot_display ? s->display_width : 0,
@@ -2225,6 +2234,7 @@ ASSET_PROPERTY(txm, ASSET_TXM)
 ASSET_PROPERTY(dtree, ASSET_DTREE)
 ASSET_PROPERTY(tc, ASSET_TC)
 ASSET_PROPERTY(ramdisk, ASSET_RAMDISK)
+ASSET_PROPERTY(cryptex_trustcache, ASSET_CRYPTEX_TC)
 #undef ASSET_PROPERTY
 
 #define BOOL_PROPERTY(name, field) \
@@ -2424,6 +2434,17 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "txm", get_txm, set_txm);
     object_class_property_add_str(oc, "dtree", get_dtree, set_dtree);
     object_class_property_add_str(oc, "tc", get_tc, set_tc);
+    /*
+     * Opt-in, absent by default: a second Apple trust-cache module. The only
+     * reason it exists is the OS cryptex -- on a device libignition grafts the
+     * cryptex and loads that cryptex's own trust cache before dyld looks for
+     * the shared cache, and a board that presents the cryptex's content
+     * without grafting it has no one to do that. Needs trustcache-v2=on for
+     * Apple's own version-2 modules.
+     */
+    object_class_property_add_str(oc, "cryptex-trustcache",
+                                  get_cryptex_trustcache,
+                                  set_cryptex_trustcache);
     object_class_property_add_str(oc, "ramdisk", get_ramdisk, set_ramdisk);
     object_class_property_add_bool(oc, "modern-pmp-ptd", get_modern_pmp_ptd,
                                    set_modern_pmp_ptd);

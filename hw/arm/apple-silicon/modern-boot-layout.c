@@ -394,6 +394,58 @@ static bool push_copy(AppleModernBootLayout *out, Image *image,
     return true;
 }
 
+/*
+ * Trust-cache module geometry only; no entry is read, compared, merged or
+ * rewritten. The 24-byte module header is uint32 version, uuid[16], uint32
+ * numEntries, followed by numEntries packed entries. A version-1 entry is
+ * 22 bytes and a version-2 entry is 24 bytes; both start with the 20-byte
+ * CDHash. Version 2 is accepted only when the caller opts in, so the default
+ * board keeps refusing it exactly as before.
+ *
+ * `cryptex` only selects the wording, so a bad second module is not reported
+ * as a bad first one.
+ */
+static bool valid_trustcache_module(const AppleModernBlob *tc, bool allow_v2,
+                                    bool cryptex, Error **errp)
+{
+    uint32_t version, entries, entry_size;
+
+    if (!tc->data || tc->size < 24 || tc->size > MAX_DT_SIZE) {
+        return fail(errp, cryptex ?
+                    "missing or malformed cryptex trustcache" :
+                    "missing or malformed version-1 trustcache");
+    }
+    version = le32(tc->data);
+    if (version == 1) {
+        entry_size = 22;
+    } else if (version == 2 && allow_v2) {
+        entry_size = 24;
+    } else if (version == 2) {
+        return fail(errp, "version-2 trustcache needs trustcache-v2=on");
+    } else if (allow_v2) {
+        return fail(errp, "trustcache module version is neither 1 nor 2");
+    } else {
+        return fail(errp, cryptex ?
+                    "missing or malformed cryptex trustcache" :
+                    "missing or malformed version-1 trustcache");
+    }
+    /* uint32 count widened to uint64 before scaling, so no 32-bit wrap can
+     * make a truncated or overlong module look exactly sized. */
+    entries = le32(tc->data + 20);
+    if (!entries ||
+        (uint64_t)entries * entry_size + 24 != tc->size) {
+        if (version == 1) {
+            return fail(errp, cryptex ?
+                        "missing or malformed cryptex trustcache" :
+                        "missing or malformed version-1 trustcache");
+        }
+        return fail(errp, cryptex ?
+                    "cryptex trustcache entry count does not match length" :
+                    "version-2 trustcache entry count does not match length");
+    }
+    return true;
+}
+
 static bool region(AppleModernBootLayout *out, const char *name,
                    uint64_t address, uint64_t size, Error **errp)
 {
@@ -441,7 +493,7 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
     Image images[3] = {0};
     DTree tree = { .blob = in->dtree };
     uint64_t tc_size, before, index, cursor, sptm_base, start;
-    uint32_t tc_version, tc_entries, tc_entry_size;
+    uint32_t tc_modules = 1;
     uint64_t framebuffer_size = 0;
     Image *bkc = &images[0], *sptm = &images[1], *txm = &images[2];
     /*
@@ -537,30 +589,16 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
      * 20-byte CDHash. Version 2 is accepted only when the caller opts in, so
      * the default board keeps refusing it exactly as before.
      */
-    if (!in->trustcache.data || in->trustcache.size < 24 ||
-        in->trustcache.size > MAX_DT_SIZE) {
-        return fail(errp, "missing or malformed version-1 trustcache");
+    if (!valid_trustcache_module(&in->trustcache, in->trustcache_v2, false,
+                                 errp)) {
+        return false;
     }
-    tc_version = le32(in->trustcache.data);
-    if (tc_version == 1) {
-        tc_entry_size = 22;
-    } else if (tc_version == 2 && in->trustcache_v2) {
-        tc_entry_size = 24;
-    } else if (tc_version == 2) {
-        return fail(errp, "version-2 trustcache needs trustcache-v2=on");
-    } else if (in->trustcache_v2) {
-        return fail(errp, "trustcache module version is neither 1 nor 2");
-    } else {
-        return fail(errp, "missing or malformed version-1 trustcache");
-    }
-    /* uint32 count widened to uint64 before scaling, so no 32-bit wrap can
-     * make a truncated or overlong module look exactly sized. */
-    tc_entries = le32(in->trustcache.data + 20);
-    if (!tc_entries || (uint64_t)tc_entries * tc_entry_size + 24 !=
-                       in->trustcache.size) {
-        return fail(errp, tc_version == 1 ?
-                    "missing or malformed version-1 trustcache" :
-                    "version-2 trustcache entry count does not match length");
+    if (in->cryptex_trustcache.data || in->cryptex_trustcache.size) {
+        if (!valid_trustcache_module(&in->cryptex_trustcache,
+                                     in->trustcache_v2, true, errp)) {
+            return false;
+        }
+        tc_modules = 2;
     }
     out->dram_base = in->dram_base;
     out->dram_size = in->dram_size;
@@ -570,7 +608,8 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
     strcpy(out->platform, "t8140");
     if (!round_page(in->dtree.size + APPLE_MODERN_DT_SLACK,
                     &out->dtree_capacity, errp) ||
-        !round_page(in->trustcache.size + 8, &tc_size, errp)) {
+        !round_page(in->trustcache.size + in->cryptex_trustcache.size +
+                    4 + 4 * tc_modules, &tc_size, errp)) {
         return false;
     }
     before = out->dtree_capacity + APPLE_MODERN_PAGE_SIZE + tc_size;
@@ -600,13 +639,35 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
         !region(out, "TrustCache", cursor, tc_size, errp)) {
         return false;
     }
-    out->trustcache_offsets_header[0] = 1;
-    out->trustcache_offsets_header[4] = 8;
+    /*
+     * uint32 module count, then one uint32 byte offset per module. The first
+     * module starts immediately after the header, which for a single module
+     * reproduces the long-standing count = 1, offset = 8 catalog exactly.
+     */
+    out->trustcache_header_size = 4 + 4 * tc_modules;
+    out->trustcache_module_count = tc_modules;
+    out->trustcache_offsets_header[0] = (uint8_t)tc_modules;
+    out->trustcache_offsets_header[4] = (uint8_t)out->trustcache_header_size;
     out->copies[out->copy_count++] = (AppleModernBootCopy){
         .image = APPLE_MODERN_TRUSTCACHE, .segment = "catalog",
-        .file_size = in->trustcache.size, .physical_address = cursor + 8,
+        .file_size = in->trustcache.size,
+        .physical_address = cursor + out->trustcache_header_size,
         .memory_size = in->trustcache.size,
     };
+    if (tc_modules == 2) {
+        uint32_t second = out->trustcache_header_size +
+                          (uint32_t)in->trustcache.size;
+        out->trustcache_offsets_header[8] = (uint8_t)(second & 0xff);
+        out->trustcache_offsets_header[9] = (uint8_t)((second >> 8) & 0xff);
+        out->trustcache_offsets_header[10] = (uint8_t)((second >> 16) & 0xff);
+        out->trustcache_offsets_header[11] = (uint8_t)(second >> 24);
+        out->copies[out->copy_count++] = (AppleModernBootCopy){
+            .image = APPLE_MODERN_TRUSTCACHE, .segment = "catalog-cryptex",
+            .file_size = in->cryptex_trustcache.size,
+            .physical_address = cursor + second,
+            .memory_size = in->cryptex_trustcache.size,
+        };
+    }
     cursor += tc_size;
     if (!group(out, bkc, APPLE_MODERN_BOOTKC, "BootKC-rx", bkc_names, 1, &cursor, errp) ||
         !group(out, bkc, APPLE_MODERN_BOOTKC, "BootKC-bx", bkc_names + 1, 1, &cursor, errp) ||
