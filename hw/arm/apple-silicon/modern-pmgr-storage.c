@@ -127,6 +127,26 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     0x4024 (minus 0x4000) through 0xfffffff009848b10. Writes only; no read-back
  *     and no poll. The status words at +0x28..+0x44, read by 0xfffffff009848bb4,
  *     are not listed: nothing on the start path was seen to read them.
+ *  1-3: PMS_PTS_PTD (reg 34, RegMap selector 8, 0x3003c0000) +0x18200, +0x18300 and
+ *     +0x18400: the PTD interrupt block ApplePMGR configures from _initPMPv2
+ *     (0xfffffff00928e304 -> loop at 0xfffffff00928ec40 -> vtable slot 0x950 =
+ *     0xfffffff0092bd6f0 -> gated action 0xfffffff0092bd800, opcode 3). Per PTD
+ *     entry it does, in this order, a read-modify-write of one vector-config
+ *     field (0xfffffff0092e29bc; offset 0x18400 + ((e / 8) * 4 + ((e / 4) & 1) *
+ *     0x200) for ptd-driver-version 1, field mask 0x1f at bit 8 * (e % 4); version 0
+ *     would use (e / 8) * 4 with 4-bit fields; the ADT carries version 1 on
+ *     /arm-io/pmp/iop-pmp-nub, and that the PTD object reads that node was not
+ *     verified, so the extent below covers both layouts) and a
+ *     write of 1 << (e % 32) to the enable-set bank at 0x18200 + 4 * (e / 32)
+ *     (0xfffffff0092e2aec); the matching enable-clear bank is 0x18300 + 4 * (e / 32)
+ *     (0xfffffff0092e2b6c). The extents here are the full banks for the 1024
+ *     entries of the PTD. ADT /arm-io/aon-ptd names the same bank layout for its own
+ *     instance (ptd-int-status-offset 0x0, -enable 0x100, -enable-set 0x200,
+ *     -enable-clr 0x300), which is the analogy for reading +0x200 / +0x300 as
+ *     write-one-to-set / write-one-to-clear enable banks; this model keeps plain
+ *     storage (no W1S/W1C effect, no status) because nothing on this path reads
+ *     either bank back. The status bank (+0x18000, read by opcode 5) and the
+ *     enable register (+0x18100) are deliberately NOT listed.
  */
 typedef struct FixedWindow {
     unsigned reg_index;
@@ -134,6 +154,9 @@ typedef struct FixedWindow {
 } FixedWindow;
 static const FixedWindow fixed_windows[] = {
     {4, 0x8, 0x20},
+    {34, 0x18200, 0x80},
+    {34, 0x18300, 0x80},
+    {34, 0x18400, 0x400},
 };
 
 /* Append one window after the geometry checks; *plan is unchanged on failure. */

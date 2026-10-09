@@ -44,6 +44,7 @@ ESR_SYNC_EXTERNAL_ABORT = 0x10     # DFSC
 G6 = 0x30827b800                   # PMGRCLKGEN_AON_TOP + 0x7b800
 G7 = 0x3082b4000                   # PMGR_AON + 0x34000
 WAKE = 0x308004008                 # NUB_FR_GLOBAL_AP_CONTROLS + 0x8
+PTD = 0x3003c0000                  # PMS_PTS_PTD: banks at +0x18200, +0x18300, config +0x18400
 DVFM_WINDOWS = (0x210e78000, 0x211e78000, 0x210e70000, 0x211e70000)
 DVFM_SPAN = 0x1000
 
@@ -53,6 +54,9 @@ def storage_registers():
     regs |= {G6 + 0x100 + 0x20 * k for k in range(6)}
     regs |= {G7 + 0x100 + 0x20 * k for k in range(69)}
     regs |= {WAKE + 4 * i for i in range(8)}
+    regs |= {PTD + 0x18200 + 4 * i for i in range(32)}
+    regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
+    regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
     return regs
 
 
@@ -145,6 +149,23 @@ PROGRAM = [
     ('r32', WAKE - 4, None),
     ('r64', 0x308004000, None),
     ('w32', WAKE + 0x20, 1),
+    ('r32', PTD + 0x18400, None),               # the step-4 frontier
+    ('w32', PTD + 0x18400, 0x1300),
+    ('r32', PTD + 0x18400, None),
+    ('w32', PTD + 0x18600, 0x00ff0000),
+    ('r64', PTD + 0x18600, None),               # two adjacent config words
+    ('r32', PTD + 0x187fc, None),               # last config word
+    ('r32', PTD + 0x18800, None),               # past the config array
+    ('w32', PTD + 0x18200, 0x20),               # enable-set bank
+    ('r32', PTD + 0x18200, None),
+    ('w32', PTD + 0x1827c, 0x80000000),
+    ('r32', PTD + 0x18280, None),               # past the set bank
+    ('w32', PTD + 0x18300, 0x20),               # enable-clear bank
+    ('r32', PTD + 0x18300, None),
+    ('r32', PTD + 0x183fc, None),               # between the clear bank and the config array
+    ('r32', PTD + 0x18100, None),               # the enable register: not listed
+    ('r32', PTD + 0x18000, None),               # the status bank: not listed
+    ('r64', PTD + 0x18000, None),
 ]
 
 

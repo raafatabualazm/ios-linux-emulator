@@ -56,6 +56,13 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
 #define WAKE_BASE UINT64_C(0x308004008)
 #define WAKE_SIZE 0x20
 #define WAKE_TAG 0x100
+/* PMS_PTS_PTD (reg_index 34, 0x3003c0000): interrupt enable-set / enable-clear banks
+ * and the vector-config array, windows 3..5 (tags 0x101..0x103). */
+#define PTD_BASE UINT64_C(0x3003c0000)
+#define FIXED_WINDOWS 4
+#define FIXED_REGISTERS (8 + 32 + 32 + 256)
+static const struct { uint64_t offset; uint32_t size; } PTD[3] = {
+    {0x18200, 0x80}, {0x18300, 0x80}, {0x18400, 0x400}};
 #define G6_COUNTERS 6
 #define G7_COUNTERS 69
 #define G6_END (0x100 + 0x20 * (G6_COUNTERS - 1) + 4)
@@ -66,6 +73,9 @@ static bool expected_valid(unsigned group, uint64_t offset)
     unsigned n = group == 6 ? G6_COUNTERS : G7_COUNTERS;
     if (group == WAKE_TAG) {
         return offset < WAKE_SIZE;
+    }
+    if (group > WAKE_TAG) {
+        return offset < PTD[group - WAKE_TAG - 1].size;
     }
     if (offset == 0) {
         return true;
@@ -84,13 +94,18 @@ static void plan_exact(AppleModernBlob tree)
     Error *error = NULL;
     unsigned counted = 0;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &plan, &error));
-    CHECK(plan.count == 3 && plan.registers == 7 + 70 + 8);
+    CHECK(plan.count == 2 + FIXED_WINDOWS && plan.registers == 7 + 70 + FIXED_REGISTERS);
     CHECK(plan.windows[0].group == 6 && plan.windows[0].address == G6_BASE &&
           plan.windows[0].size == G6_END);
     CHECK(plan.windows[1].group == 7 && plan.windows[1].address == G7_BASE &&
           plan.windows[1].size == G7_END + 0);
     CHECK(plan.windows[2].group == WAKE_TAG && plan.windows[2].address == WAKE_BASE &&
           plan.windows[2].size == WAKE_SIZE);
+    for (unsigned k = 0; k < 3; k++) {
+        CHECK(plan.windows[3 + k].group == WAKE_TAG + 1 + k &&
+              plan.windows[3 + k].address == PTD_BASE + PTD[k].offset &&
+              plan.windows[3 + k].size == PTD[k].size);
+    }
     for (unsigned w = 0; w < plan.count; w++) {
         const AppleModernPMGRStorageWindow *win = &plan.windows[w];
         CHECK(win->size % 4 == 0 && win->size <= APPLE_MODERN_PMGR_STORAGE_MAX_SPAN);
@@ -180,17 +195,19 @@ static void plan_tamper(AppleModernBlob tree)
     /* Only group 7 programmed: one window, 70 registers. */
     g6[8] = 0;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    CHECK(junk.count == 2 && junk.registers == 70 + 8 && junk.windows[0].group == 7 &&
-          junk.windows[1].group == WAKE_TAG);
+    CHECK(junk.count == 1 + FIXED_WINDOWS && junk.registers == 70 + FIXED_REGISTERS &&
+          junk.windows[0].group == 7 && junk.windows[1].group == WAKE_TAG);
     /* Neither programmed: only the fixed wake-mask window remains. */
     g7[8] = 0;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    CHECK(junk.count == 1 && junk.registers == 8 && junk.windows[0].group == WAKE_TAG);
+    CHECK(junk.count == FIXED_WINDOWS && junk.registers == FIXED_REGISTERS &&
+          junk.windows[0].group == WAKE_TAG);
     g6[8] = 2; g7[8] = 2;
     /* Flag bit 0 alone (as groups 0-5 have) does not select a group. */
     g7[8] = 1;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    CHECK(junk.count == 2 && junk.windows[0].group == 6 && junk.windows[1].group == WAKE_TAG);
+    CHECK(junk.count == 1 + FIXED_WINDOWS && junk.windows[0].group == 6 &&
+          junk.windows[1].group == WAKE_TAG);
     g7[8] = 2;
 
     /* A type 3 counter is skipped: its register disappears. */
@@ -275,6 +292,15 @@ static void plan_tamper(AppleModernBlob tree)
     CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
     clear_error(&error);
     memcpy(reg + 4 * 16, saved, 16);
+    /* The PTD windows need +0x18200..+0x18800 inside reg[34]. */
+    CHECK(reg_size >= 35 * 16);
+    memcpy(saved, reg + 34 * 16, 16);
+    reg[34 * 16 + 8] = 0x00; reg[34 * 16 + 9] = 0x88; reg[34 * 16 + 10] = 0x01;   /* 0x18800 */
+    CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
+    reg[34 * 16 + 9] = 0x87; reg[34 * 16 + 8] = 0xff;                              /* 0x187ff */
+    CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
+    clear_error(&error);
+    memcpy(reg + 34 * 16, saved, 16);
     free(copy);
 
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
@@ -333,6 +359,32 @@ static void core_stock(AppleModernBlob tree)
     CHECK(!apple_modern_pmgr_storage_core_read(&core, 2, WAKE_SIZE, 4, &v));   /* the status words */
     CHECK(!apple_modern_pmgr_storage_core_read(&core, 2, 0x1c, 8, &v));        /* straddles the end */
     CHECK(apple_modern_pmgr_storage_core_read(&core, 1, 0x100, 4, &v) && v == 0xdeadbeef);
+    /* The PTD interrupt block, as ApplePMGR's opcode 3 drives it for entry e = 5 with
+     * ptd-driver-version 1: read-modify-write of the 5-bit vector field of lane 1 of
+     * the word at 0x18400 + (e / 8) * 4 + ((e / 4) & 1) * 0x200, then write
+     * 1 << (e % 32) to the enable-set bank word e / 32. */
+    {
+        unsigned e = 5, lane = e % 4;
+        uint64_t config = (e / 8) * 4 + ((e / 4) & 1) * 0x200, bank = (e / 32) * 4;
+        CHECK(config == 0x200 && bank == 0);
+        CHECK(apple_modern_pmgr_storage_core_read(&core, 5, config, 4, &v) && v == 0);
+        CHECK(apple_modern_pmgr_storage_core_write(&core, 5, config, 4,
+              (v & ~(0x1fULL << (8 * lane))) | (0x13ULL << (8 * lane))));
+        CHECK(apple_modern_pmgr_storage_core_read(&core, 5, config, 4, &v) && v == 0x1300);
+        CHECK(apple_modern_pmgr_storage_core_write(&core, 3, bank, 4, 1u << (e % 32)));
+        CHECK(apple_modern_pmgr_storage_core_read(&core, 3, bank, 4, &v) && v == 0x20);
+        CHECK(apple_modern_pmgr_storage_core_write(&core, 4, bank, 4, 1u << (e % 32)));
+        CHECK(apple_modern_pmgr_storage_core_read(&core, 4, bank, 4, &v) && v == 0x20);
+        /* Entry 1023 is the last bit of the last word of each bank. */
+        CHECK(apple_modern_pmgr_storage_core_write(&core, 3, 0x7c, 4, 0x80000000u));
+        CHECK(apple_modern_pmgr_storage_core_read(&core, 3, 0x7c, 4, &v) && v == 0x80000000u);
+        CHECK(!apple_modern_pmgr_storage_core_read(&core, 3, 0x80, 4, &v));   /* the enable-clear bank starts elsewhere */
+        CHECK(apple_modern_pmgr_storage_core_write(&core, 5, 0x3fc, 4, 0xffffffffu));
+        CHECK(!apple_modern_pmgr_storage_core_write(&core, 5, 0x400, 4, 1));
+        /* The windows are separate storage. */
+        CHECK(apple_modern_pmgr_storage_core_read(&core, 3, 0, 4, &v) && v == 0x20);
+        CHECK(apple_modern_pmgr_storage_core_read(&core, 4, 4, 4, &v) && v == 0);
+    }
     /* Holes between listed registers, past the end, 8-byte accesses over a hole,
      * unaligned, odd sizes and bad windows are refused. */
     before = core;
