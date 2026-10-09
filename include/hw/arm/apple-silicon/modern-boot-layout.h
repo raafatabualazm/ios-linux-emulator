@@ -23,6 +23,12 @@ void error_free(Error *error);
 #define APPLE_MODERN_DT_SLACK UINT64_C(0x10000)
 #define APPLE_MODERN_BOOTARGS_SIZE 1152
 #define APPLE_MODERN_MAX_RAMDISK_SIZE (UINT64_C(4) << 30)
+/*
+ * Ceiling for the opt-in mapped ramdisk path only (AppleModernBootInput
+ * large_ramdisk). The 4 GiB limit above still applies to the copying path,
+ * as do the 512 MiB per-asset and 1 GiB total budgets in modern-machine.c.
+ */
+#define APPLE_MODERN_MAX_LARGE_RAMDISK_SIZE (UINT64_C(32) << 30)
 #define APPLE_MODERN_MAX_FRAMEBUFFER_DIMENSION 4096U
 #define APPLE_MODERN_MAX_FRAMEBUFFER_SIZE (UINT64_C(64) << 20)
 #define APPLE_MODERN_FRAMEBUFFER_ALIGNMENT (UINT64_C(2) << 20)
@@ -52,6 +58,14 @@ typedef struct AppleModernBootInput {
     uint32_t framebuffer_width;
     uint32_t framebuffer_height;
     uint32_t framebuffer_stride;
+    /*
+     * Declared opt-in: the ramdisk bytes are a host file mapping owned by the
+     * caller, not a copied buffer, so the reservation may exceed
+     * APPLE_MODERN_MAX_RAMDISK_SIZE up to
+     * APPLE_MODERN_MAX_LARGE_RAMDISK_SIZE. The layout is otherwise identical;
+     * the caller is responsible for getting the bytes into guest RAM.
+     */
+    bool large_ramdisk;
 } AppleModernBootInput;
 
 typedef struct AppleModernBootRegion {

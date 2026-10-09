@@ -443,8 +443,16 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
     uint64_t tc_size, before, index, cursor, sptm_base, start;
     uint64_t framebuffer_size = 0;
     Image *bkc = &images[0], *sptm = &images[1], *txm = &images[2];
+    /*
+     * The copying path is capped at 4 GiB because the caller holds the whole
+     * image in host anonymous memory. The declared opt-in mapped path hands
+     * over a host file mapping instead, so only the DRAM reservation bounds
+     * it (checked region by region below and against mem_size in metadata).
+     */
     if ((!in->ramdisk.data != !in->ramdisk.size) ||
-        in->ramdisk.size > APPLE_MODERN_MAX_RAMDISK_SIZE) {
+        in->ramdisk.size > (in->large_ramdisk ?
+                            APPLE_MODERN_MAX_LARGE_RAMDISK_SIZE :
+                            APPLE_MODERN_MAX_RAMDISK_SIZE)) {
         return fail(errp, "missing or oversized optional ramdisk bytes");
     }
     if (in->framebuffer_width || in->framebuffer_height ||
