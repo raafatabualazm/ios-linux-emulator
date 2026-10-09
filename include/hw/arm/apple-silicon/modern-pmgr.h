@@ -19,10 +19,15 @@ typedef struct AppleModernPMGRCell {
     uint8_t window;
 } AppleModernPMGRCell;
 
+/* PS_ACTIVE: TARGET 0xf and ACTUAL 0xf, what a domain iBoot left on reads as. */
+#define APPLE_MODERN_PMGR_ACTIVE 0xffu
+
 typedef struct AppleModernPMGRPlan {
     AppleModernPMGRWindow windows[APPLE_MODERN_PMGR_MAX_WINDOWS];
     AppleModernPMGRCell cells[APPLE_MODERN_PMGR_MAX_CELLS];
     uint32_t window_count, cell_count, virtual_count;
+    /* Cells that reset to PS_ACTIVE instead of power-gated (default: none). */
+    uint8_t boot_on[APPLE_MODERN_PMGR_MAX_CELLS];
 } AppleModernPMGRPlan;
 
 typedef struct AppleModernPMGRCore {
@@ -44,6 +49,24 @@ bool apple_modern_pmgr_plan_build(AppleModernBlob dtree,
                                   const AppleModernAddressRange *exclusions,
                                   size_t exclusion_count,
                                   AppleModernPMGRPlan *output, Error **errp);
+/*
+ * Mark hardware domains, by their ADT device-record names (16-byte field at
+ * record +32, compared case-insensitively), as powered on at reset. Every
+ * name must match exactly one hardware (non-virtual) record that has a cell,
+ * and no cell may be named twice. On error the plan is unchanged.
+ */
+bool apple_modern_pmgr_plan_set_boot_on(AppleModernBlob dtree,
+                                        AppleModernPMGRPlan *plan,
+                                        const char *const *names, size_t count,
+                                        Error **errp);
+/*
+ * Declared reset profile 'j700': the 25 domains Asahi's T8140 (A18 Pro,
+ * MacBook Neo) PMGR device tree marks apple,always-on. ANALOGY for
+ * iPhone17,3: all 25 names exist once in the iPhone ADT, but whether iBoot
+ * leaves each of them on there is not attested. NULL (count 0) if unknown.
+ */
+const char *const *apple_modern_pmgr_boot_on_profile(const char *name,
+                                                     size_t *count);
 void apple_modern_pmgr_core_reset(AppleModernPMGRCore *core);
 uint32_t apple_modern_pmgr_core_read(AppleModernPMGRCore *core,
                                     unsigned window, uint64_t offset);

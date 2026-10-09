@@ -99,6 +99,8 @@ struct AppleModernMachine {
     char *pmgr_aon_fuse_image;
     /* Declared profile for the iBoot-computed /arm-io/pmgr voltage-states*. */
     char *pmgr_voltage_states;
+    /* Declared reset profile naming PMGR domains iBoot leaves powered on. */
+    char *pmgr_boot_on;
     /* Publish the modelled counter frequency as /cpus/cpu0 timebase-frequency. */
     bool adt_timebase_match;
     AppleModernPMGRFusePlan pmgr_fuse_plan;
@@ -625,6 +627,24 @@ static bool map_pmgr(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
                                       s->components.dram_size, exclusions,
                                       count, &plan, errp)) {
         return false;
+    }
+    if (s->pmgr_boot_on) {
+        size_t names_count;
+        const char *const *names = apple_modern_pmgr_boot_on_profile(
+            s->pmgr_boot_on, &names_count);
+        if (!names) {
+            error_setg(errp, "unknown pmgr-boot-on profile '%s' (supported: j700)",
+                       s->pmgr_boot_on);
+            return false;
+        }
+        if (!apple_modern_pmgr_plan_set_boot_on(dtree, &plan, names, names_count,
+                                                errp)) {
+            return false;
+        }
+        warn_report("apple-modern: %zu PMGR domains reset powered on from the "
+                    "'%s' profile (Asahi T8140 always-on set; analogy for "
+                    "iPhone17,3, not an attested handover state)", names_count,
+                    s->pmgr_boot_on);
     }
     DeviceState *dev = apple_modern_pmgr_new(&plan);
     dev->id = g_strdup("modern-pmgr");
@@ -1905,6 +1925,20 @@ static void set_pmgr_voltage_states(Object *obj, const char *value, Error **errp
     }
 }
 
+static char *get_pmgr_boot_on(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->pmgr_boot_on);
+}
+
+static void set_pmgr_boot_on(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->pmgr_boot_on);
+        s->pmgr_boot_on = g_strdup(value);
+    }
+}
+
 static void set_pmgr_aon_fuse_image(Object *obj, const char *value, Error **errp)
 {
     AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
@@ -2093,6 +2127,7 @@ static void modern_finalize(Object *obj)
     g_free(s->boot_command_line);
     g_free(s->pmgr_aon_fuse_image);
     g_free(s->pmgr_voltage_states);
+    g_free(s->pmgr_boot_on);
     for (size_t i = 0; i < ASSET_COUNT; i++) {
         g_free(s->paths[i]);
         g_free((void *)s->blobs[i].data);
@@ -2115,6 +2150,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "ramdisk", get_ramdisk, set_ramdisk);
     object_class_property_add_bool(oc, "adt-timebase-match", get_adt_timebase_match,
                                    set_adt_timebase_match);
+    object_class_property_add_str(oc, "pmgr-boot-on", get_pmgr_boot_on,
+                                  set_pmgr_boot_on);
     object_class_property_add_str(oc, "pmgr-voltage-states",
                                   get_pmgr_voltage_states,
                                   set_pmgr_voltage_states);

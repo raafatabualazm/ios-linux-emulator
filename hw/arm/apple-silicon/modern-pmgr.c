@@ -278,9 +278,110 @@ static int cell_index(const AppleModernPMGRCore *core, unsigned window,
     return -1;
 }
 
+static bool name_matches(const uint8_t *field, const char *name)
+{
+    size_t i = 0;
+    for (; i < 16 && name[i]; i++) {
+        char a = field[i], b = name[i];
+        if (a >= 'a' && a <= 'z') {
+            a -= 'a' - 'A';
+        }
+        if (b >= 'a' && b <= 'z') {
+            b -= 'a' - 'A';
+        }
+        if (a != b) {
+            return false;
+        }
+    }
+    /* The record name is NUL-terminated within its 16 bytes or fills them. */
+    return name[i] == 0 && (i == 16 || field[i] == 0);
+}
+
+bool apple_modern_pmgr_plan_set_boot_on(AppleModernBlob dtree,
+                                        AppleModernPMGRPlan *plan,
+                                        const char *const *names, size_t count,
+                                        Error **errp)
+{
+    AppleModernBlob devices;
+    uint8_t marked[APPLE_MODERN_PMGR_MAX_CELLS] = {0};
+    if (!plan || (count && !names) || count > APPLE_MODERN_PMGR_MAX_CELLS ||
+        pointer_alias(plan, sizeof(*plan), dtree.data, dtree.size)) {
+        error_setg(errp, "invalid PMGR boot-on request");
+        return false;
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/pmgr", "devices", &devices, errp)) {
+        return false;
+    }
+    if (devices.size % 48) {
+        error_setg(errp, "PMGR devices table is not a whole number of records");
+        return false;
+    }
+    for (size_t n = 0; n < count; n++) {
+        unsigned matches = 0;
+        int cell = -1;
+        if (!names[n] || !names[n][0]) {
+            error_setg(errp, "PMGR boot-on name is missing");
+            return false;
+        }
+        for (size_t i = 0; i < devices.size; i += 48) {
+            const uint8_t *record = devices.data + i;
+            if (!name_matches(record + 32, names[n])) {
+                continue;
+            }
+            matches++;
+            if (record[0] & 0x10) {
+                error_setg(errp, "PMGR boot-on domain '%s' is virtual", names[n]);
+                return false;
+            }
+            uint16_t id = get_le(record + 26, 2);
+            for (unsigned c = 0; c < plan->cell_count; c++) {
+                if (plan->cells[c].id == id) {
+                    cell = c;
+                }
+            }
+        }
+        if (matches != 1 || cell < 0) {
+            error_setg(errp, "PMGR boot-on domain '%s' is %s", names[n],
+                       matches > 1 ? "ambiguous" : matches ? "not a mapped cell" : "unknown");
+            return false;
+        }
+        if (marked[cell]) {
+            error_setg(errp, "PMGR boot-on domain '%s' is named twice", names[n]);
+            return false;
+        }
+        marked[cell] = 1;
+    }
+    memcpy(plan->boot_on, marked, sizeof(plan->boot_on));
+    return true;
+}
+
+static const char *const j700_boot_on[] = {
+    "SEP_AON", "AIC", "PMS_C1PPT", "SOC_DPE", "AFGGFXNI0", "ANS", "DISP_SYS",
+    "DPA_P", "DISP_FE", "PMP", "PMS_SRAM", "SEP", "DEBUG_GATED", "NUB_SPMI0",
+    "NUB_SPMI1", "NUB_SPMI_A0", "NUB_AON_NOGATE", "NUB_OCLA", "NUB_GPIO",
+    "NUB_FABRIC", "NUB_SRAM", "DEBUG_SWITCH", "SMC_I2CM0", "SMC_I2CM1",
+    "SMC_I2CM2",
+};
+
+const char *const *apple_modern_pmgr_boot_on_profile(const char *name,
+                                                     size_t *count)
+{
+    if (name && !strcmp(name, "j700")) {
+        *count = sizeof(j700_boot_on) / sizeof(j700_boot_on[0]);
+        return j700_boot_on;
+    }
+    *count = 0;
+    return NULL;
+}
+
 void apple_modern_pmgr_core_reset(AppleModernPMGRCore *core)
 {
     memset(core->values, 0, sizeof(core->values));
+    for (unsigned i = 0; i < core->plan.cell_count; i++) {
+        if (core->plan.boot_on[i]) {
+            core->values[i] = APPLE_MODERN_PMGR_ACTIVE;
+        }
+    }
     core->reads = core->writes = 0;
     core->unknown_reads = core->unknown_writes = core->transitions = 0;
 }
