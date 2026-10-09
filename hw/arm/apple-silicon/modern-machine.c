@@ -998,10 +998,12 @@ static bool map_cpu_dvfm(AppleModernMachine *s, uint64_t uart,
         sysbus_mmio_map(SYS_BUS_DEVICE(dev), i, plan.addresses[i]);
     }
     s->cpu_dvfm_plan = plan;
-    warn_report("apple-modern: opt-in CPU DVFM state-table windows (E 0x%" PRIx64
-                ", P 0x%" PRIx64 "); declared zero-reset storage, NOT calibration "
-                "data (a boot-progress diagnostic profile)",
-                plan.addresses[0], plan.addresses[1]);
+    warn_report("apple-modern: opt-in CPU DVFM windows (state tables E 0x%" PRIx64
+                ", P 0x%" PRIx64 "; control pages E 0x%" PRIx64 ", P 0x%" PRIx64
+                "); declared zero-reset storage, NOT calibration data (a "
+                "boot-progress diagnostic profile)",
+                plan.addresses[0], plan.addresses[1], plan.addresses[2],
+                plan.addresses[3]);
     return true;
 }
 
