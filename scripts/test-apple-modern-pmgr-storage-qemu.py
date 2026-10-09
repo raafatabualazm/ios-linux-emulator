@@ -50,6 +50,9 @@ PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40
 DPE = 0x300208000                  # PMGR_SOC_DPE: ten channels of 3 registers (channel 7: 2)
 DVFM_WINDOWS = (0x210e78000, 0x211e78000, 0x210e70000, 0x211e70000)
 DVFM_SPAN = 0x1000
+# The control pages (windows 2 and 3) accept only the BootKC-attested 64-bit reads;
+# the state-table windows (0 and 1) accept every aligned 4- or 8-byte access.
+CONTROL_READS = {2: (0xa8, 0xd0), 3: (0xa8, 0xb0, 0xd0, 0xd8)}
 
 
 def storage_registers():
@@ -79,11 +82,14 @@ class Model:
         self.reads = {'dvfm': 0, 'storage': 0}
         self.writes = {'dvfm': 0, 'storage': 0}
 
-    def device(self, address, size):
+    def device(self, address, size, write=False):
         if not self.enabled or size not in (4, 8) or address % size:
             return None
-        for window in DVFM_WINDOWS:
+        for index, window in enumerate(DVFM_WINDOWS):
             if window <= address and address + size <= window + DVFM_SPAN:
+                if index in CONTROL_READS:
+                    if write or size != 8 or address - window not in CONTROL_READS[index]:
+                        return None
                 return 'dvfm'
         if all(address + 4 * s in self.regs for s in range(size // 4)):
             return 'storage'
@@ -100,7 +106,7 @@ class Model:
         return value
 
     def write(self, address, size, value):
-        kind = self.device(address, size)
+        kind = self.device(address, size, write=True)
         if kind is None:
             return False
         self.writes[kind] += 1
@@ -111,18 +117,42 @@ class Model:
 
 # (operation, address, value) in program order.
 PROGRAM = [
+    # E control page (window 2): attested reads +0xa8, +0xd0; P control page (window 3):
+    # +0xa8, +0xb0, +0xd0, +0xd8. Everything else in the page, every write and every
+    # 4-byte access faults (tightened after the independent verifier's finding).
     ('r64', 0x210e700a8, None),                 # the step-1 frontier
-    ('w64', 0x210e700a8, 0x00001234_56789abc),
-    ('r64', 0x210e700a8, None),
-    ('r32', 0x210e700a8, None),
+    ('w64', 0x210e700a8, 0x00001234_56789abc),  # read-only: faults
+    ('r64', 0x210e700a8, None),                 # still zero
+    ('r32', 0x210e700a8, None),                 # 4-byte access of an attested register
     ('r32', 0x210e700ac, None),
+    ('r64', 0x210e700d0, None),
+    ('r64', 0x210e700b0, None),                 # P-only register, not in E
+    ('r64', 0x210e700d8, None),
+    ('r64', 0x210e700a0, None),                 # neighbours of the attested registers
+    ('r64', 0x210e700b8, None),
+    ('r64', 0x210e700c8, None),
+    ('r64', 0x210e700e0, None),
+    ('r64', 0x210e70000, None),
+    ('w32', 0x210e70000, 1),
+    ('r64', 0x211e700a8, None),
+    ('r64', 0x211e700b0, None),
+    ('r64', 0x211e700d0, None),
     ('r64', 0x211e700d8, None),
-    ('w32', 0x211e700d8, 0xa5a5a5a5),
+    ('w32', 0x211e700d8, 0xa5a5a5a5),           # read-only: faults
     ('r64', 0x211e700d8, None),
+    ('r32', 0x211e700d8, None),
+    ('r32', 0x211e700dc, None),
+    ('r64', 0x211e700a0, None),
+    ('r64', 0x211e700b8, None),
+    ('r64', 0x211e700c8, None),
+    ('r64', 0x211e700e0, None),
     ('r64', 0x210e78048, None),                 # a state-table window
     ('w64', 0x210e78048, 0x1f << 38),
     ('r64', 0x210e78048, None),
-    ('r64', 0x210e70ff8, None),                 # last word of a control page
+    ('r32', 0x210e780a8, None),                 # same offset as the control page: unrestricted here
+    ('w64', 0x211e780b0, 0x1f),
+    ('r64', 0x211e780b0, None),
+    ('r64', 0x210e70ff8, None),                 # last word of a control page: not attested
     ('r32', 0x210e71000, None),                 # first byte past it
     ('r32', 0x210e6fffc, None),                 # last word before it
     ('r64', 0x211e70f00, None),

@@ -149,10 +149,30 @@ void apple_modern_cpu_dvfm_core_reset(AppleModernDVFMCore *core)
     core->reads = core->writes = 0;
 }
 
-static bool valid_access(unsigned window, uint64_t offset, unsigned size)
+/* The only control-page registers the BootKC reads (descriptor tables at
+ * 0xfffffff0081a9490 for E and 0xfffffff0081a94b0 for P), as 64-bit loads. */
+static bool control_register(unsigned window, uint64_t offset)
 {
-    return window < APPLE_MODERN_DVFM_WINDOWS && (size == 4 || size == 8) &&
-           !(offset & (size - 1)) && offset < APPLE_MODERN_DVFM_SPAN;
+    switch (window) {
+    case APPLE_MODERN_DVFM_TABLE_WINDOWS:
+        return offset == 0xa8 || offset == 0xd0;
+    case APPLE_MODERN_DVFM_TABLE_WINDOWS + 1:
+        return offset == 0xa8 || offset == 0xb0 || offset == 0xd0 || offset == 0xd8;
+    default:
+        return false;
+    }
+}
+
+static bool valid_access(unsigned window, uint64_t offset, unsigned size, bool write)
+{
+    if (window >= APPLE_MODERN_DVFM_WINDOWS || (size != 4 && size != 8) ||
+        (offset & (size - 1)) || offset >= APPLE_MODERN_DVFM_SPAN) {
+        return false;
+    }
+    if (window >= APPLE_MODERN_DVFM_TABLE_WINDOWS) {
+        return !write && size == 8 && control_register(window, offset);
+    }
+    return true;
 }
 
 static void touch(AppleModernDVFMCore *core, unsigned window, uint64_t offset)
@@ -171,7 +191,7 @@ bool apple_modern_cpu_dvfm_core_touched(const AppleModernDVFMCore *core,
 bool apple_modern_cpu_dvfm_core_read(AppleModernDVFMCore *core, unsigned window,
     uint64_t offset, unsigned size, uint64_t *value)
 {
-    if (!core || !value || !valid_access(window, offset, size) ||
+    if (!core || !value || !valid_access(window, offset, size, false) ||
         aliases(core, sizeof(*core), value, sizeof(*value))) {
         return false;
     }
@@ -185,7 +205,7 @@ bool apple_modern_cpu_dvfm_core_read(AppleModernDVFMCore *core, unsigned window,
 bool apple_modern_cpu_dvfm_core_write(AppleModernDVFMCore *core, unsigned window,
     uint64_t offset, unsigned size, uint64_t value)
 {
-    if (!core || !valid_access(window, offset, size)) {
+    if (!core || !valid_access(window, offset, size, true)) {
         return false;
     }
     uint64_t *word = &core->words[window][offset / 8];
