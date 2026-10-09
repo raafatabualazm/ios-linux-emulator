@@ -48,7 +48,11 @@ PTD = 0x3003c0000                  # PMS_PTS_PTD: banks at +0x18200, +0x18300, c
 CLUSTER = 0x300780000              # PMGR_SOC_CLUSTER_CTL +0x0 and +0x4
 PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40
 DPE = 0x300208000                  # PMGR_SOC_DPE: ten channels of 3 registers (channel 7: 2)
-PMC = 0x3028ac000                  # reg[43] (0x302000000) + 0x8ac000: PMC static-voter vote registers 0..3
+PMC = 0x3028ac000                  # reg[43] (0x302000000) + 0x8ac000: PMC vote registers 0..3 and +0x24
+PMC2 = 0x302860000                 # reg[43] + 0x860000: PMC +0x60000
+# T8140 PS-write hook blocks (table 0xfffffff00b9257c0): registers at block + 0x104 and + 0x108
+ACG_BLOCKS = (0x408000000, 0x413000000, 0x417000000, 0x38b000000, 0x380000000,
+              0x284000000, 0x288000000, 0x481000000, 0x28c000000, 0x396000000)
 DVFM_WINDOWS = (0x210e78000, 0x211e78000, 0x210e70000, 0x211e70000)
 DVFM_SPAN = 0x1000
 # The control pages (windows 2 and 3) accept only the BootKC-attested 64-bit reads;
@@ -65,7 +69,9 @@ def storage_registers():
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
     regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40}
-    regs |= {PMC + 4 * i for i in range(4)}
+    regs |= {PMC + 4 * i for i in range(4)} | {PMC + 0x24, PMC2}
+    for block in ACG_BLOCKS:
+        regs |= {block + 0x104, block + 0x108}
     for channel in range(10):
         base = DPE + 0x2400 + 0x400 * channel
         regs |= {base + 0x200, base + 0x300}
@@ -260,10 +266,39 @@ PROGRAM = [
     ('w32', PMC + 0x10, 1),
     ('r64', PMC + 0xc, None),                   # 8 bytes over the end
     ('r32', PMC - 4, None),
-    ('r32', PMC + 0x20, None),                  # kind 1..3 registers: not listed
-    ('r32', PMC + 0x24, None),
+    ('r32', PMC + 0x20, None),                  # kind 1 and 3 registers: not listed
     ('r32', PMC + 0x28, None),
+    ('r32', PMC + 0x24, None),                  # the step-2 frontier (kind 2, dynamic control)
+    ('w32', PMC + 0x24, 3),                     # (v & ~3) | 2 | 1
+    ('r32', PMC + 0x24, None),
+    ('r64', PMC + 0x20, None),                  # 8 bytes over a hole and the register
+    ('r64', PMC + 0x24, None),                  # 8 bytes running past the end
+    ('w32', PMC2, 0xffffffff),                  # PMC +0x60000: write only on the driver's path
+    ('r32', PMC2, None),
+    ('r32', PMC2 + 4, None),
+    ('r64', PMC2, None),
+    ('r32', PMC2 - 4, None),
+    ('w32', PMC2 + 4, 1),
+    ('r32', 0x413000104, None),                 # the step-3 frontier (entry 1)
+    ('w32', 0x413000104, 1),                    # power-up: set bit 0
+    ('r32', 0x413000104, None),
+    ('r32', 0x413000108, None),
+    ('w32', 0x413000108, 1),
+    ('r64', 0x413000104, None),                 # both registers in one access
+    ('w32', 0x413000108, 0),                    # power-down: clear bit 0
+    ('r64', 0x413000104, None),
+    ('r32', 0x413000100, None),                 # neighbours
+    ('r32', 0x41300010c, None),
+    ('w32', 0x41300010c, 1),
+    ('r64', 0x413000108, None),                 # 8 bytes running past the pair
+    ('r32', 0x413000000, None),
+    ('r32', 0x413000204, None),
 ]
+for _block in ACG_BLOCKS:
+    if _block != 0x413000000:                   # the other nine pairs: RMW and the edges
+        PROGRAM.extend([('r32', _block + 0x104, None), ('w32', _block + 0x104, 1),
+                        ('r32', _block + 0x108, None), ('w32', _block + 0x108, 1),
+                        ('r64', _block + 0x104, None), ('r32', _block + 0x10c, None)])
 
 
 def expected_results(enabled):

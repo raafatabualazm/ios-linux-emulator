@@ -91,6 +91,19 @@ static bool translate(AppleModernBlob ranges, uint64_t child, uint64_t size,
     return false;
 }
 
+/* True if [physical, physical + size) lies inside one /arm-io range's parent side. */
+static bool physical_in_ranges(AppleModernBlob ranges, uint64_t physical, uint64_t size)
+{
+    for (size_t i = 0; i < ranges.size; i += 24) {
+        uint64_t p = le64(ranges.data + i + 8);
+        uint64_t n = le64(ranges.data + i + 16);
+        if (physical >= p && physical - p <= n && size <= n - (physical - p)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Record one 32-bit register of programmed group g; fail on a malformed record. */
 static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
                  unsigned group, uint64_t offset, Error **errp)
@@ -198,15 +211,43 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     0xac000 + 4 * rail (AppleT8140PMC read/write thunks 0xfffffff00984ccac and
  *     0xfffffff00984cc18, kind 0), setting the agent's bit (voter-agent byte 2). The rail
  *     index is the first u16 of the ADT voter-rail-data record (DCS 0, SOC 1, DISP 2,
- *     AVE 3), which the plan builder checks. Plain RMW, no wait: 4 registers. The other
- *     restorePMC branch (flag bit 4, the dynamic voter interface) and the kind 1..3
- *     registers (0xac020, 0xac024, 0xac028) are NOT listed.
+ *     AVE 3), which the plan builder checks. Plain RMW, no wait: 4 registers (+0x0 .. +0xc).
+ *     The same window also lists the dynamic-voter control register +0x24 (0x3028ac024:
+ *     AppleT8140PMC kind 2). restorePMC's flag-bit-4 branch (ADT pmc-pmgr 0x3f has it) calls the T8140PMC
+ *     vtable slot 0xa8 (0xfffffff00984cfa8, from restorePMC at 0xfffffff0092e3a98) with
+ *     enable = 1 and flag = (this+0x3c != 0): a read-modify-write of 0xac024 to
+ *     (v & ~3) | (enable ? 2 : 0) | flag, no poll. It then tail-calls vtable slot 0xa0
+ *     (0xfffffff00984d0a8) with the value returned by slot 0xc0 (0xfffffff00984d5e8: -1),
+ *     which writes 0xffffffff to PMC +0x60000.
+ *  18: PMC +0x60000 of the same group, i.e. reg[43] +0x860000, one write-only register
+ *     (plain storage here; nothing on this path reads it).
+ *  The kind 1 and kind 3 registers (0xac020, 0xac028) are NOT listed.
+ *  19-28: ten block-local register pairs the T8140 PS-write hook read-modify-writes. The
+ *     AppleT8140PMGR write32 override (vtable slot 0xd20, 0xfffffff00984b768; ApplePMGR's
+ *     PS-level writer 0xfffffff00929fe20 calls it) runs when this+0x738f0 is non-zero
+ *     (0x3ff, MEASURED in the guest: all ten entries enabled). It searches the static table
+ *     at 0xfffffff00b9257c0 (ten 40-byte entries: u32 RegMap selector 0, u32 PMGR_SOC
+ *     register offset, u64 physical block base, two runtime pointers) for the written
+ *     (selector, offset); a match calls the check function 0xfffffff00984b2b0, which
+ *     sets bit 0 of the registers at base + 0x104 and base + 0x108 (power-up, 0x984b384)
+ *     or clears it (power-down, 0x984b3c4), each a plain read-modify-write through a
+ *     pointer mapped at init (0xfffffff00984760c: IOMemoryDescriptor on base + 0x104 and
+ *     base + 0x108, length 4). The mask-driven loop at 0xfffffff009848214 calls the same
+ *     function for every entry whose PMGR_SOC register reads actual state 0xf. No poll.
+ *     The entries (PMGR_SOC offset, block base): 0x3e8 0x408000000, 0x280 0x413000000,
+ *     0x288 0x417000000, 0x278 0x38b000000 (/arm-io/ans reg[4]), 0x270 0x380000000
+ *     (/arm-io/avd reg[0]), 0x240 0x284000000 (/arm-io/ave reg[4]), 0x248 0x288000000
+ *     (/arm-io/ave1 reg[4]), 0x1f0 0x481000000 (/arm-io/sgx reg[0] +0x1000000), 0x230
+ *     0x28c000000, 0x2a0 0x396000000 (/arm-io/apcie reg[4]). The guest's first rejected
+ *     access was entry 1 (MEASURED: 0x413000104, the PMGR_SOC +0x280 write); the other
+ *     nine pairs are listed from the table and the measured mask, not from a run. None of
+ *     these blocks is otherwise modelled, so only the two registers per block exist.
  */
 typedef struct FixedWindow {
     unsigned reg_index;
     uint32_t offset, size;
     unsigned nregs;         /* 0: every 4-byte slot of the window is a register */
-    uint16_t regs[3];       /* else: register offsets inside the window (multiples of 4) */
+    uint16_t regs[8];       /* else: register offsets inside the window (multiples of 4) */
 } FixedWindow;
 #define DPE_CHANNEL(n) {32, 0x2400 + 0x400 * (n), 0x304, 3, {0, 0x200, 0x300}}
 static const FixedWindow fixed_windows[] = {
@@ -221,7 +262,19 @@ static const FixedWindow fixed_windows[] = {
     DPE_CHANNEL(5), DPE_CHANNEL(6),
     {32, 0x4200, 0x104, 2, {0, 0x100}},     /* channel 7 has no +0x0 register */
     DPE_CHANNEL(8), DPE_CHANNEL(9),
-    {43, 0x8ac000, 0x10, 0, {0}},           /* PMC static-voter vote registers, 4 rails */
+    {43, 0x8ac000, 0x28, 5, {0, 4, 8, 0xc, 0x24}},  /* PMC voter votes 0..3, dynamic control */
+    {43, 0x860000, 0x4, 0, {0}},            /* PMC +0x60000 (kRegGroupPMCDVFM + 0x60000) */
+};
+
+/* Block bases of the T8140 PS-write hook table (see item 19-28 above), in table order. The window
+ * of block b is the register pair at b + 0x104 and b + 0x108; each must lie inside the /arm-io
+ * bus ranges. Their tags continue the fixed windows' (FIXED_TAG_BASE + count + index). */
+#define ACG_OFFSET 0x104
+#define ACG_SIZE 0x8
+static const uint64_t acg_blocks[] = {
+    UINT64_C(0x408000000), UINT64_C(0x413000000), UINT64_C(0x417000000), UINT64_C(0x38b000000),
+    UINT64_C(0x380000000), UINT64_C(0x284000000), UINT64_C(0x288000000), UINT64_C(0x481000000),
+    UINT64_C(0x28c000000), UINT64_C(0x396000000),
 };
 
 /* Append one window after the geometry checks; *plan is unchanged on failure. */
@@ -414,6 +467,21 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
             }
         }
         if (!place(&plan, base + f->offset, f->size, FIXED_TAG_BASE + i, valid,
+                   dram_base, dram_size, exclusions, exclusion_count, errp)) {
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < ARRAY_ENTRIES(acg_blocks); i++) {
+        uint64_t valid[APPLE_MODERN_PMGR_STORAGE_MASKS] = {0};
+        for (unsigned slot = 0; slot < ACG_SIZE / 4; slot++) {
+            valid[slot / 64] |= UINT64_C(1) << (slot % 64);
+        }
+        if (!physical_in_ranges(ranges, acg_blocks[i] + ACG_OFFSET, ACG_SIZE)) {
+            error_setg(errp, "PMGR block-local register pair %u is outside the /arm-io bus ranges", i);
+            return false;
+        }
+        if (!place(&plan, acg_blocks[i] + ACG_OFFSET, ACG_SIZE,
+                   FIXED_TAG_BASE + ARRAY_ENTRIES(fixed_windows) + i, valid,
                    dram_base, dram_size, exclusions, exclusion_count, errp)) {
             return false;
         }
