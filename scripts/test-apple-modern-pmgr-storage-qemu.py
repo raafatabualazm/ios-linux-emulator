@@ -33,10 +33,10 @@ mailbox, board = helper.mailbox, helper.board
 require, digest = helper.require, helper.digest
 
 SENTINEL = 0x5e57e11a5e57e11a
-FLAG = 0x800          # fault flag written by the owned vector handler
-LAST_ESR = 0x808
-LAST_ELR = 0x810
-RESULT_BYTES = 0x818
+FLAG = 0x2000         # fault flag written by the owned vector handler (up to 1024 result slots)
+LAST_ESR = 0x2008
+LAST_ELR = 0x2010
+RESULT_BYTES = 0x2018
 DONE = 0xf05e1234face5678
 ESR_DATA_ABORT_SAME_EL = 0x25
 ESR_SYNC_EXTERNAL_ABORT = 0x10     # DFSC
@@ -46,10 +46,21 @@ G7 = 0x3082b4000                   # PMGR_AON + 0x34000
 WAKE = 0x308004008                 # NUB_FR_GLOBAL_AP_CONTROLS + 0x8
 PTD = 0x3003c0000                  # PMS_PTS_PTD: banks at +0x18200, +0x18300, config +0x18400
 CLUSTER = 0x300780000              # PMGR_SOC_CLUSTER_CTL +0x0 and +0x4
-PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40
+PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40, and +0xc8c, +0xcd0
+TVM = 0x300760400                  # PMGR_SOC_TVM +0x400 (control, index 0xb) and +0x7e0 (status)
 DPE = 0x300208000                  # PMGR_SOC_DPE: ten channels of 3 registers (channel 7: 2)
+PMC = 0x3028ac000                  # reg[43] (0x302000000) + 0x8ac000: PMC vote registers 0..3 and +0x24
+PMC2 = 0x302860000                 # reg[43] + 0x860000: PMC +0x60000
+PMC3 = 0x3028a4000                 # reg[43] + 0x8a4000: PMC DVMR state (+0x0) and busy flag (+0x20)
+PMC4 = 0x3028a9c14                 # reg[43] + 0x8a9c14: PMC DVMR population count
+# T8140 PS-write hook blocks (table 0xfffffff00b9257c0): registers at block + 0x104 and + 0x108
+ACG_BLOCKS = (0x408000000, 0x413000000, 0x417000000, 0x38b000000, 0x380000000,
+              0x284000000, 0x288000000, 0x481000000, 0x28c000000, 0x396000000)
 DVFM_WINDOWS = (0x210e78000, 0x211e78000, 0x210e70000, 0x211e70000)
 DVFM_SPAN = 0x1000
+# The control pages (windows 2 and 3) accept only the BootKC-attested 64-bit reads;
+# the state-table windows (0 and 1) accept every aligned 4- or 8-byte access.
+CONTROL_READS = {2: (0xa8, 0xd0), 3: (0xa8, 0xb0, 0xd0, 0xd8)}
 
 
 def storage_registers():
@@ -60,7 +71,10 @@ def storage_registers():
     regs |= {PTD + 0x18200 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
-    regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40}
+    regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40, PWRGATE + 0xc8c, PWRGATE + 0xcd0, TVM, TVM + 0x3e0}
+    regs |= {PMC + 4 * i for i in range(4)} | {PMC + 0x20, PMC + 0x24, PMC + 0x28, PMC2, PMC3, PMC3 + 0x20, PMC4}
+    for block in ACG_BLOCKS:
+        regs |= {block + 0x104, block + 0x108}
     for channel in range(10):
         base = DPE + 0x2400 + 0x400 * channel
         regs |= {base + 0x200, base + 0x300}
@@ -79,11 +93,14 @@ class Model:
         self.reads = {'dvfm': 0, 'storage': 0}
         self.writes = {'dvfm': 0, 'storage': 0}
 
-    def device(self, address, size):
+    def device(self, address, size, write=False):
         if not self.enabled or size not in (4, 8) or address % size:
             return None
-        for window in DVFM_WINDOWS:
+        for index, window in enumerate(DVFM_WINDOWS):
             if window <= address and address + size <= window + DVFM_SPAN:
+                if index in CONTROL_READS:
+                    if write or size != 8 or address - window not in CONTROL_READS[index]:
+                        return None
                 return 'dvfm'
         if all(address + 4 * s in self.regs for s in range(size // 4)):
             return 'storage'
@@ -100,7 +117,7 @@ class Model:
         return value
 
     def write(self, address, size, value):
-        kind = self.device(address, size)
+        kind = self.device(address, size, write=True)
         if kind is None:
             return False
         self.writes[kind] += 1
@@ -111,18 +128,42 @@ class Model:
 
 # (operation, address, value) in program order.
 PROGRAM = [
+    # E control page (window 2): attested reads +0xa8, +0xd0; P control page (window 3):
+    # +0xa8, +0xb0, +0xd0, +0xd8. Everything else in the page, every write and every
+    # 4-byte access faults (tightened after the independent verifier's finding).
     ('r64', 0x210e700a8, None),                 # the step-1 frontier
-    ('w64', 0x210e700a8, 0x00001234_56789abc),
-    ('r64', 0x210e700a8, None),
-    ('r32', 0x210e700a8, None),
+    ('w64', 0x210e700a8, 0x00001234_56789abc),  # read-only: faults
+    ('r64', 0x210e700a8, None),                 # still zero
+    ('r32', 0x210e700a8, None),                 # 4-byte access of an attested register
     ('r32', 0x210e700ac, None),
+    ('r64', 0x210e700d0, None),
+    ('r64', 0x210e700b0, None),                 # P-only register, not in E
+    ('r64', 0x210e700d8, None),
+    ('r64', 0x210e700a0, None),                 # neighbours of the attested registers
+    ('r64', 0x210e700b8, None),
+    ('r64', 0x210e700c8, None),
+    ('r64', 0x210e700e0, None),
+    ('r64', 0x210e70000, None),
+    ('w32', 0x210e70000, 1),
+    ('r64', 0x211e700a8, None),
+    ('r64', 0x211e700b0, None),
+    ('r64', 0x211e700d0, None),
     ('r64', 0x211e700d8, None),
-    ('w32', 0x211e700d8, 0xa5a5a5a5),
+    ('w32', 0x211e700d8, 0xa5a5a5a5),           # read-only: faults
     ('r64', 0x211e700d8, None),
+    ('r32', 0x211e700d8, None),
+    ('r32', 0x211e700dc, None),
+    ('r64', 0x211e700a0, None),
+    ('r64', 0x211e700b8, None),
+    ('r64', 0x211e700c8, None),
+    ('r64', 0x211e700e0, None),
     ('r64', 0x210e78048, None),                 # a state-table window
     ('w64', 0x210e78048, 0x1f << 38),
     ('r64', 0x210e78048, None),
-    ('r64', 0x210e70ff8, None),                 # last word of a control page
+    ('r32', 0x210e780a8, None),                 # same offset as the control page: unrestricted here
+    ('w64', 0x211e780b0, 0x1f),
+    ('r64', 0x211e780b0, None),
+    ('r64', 0x210e70ff8, None),                 # last word of a control page: not attested
     ('r32', 0x210e71000, None),                 # first byte past it
     ('r32', 0x210e6fffc, None),                 # last word before it
     ('r64', 0x211e70f00, None),
@@ -210,7 +251,129 @@ PROGRAM = [
     ('r32', DPE + 0x4b00, None),                # last register
     ('r32', DPE + 0x4b04, None),                # past it
     ('r32', DPE + 0x23fc, None),                # before the first channel
+    ('r32', PMC, None),                         # the step-1 frontier (rail 0, 0x3028ac000)
+    ('w32', PMC, 1),                            # agent PMP (bit 0)
+    ('r32', PMC, None),
+    ('w32', PMC, 3),                            # agent CLPC (bit 1)
+    ('w32', PMC, 0xb),                          # agent AP (bit 3)
+    ('r32', PMC, None),
+    ('r32', PMC + 4, None),                     # rails 1..3
+    ('w32', PMC + 4, 0xb),
+    ('r32', PMC + 8, None),
+    ('w32', PMC + 8, 0xb),
+    ('r32', PMC + 0xc, None),
+    ('w32', PMC + 0xc, 0xb),
+    ('r64', PMC + 8, None),                     # rails 2 and 3 in one access
+    ('r64', PMC, None),
+    ('r32', PMC + 0x10, None),                  # past the four rails
+    ('w32', PMC + 0x10, 1),
+    ('r64', PMC + 0xc, None),                   # 8 bytes over the end
+    ('r32', PMC - 4, None),
+    ('r32', PMC + 0x20, None),                  # the step-6 frontier (kind 1, bwr)
+    ('w32', PMC + 0x20, 0x80),                  # set the record's bit
+    ('r32', PMC + 0x20, None),
+    ('r64', PMC + 0x20, None),                  # +0x20 and +0x24 in one aligned access
+    ('w32', PMC + 0x20, 0),                     # clear it
+    ('r32', PMC + 0x1c, None),                  # the hole before it
+    ('r64', PMC + 0x18, None),
+    ('r32', PMC + 0x28, None),                  # the step-4 frontier (kind 3, boost)
+    ('w32', PMC + 0x28, 0x20),                  # set the device's bit
+    ('r32', PMC + 0x28, None),
+    ('w32', PMC + 0x28, 0),                     # clear it
+    ('r32', PMC + 0x2c, None),                  # past the end
+    ('w32', PMC + 0x2c, 1),
+    ('r64', PMC + 0x28, None),                  # 8 bytes running past the end
+    ('r32', PMC + 0x24, None),                  # the step-2 frontier (kind 2, dynamic control)
+    ('w32', PMC + 0x24, 3),                     # (v & ~3) | 2 | 1
+    ('r32', PMC + 0x24, None),
+    ('r64', PMC + 0x28, None),                  # 8 bytes running past the end
+    ('r64', PMC + 0x24, None),                  # unaligned 8-byte access: faults
+    ('w32', PMC2, 0xffffffff),                  # PMC +0x60000: write only on the driver's path
+    ('r32', PMC2, None),
+    ('r32', PMC2 + 4, None),
+    ('r64', PMC2, None),
+    ('r32', PMC2 - 4, None),
+    ('w32', PMC2 + 4, 1),
+    ('r32', 0x413000104, None),                 # the step-3 frontier (entry 1)
+    ('w32', 0x413000104, 1),                    # power-up: set bit 0
+    ('r32', 0x413000104, None),
+    ('r32', 0x413000108, None),
+    ('w32', 0x413000108, 1),
+    ('r64', 0x413000104, None),                 # both registers in one access
+    ('w32', 0x413000108, 0),                    # power-down: clear bit 0
+    ('r64', 0x413000104, None),
+    ('r32', 0x413000100, None),                 # neighbours
+    ('r32', 0x41300010c, None),
+    ('w32', 0x41300010c, 1),
+    ('r64', 0x413000108, None),                 # 8 bytes running past the pair
+    ('r32', 0x413000000, None),
+    ('r32', 0x413000204, None),
 ]
+PROGRAM.extend([
+    ('r32', PMC3, None),                        # the step-5 frontier (DVMR state)
+    ('w32', PMC3, 8),
+    ('r32', PMC3 + 0x20, None),                 # busy flag, polled until bit 0 is clear
+    ('r32', PMC3, None),
+    ('w32', PMC4, 1),                           # population count
+    ('r32', PMC4, None),
+    ('w32', PMC3 + 0x20, 1),
+    ('r32', PMC3 + 0x20, None),
+    ('w32', PMC3 + 0x20, 0),
+    ('r32', PMC3 + 4, None),                    # between and around the listed registers
+    ('r32', PMC3 + 0x1c, None),
+    ('r32', PMC3 + 0x24, None),
+    ('r32', PMC3 - 4, None),
+    ('r64', PMC3, None),
+    ('r64', PMC3 + 0x20, None),
+    ('r32', PMC4 + 4, None),
+    ('r32', PMC4 - 4, None),
+    ('r64', PMC4, None),
+    ('r32', PMC4 + 0x4c0, None),
+])
+PROGRAM.extend([
+    ('r32', PWRGATE + 0xc8c, None),             # write-only on the driver's path; storage allows a read-back
+    ('w32', PWRGATE + 0xc8c, 0),                # the step-7 frontier (flag 1: 0 then 1)
+    ('w32', PWRGATE + 0xcd0, 1),
+    ('r32', PWRGATE + 0xc8c, None),
+    ('r32', PWRGATE + 0xcd0, None),
+    ('w32', PWRGATE + 0xc8c, 3),                # flag 0: 3 then 0
+    ('w32', PWRGATE + 0xcd0, 0),
+    ('r32', PWRGATE + 0xcd0, None),
+    ('r32', PWRGATE + 0xc88, None),             # neighbours
+    ('r32', PWRGATE + 0xc90, None),
+    ('r32', PWRGATE + 0xcd4, None),
+    ('w32', PWRGATE + 0xcd4, 1),
+    ('r32', PWRGATE + 0xccc, None),
+    ('r64', PWRGATE + 0xc88, None),             # 8 bytes over a hole and the register
+    ('r64', PWRGATE + 0xcd0, None),
+])
+PROGRAM.extend([
+    ('r32', TVM, None),                         # the step-8 frontier (control, index 0xb)
+    ('w32', TVM, 0),                            # (v & ~1) | enable with enable 0
+    ('r32', TVM + 0x3e0, None),                 # polled until bit 1 is clear
+    ('w32', TVM, 1),
+    ('r32', TVM, None),
+    ('w32', TVM + 0x3e0, 2),
+    ('r32', TVM + 0x3e0, None),
+    ('w32', TVM + 0x3e0, 0),
+    ('r32', TVM + 4, None),                     # everything else in the TVM block
+    ('r32', TVM + 0x3dc, None),
+    ('r32', TVM + 0x3e4, None),
+    ('w32', TVM + 0x3e4, 1),
+    ('r32', TVM - 4, None),
+    ('r32', TVM - 0x400, None),                 # the other TVM indices' control registers (+0x0, +0x800 ...)
+    ('r32', TVM + 0x400, None),
+    ('r32', TVM + 0x800, None),
+    ('r32', TVM - 0x400 + 0x3e0, None),
+    ('r32', TVM + 0x800 + 0x3e0, None),
+    ('r64', TVM, None),
+    ('r64', TVM + 0x3e0, None),
+])
+for _block in ACG_BLOCKS:
+    if _block != 0x413000000:                   # the other nine pairs: RMW and the edges
+        PROGRAM.extend([('r32', _block + 0x104, None), ('w32', _block + 0x104, 1),
+                        ('r32', _block + 0x108, None), ('w32', _block + 0x108, 1),
+                        ('r64', _block + 0x104, None), ('r32', _block + 0x10c, None)])
 
 
 def expected_results(enabled):
@@ -377,6 +540,23 @@ def run(binary, components, output, no_device):
             qmp.request('quit')
             require(process.wait(timeout=10) == 0, 'Clean emulator exit')
             process = None
+            # A rejected access INSIDE a window is announced once per 4-byte slot (-d invalid_mem
+            # does not report it); probes 'r32 PMC+0x1c' and 'w64 0x210e700a8' make two such rejections.
+            text = (output / 'emulator.log').read_text(errors='replace')
+            announced = [line for line in text.splitlines() if 'REJECTED' in line]
+            wanted = ['pmgr-storage: REJECTED read of window 19 (group 273) +0x1c (4 bytes, address 0x3028ac01c)',
+                      'cpu-dvfm: REJECTED write of window 2 +0xa8 (8 bytes)']
+            if enabled:
+                for item in wanted:
+                    require(any(item in line for line in announced), 'Announced rejection: ' + item)
+                counts = {}
+                for line in announced:
+                    counts[line] = counts.get(line, 0) + 1
+                require(all(count == 2 for count in counts.values()),
+                        'Each rejected slot is announced once per pass (two passes around system_reset)')
+            else:
+                require(not announced, 'Without the devices nothing is announced')
+            report['announced_rejections'] = len(announced)
             report['passed'] = len(report['passes']) == 2
     except Exception as error:
         report['error'] = str(error)

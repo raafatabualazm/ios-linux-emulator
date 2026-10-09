@@ -41,6 +41,11 @@ static void error_setg(Error **errp, const char *format, ...)
 #define MAX_GROUPS 32
 #define MAX_COUNTERS 1024
 #define MAX_REG_ENTRIES 64
+#define VOTER_RAILS 4
+#define VOTER_RAIL_RECORD 24
+#define SOC_CLUSTERS 5
+#define SOC_CLUSTER_RECORD 28
+#define SOC_CLUSTER_AVE 2
 /* perf-groups word 2 bit 1: ApplePMGR programs this group after initDriver. */
 #define GROUP_PROGRAMMED 2
 
@@ -83,6 +88,19 @@ static bool translate(AppleModernBlob ranges, uint64_t child, uint64_t size,
         if (child >= c && child - c <= n && size <= n - (child - c) &&
             p <= UINT64_MAX - (child - c) && p + (child - c) <= UINT64_MAX - size) {
             *physical = p + (child - c);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* True if [physical, physical + size) lies inside one /arm-io range's parent side. */
+static bool physical_in_ranges(AppleModernBlob ranges, uint64_t physical, uint64_t size)
+{
+    for (size_t i = 0; i < ranges.size; i += 24) {
+        uint64_t p = le64(ranges.data + i + 8);
+        uint64_t n = le64(ranges.data + i + 16);
+        if (physical >= p && physical - p <= n && size <= n - (physical - p)) {
             return true;
         }
     }
@@ -182,12 +200,121 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     at t + 0x300; the middle one is skipped for exactly one iteration, the eighth
  *     (its countdown register x23 reaches 0 only there), so channel 7 lists only
  *     +0x200 and +0x300. Plain RMW, no wait: 29 registers in all.
+ *  17: the PMC static-voter vote registers, in /arm-io/pmgr reg[43] (child 0xf2000000,
+ *     physical 0x302000000, 16 MiB; RegMap selector 0x81, which the 43 pairs of initRegMap
+ *     as decoded do not list), at offset 0x8ac000: ApplePMC register group
+ *     kRegGroupPMCDVFM has base offset 0x800000 (MEASURED in guest memory at pmgr+0x6088)
+ *     and AppleT8140PMC adds 0xac000. Four 32-bit registers at +0x0 .. +0xc. Reached
+ *     from the base slot-0x5a0 routine 0xfffffff0092aac90 (called by the wrapper
+ *     0xfffffff009847d84 at 0x9847fd0): for each die i < this+0x631c it calls the PMC
+ *     object at this+0x738a0 through vtable slot 0x28, which reaches ApplePMC::restorePMC
+ *     (0xfffffff0092e39e0); for each of the PMC's three voter agents (this+8, +0xc, +0x10 =
+ *     PMP 0, CLPC 1, AP 3 here) it calls _enableStaticVoterInterface (0xfffffff0092e3b5c),
+ *     which for every rail of the agent's mask does a read-modify-write of the register at
+ *     0xac000 + 4 * rail (AppleT8140PMC read/write thunks 0xfffffff00984ccac and
+ *     0xfffffff00984cc18, kind 0), setting the agent's bit (voter-agent byte 2). The rail
+ *     index is the first u16 of the ADT voter-rail-data record (DCS 0, SOC 1, DISP 2,
+ *     AVE 3), which the plan builder checks. Plain RMW, no wait: 4 registers (+0x0 .. +0xc).
+ *     The same window also lists the dynamic-voter control register +0x24 (0x3028ac024:
+ *     AppleT8140PMC kind 2). restorePMC's flag-bit-4 branch (ADT pmc-pmgr 0x3f has it) calls the T8140PMC
+ *     vtable slot 0xa8 (0xfffffff00984cfa8, from restorePMC at 0xfffffff0092e3a98) with
+ *     enable = 1 and flag = (this+0x3c != 0): a read-modify-write of 0xac024 to
+ *     (v & ~3) | (enable ? 2 : 0) | flag, no poll. It then tail-calls vtable slot 0xa0
+ *     (0xfffffff00984d0a8) with the value returned by slot 0xc0 (0xfffffff00984d5e8: -1),
+ *     which writes 0xffffffff to PMC +0x60000.
+ *  18: PMC +0x60000 of the same group, i.e. reg[43] +0x860000, one write-only register
+ *     (plain storage here; nothing on this path reads it).
+ *  17 (again): +0x28 (0x3028ac028, AppleT8140PMC kind 3, the BOOST interface). The per-device
+ *     loop of the slot-0x5a0 routine (0xfffffff0092ab2e8 -> 0xfffffff0092c3f8c ->
+ *     0xfffffff0092c41ec) writes each device's PMGR power state and then calls
+ *     ApplePMC::stateChange(enable = 1, device id, die) through PMC vtable slot 8
+ *     (0xfffffff0092c4238); the base stateChange (0xfffffff0092e4160) runs one handler per
+ *     bit of the PMC flags (this+0x24 = 0x3f): bit 0 VOTER (0xfffffff0092e3dd0, kind 0
+ *     vote registers, only for dynamic voter agents whose id matches), bit 1 BOOST
+ *     (0xfffffff0092e42e0), bit 2 DVMR (0xfffffff0092e43ec), bit 3 BWR (0xfffffff0092e44e4,
+ *     kind 1), bit 5 LTR (0xfffffff0092e45f8). The BOOST handler is, for a device id whose
+ *     map entry (this+0x106ec + 2 * id) is not -1, a read-modify-write of 0xac028: set
+ *     (enable) or clear the bit given by byte 2 of the device's 24-byte record at
+ *     [this+0x98]. No poll. The guest's first stateChange that reached a register had
+ *     device id 0x3a (MEASURED: saved x22 in the faulting frame).
+ *  17 (third time): +0x20 (0x3028ac020, AppleT8140PMC kind 1, the BWR interface). The BWR
+ *     handler of stateChange (bit 3, 0xfffffff0092e44e4) scans the BWR table at [this+0x88]
+ *     (24-byte records, count [this+0x90]) for records whose u32 at +4 equals
+ *     (device id | die << 28); each match is a read-modify-write of 0xac020 setting
+ *     (enable) or clearing the bit in record byte 2, through the same T8140PMC kind
+ *     thunks. No poll. The sixth stateChange call of the guest reached it (MEASURED:
+ *     breakpoints on the handlers, 5 calls passed without a match and the sixth
+ *     stopped on this read; the rejection was invisible to -d invalid_mem because the
+ *     address lies inside the window, see announce_reject).
+ *     NOT listed, deliberately: the LTR handler (bit 5, 0xfffffff0092e45f8) read-modify-writes
+ *     +0xa9c18 and then POLLS +0xa9c1c for (reg & mask) == (enable ? mask : 0), an ack bit
+ *     that zero storage would never set; it needs a behavioural model, not storage. The
+ *     T8140 wrapper's +0x78000 write (devices 0x153..0x157) is not listed either.
+ *  19: the DVMR state register +0xa4000 and its busy flag +0xa4020 of the same PMC group
+ *     (reg[43] +0x8a4000 and +0x8a4020; window 0x24 bytes with those two registers listed).
+ *     ApplePMC::stateChange's DVMR handler (bit 2, 0xfffffff0092e43ec) reads the state
+ *     register through PMC vtable slot 0x90 (AppleT8140PMC::readPMCStateReg,
+ *     0xfffffff00984ce14: always 0xa4000, whatever the interface argument), sets or clears
+ *     the device's bit and writes it back through slot 0x98 (writePMCStateReg,
+ *     0xfffffff00984ce4c), which then POLLS 0xa4020 until bit 0 is clear (waitReg32,
+ *     offset 0xa4020, mask 1, value 0, timeout 0x2ee00), reads 0xa4000 again and writes
+ *     its population count to +0xa9c14. THE POLL: it passes on the first read only
+ *     because bit 0 of 0xa4020 is never set (declared: busy never asserted; a driver or
+ *     firmware that set it would hang until the timeout).
+ *  20: the population-count destination +0xa9c14 (reg[43] +0x8a9c14), write-only here.
+ *  21: PMGR_SOC_PWRGATE +0xc8c and +0xcd0 (reg 22, RegMap selector 0x65, physical
+ *     0x300724c8c and 0x300724cd0), write-only here. The tail of the T8140 write32 override
+ *     (0xfffffff00984b768) consults a second static table at 0xfffffff00b925950 (24-byte
+ *     records: trigger selector and offset, target selector and offset, two values; the
+ *     two records both trigger on PMGR_SOC +0x10000). When the check at 0xfffffff00984bab4
+ *     returns 1 it polls the written register for (v & 0xf0) == 0xf0 and then (v & 0x800) == 0
+ *     (generic wait 0xfffffff0092afba0, timeout 0x2ee00; both are reads of the modelled
+ *     PMGR_SOC power cell, MEASURED to pass) and calls 0xfffffff00984bbb0 with flag 1, which
+ *     does two plain writes through the base vtable slot 0xd30: PwrGate +0xc8c = 0 then
+ *     +0xcd0 = 1 (flag 0 writes 3 and 0). Nothing reads them back on this path.
+ *     The guest's first rejected access was the +0xc8c write (MEASURED: 0x300724c8c, the
+ *     value 0, selector 0x65 in the faulting frame).
+ *  22: PMGR_SOC_TVM (reg 25, RegMap selector 0x67, physical 0x300760000) +0x400 and +0x7e0.
+ *     The perf-domain routine at 0xfffffff0092b5670 (reached from the slot-0x5a0 routine's
+ *     helper 0xfffffff0092ab0b8 through vtable slot 0xc18) calls AppleT8140PMGR's
+ *     setTVMEnable (vtable slot 0xa50, 0xfffffff009849284) with enable 0 and wait 1 for every
+ *     /arm-io/pmgr soc-clusters record (ADT, 28 bytes: id, flags in byte 2, TVM index in
+ *     byte 0xb, name at +0xc) whose flags bit 2 is set and whose TVM index is not 4 or 5. In the
+ *     stock ADT only the AVE record (flags 5, index 0xb) qualifies (the plan builder checks
+ *     that). setTVMEnable maps index 0xb to control register +0x400 and status register
+ *     +0x7e0: read-modify-write (v & ~1) | enable, then, because wait is set and enable
+ *     is clear, a POLL of +0x7e0 until bit 1 is clear (readPMGRSOCTVMReg stubs at
+ *     0xfffffff00984ebb0 / 0xfffffff00984ec20). THE POLL passes on the first read only because
+ *     bit 1 of +0x7e0 is never set (declared: the TVM never reports busy). The other TVM
+ *     indices (1: +0x0/+0x3e0, 2: +0xc00/+0xfe0, 6: +0x800/+0xbe0, 9: +0x1000/+0x13e0) are
+ *     NOT listed: no soc-clusters record selects them. The guest's first rejected access was
+ *     the +0x400 read (MEASURED: 0x300760400, selector 0x67).
+ *  23-32: ten block-local register pairs the T8140 PS-write hook read-modify-writes. The
+ *     AppleT8140PMGR write32 override (vtable slot 0xd20, 0xfffffff00984b768; ApplePMGR's
+ *     PS-level writer 0xfffffff00929fe20 calls it) runs when this+0x738f0 is non-zero
+ *     (0x3ff, MEASURED in the guest: all ten entries enabled). It searches the static table
+ *     at 0xfffffff00b9257c0 (ten 40-byte entries: u32 RegMap selector 0, u32 PMGR_SOC
+ *     register offset, u64 physical block base, two runtime pointers) for the written
+ *     (selector, offset); a match calls the check function 0xfffffff00984b2b0, which
+ *     sets bit 0 of the registers at base + 0x104 and base + 0x108 (power-up, 0x984b384)
+ *     or clears it (power-down, 0x984b3c4), each a plain read-modify-write through a
+ *     pointer mapped at init (0xfffffff00984760c: IOMemoryDescriptor on base + 0x104 and
+ *     base + 0x108, length 4). The mask-driven loop at 0xfffffff009848214 calls the same
+ *     function for every entry whose PMGR_SOC register reads actual state 0xf. No poll.
+ *     The entries (PMGR_SOC offset, block base): 0x3e8 0x408000000, 0x280 0x413000000,
+ *     0x288 0x417000000, 0x278 0x38b000000 (/arm-io/ans reg[4]), 0x270 0x380000000
+ *     (/arm-io/avd reg[0]), 0x240 0x284000000 (/arm-io/ave reg[4]), 0x248 0x288000000
+ *     (/arm-io/ave1 reg[4]), 0x1f0 0x481000000 (/arm-io/sgx reg[0] +0x1000000), 0x230
+ *     0x28c000000, 0x2a0 0x396000000 (/arm-io/apcie reg[4]). The guest's first rejected
+ *     access was entry 1 (MEASURED: 0x413000104, the PMGR_SOC +0x280 write); the other
+ *     nine pairs are listed from the table and the measured mask, not from a run. None of
+ *     these blocks is otherwise modelled, so only the two registers per block exist.
  */
 typedef struct FixedWindow {
     unsigned reg_index;
     uint32_t offset, size;
     unsigned nregs;         /* 0: every 4-byte slot of the window is a register */
-    uint16_t regs[3];       /* else: register offsets inside the window (multiples of 4) */
+    uint16_t regs[8];       /* else: register offsets inside the window (multiples of 4) */
 } FixedWindow;
 #define DPE_CHANNEL(n) {32, 0x2400 + 0x400 * (n), 0x304, 3, {0, 0x200, 0x300}}
 static const FixedWindow fixed_windows[] = {
@@ -202,6 +329,23 @@ static const FixedWindow fixed_windows[] = {
     DPE_CHANNEL(5), DPE_CHANNEL(6),
     {32, 0x4200, 0x104, 2, {0, 0x100}},     /* channel 7 has no +0x0 register */
     DPE_CHANNEL(8), DPE_CHANNEL(9),
+    {43, 0x8ac000, 0x2c, 7, {0, 4, 8, 0xc, 0x20, 0x24, 0x28}},  /* PMC votes 0..3, bwr, dynamic, boost */
+    {43, 0x860000, 0x4, 0, {0}},            /* PMC +0x60000 (kRegGroupPMCDVFM + 0x60000) */
+    {43, 0x8a4000, 0x24, 2, {0, 0x20}},     /* PMC DVMR state +0xa4000, busy +0xa4020 */
+    {43, 0x8a9c14, 0x4, 0, {0}},            /* PMC DVMR popcount +0xa9c14 */
+    {22, 0xc8c, 0x48, 2, {0, 0x44}},        /* PwrGate +0xc8c and +0xcd0 (hook table 2) */
+    {25, 0x400, 0x3e4, 2, {0, 0x3e0}},      /* PMGR_SOC_TVM index 0xb: control +0x400, status +0x7e0 */
+};
+
+/* Block bases of the T8140 PS-write hook table (see item 23-32 above), in table order. The window
+ * of block b is the register pair at b + 0x104 and b + 0x108; each must lie inside the /arm-io
+ * bus ranges. Their tags continue the fixed windows' (FIXED_TAG_BASE + count + index). */
+#define ACG_OFFSET 0x104
+#define ACG_SIZE 0x8
+static const uint64_t acg_blocks[] = {
+    UINT64_C(0x408000000), UINT64_C(0x413000000), UINT64_C(0x417000000), UINT64_C(0x38b000000),
+    UINT64_C(0x380000000), UINT64_C(0x284000000), UINT64_C(0x288000000), UINT64_C(0x481000000),
+    UINT64_C(0x28c000000), UINT64_C(0x396000000),
 };
 
 /* Append one window after the geometry checks; *plan is unchanged on failure. */
@@ -250,7 +394,7 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
     const AppleModernAddressRange *exclusions, size_t exclusion_count,
     AppleModernPMGRStoragePlan *output, Error **errp)
 {
-    AppleModernBlob reg, groups_blob, counters, ranges;
+    AppleModernBlob reg, groups_blob, counters, ranges, rails, clusters;
     Group groups[MAX_GROUPS];
     AppleModernPMGRStoragePlan plan;
     unsigned group_count, counter_count;
@@ -280,6 +424,36 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
         !apple_modern_adt_property(tree, "/arm-io/pmgr", "perf-counters", &counters, errp) ||
         !apple_modern_adt_property(tree, "/arm-io", "ranges", &ranges, errp)) {
         return false;
+    }
+    if (!apple_modern_adt_property(tree, "/arm-io/pmgr", "voter-rail-data", &rails, errp)) {
+        return false;
+    }
+    /* The vote-register window lists exactly rails 0..3 (24-byte records, u16 rail index first). */
+    if (rails.size != VOTER_RAILS * VOTER_RAIL_RECORD) {
+        error_setg(errp, "unsupported PMGR voter-rail-data schema");
+        return false;
+    }
+    for (unsigned i = 0; i < VOTER_RAILS; i++) {
+        if (rails.data[VOTER_RAIL_RECORD * i] != i || rails.data[VOTER_RAIL_RECORD * i + 1]) {
+            error_setg(errp, "PMGR voter rail %u has an index the vote-register window does not list", i);
+            return false;
+        }
+    }
+    /* Only the AVE record (index 2) selects a TVM, with index 0xb: that is what the TVM window lists. */
+    if (!apple_modern_adt_property(tree, "/arm-io/pmgr", "soc-clusters", &clusters, errp)) {
+        return false;
+    }
+    if (clusters.size != SOC_CLUSTERS * SOC_CLUSTER_RECORD) {
+        error_setg(errp, "unsupported PMGR soc-clusters schema");
+        return false;
+    }
+    for (unsigned i = 0; i < SOC_CLUSTERS; i++) {
+        const uint8_t *c = clusters.data + SOC_CLUSTER_RECORD * i;
+        bool selects = (c[2] & 4) && (c[0xb] & 0xfe) != 4;
+        if (selects != (i == SOC_CLUSTER_AVE) || (selects && c[0xb] != 0xb)) {
+            error_setg(errp, "PMGR soc-clusters record %u selects a TVM the window does not list", i);
+            return false;
+        }
     }
     if (!reg.size || reg.size % 16 || reg.size > MAX_REG_ENTRIES * 16 ||
         !groups_blob.size || groups_blob.size % GROUP_RECORD ||
@@ -384,6 +558,21 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
             return false;
         }
     }
+    for (unsigned i = 0; i < ARRAY_ENTRIES(acg_blocks); i++) {
+        uint64_t valid[APPLE_MODERN_PMGR_STORAGE_MASKS] = {0};
+        for (unsigned slot = 0; slot < ACG_SIZE / 4; slot++) {
+            valid[slot / 64] |= UINT64_C(1) << (slot % 64);
+        }
+        if (!physical_in_ranges(ranges, acg_blocks[i] + ACG_OFFSET, ACG_SIZE)) {
+            error_setg(errp, "PMGR block-local register pair %u is outside the /arm-io bus ranges", i);
+            return false;
+        }
+        if (!place(&plan, acg_blocks[i] + ACG_OFFSET, ACG_SIZE,
+                   FIXED_TAG_BASE + ARRAY_ENTRIES(fixed_windows) + i, valid,
+                   dram_base, dram_size, exclusions, exclusion_count, errp)) {
+            return false;
+        }
+    }
     *output = plan;
     return true;
 }
@@ -477,13 +666,30 @@ bool apple_modern_pmgr_storage_core_write(AppleModernPMGRStorageCore *core,
 typedef struct StorageView {
     AppleModernPMGRStorageCore *core;
     unsigned index;
+    uint64_t *rejected;     /* diagnostics only: one bit per 4-byte slot already announced */
 } StorageView;
 struct AppleModernPMGRStorageState {
     SysBusDevice parent_obj;
     AppleModernPMGRStorageCore core;
     StorageView views[APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS];
     MemoryRegion regions[APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS];
+    uint64_t rejected[APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS][APPLE_MODERN_PMGR_STORAGE_MASKS];
 };
+/* A rejected access INSIDE a window (a hole between listed registers, a size or alignment the
+ * window does not take) is not logged by -d invalid_mem, which only reports unmapped addresses.
+ * Announce the first one per 4-byte slot so a run shows the next unmodelled register. */
+static void announce_reject(StorageView *view, hwaddr offset, unsigned size, const char *what)
+{
+    uint64_t slot = offset / 4;
+    if (slot < APPLE_MODERN_PMGR_STORAGE_SLOTS &&
+        !((view->rejected[slot / 64] >> (slot % 64)) & 1)) {
+        view->rejected[slot / 64] |= UINT64_C(1) << (slot % 64);
+        info_report("apple-modern pmgr-storage: REJECTED %s of window %u (group %u) +0x%"
+                    HWADDR_PRIx " (%u bytes, address 0x%" PRIx64 ")", what, view->index,
+                    view->core->plan.windows[view->index].group, offset, size,
+                    view->core->plan.windows[view->index].address + offset);
+    }
+}
 /* A register is announced once, on its first successful access (at most one line
  * per listed register), so a run shows exactly which registers the guest touched. */
 static void announce(StorageView *view, bool fresh, hwaddr offset, unsigned size,
@@ -502,6 +708,7 @@ static MemTxResult storage_read(void *opaque, hwaddr offset, uint64_t *value,
     bool fresh = !apple_modern_pmgr_storage_core_touched(view->core, view->index, offset);
     if (!apple_modern_pmgr_storage_core_read(view->core, view->index, offset, size,
                                              value)) {
+        announce_reject(view, offset, size, "read");
         return MEMTX_ACCESS_ERROR;
     }
     announce(view, fresh, offset, size, "read");
@@ -514,6 +721,7 @@ static MemTxResult storage_write(void *opaque, hwaddr offset, uint64_t value,
     bool fresh = !apple_modern_pmgr_storage_core_touched(view->core, view->index, offset);
     if (!apple_modern_pmgr_storage_core_write(view->core, view->index, offset, size,
                                               value)) {
+        announce_reject(view, offset, size, "write");
         return MEMTX_ACCESS_ERROR;
     }
     announce(view, fresh, offset, size, "write");
@@ -527,14 +735,16 @@ static const MemoryRegionOps storage_ops = {
 };
 static void storage_reset(DeviceState *dev)
 {
-    apple_modern_pmgr_storage_core_reset(&APPLE_MODERN_PMGR_STORAGE(dev)->core);
+    AppleModernPMGRStorageState *s = APPLE_MODERN_PMGR_STORAGE(dev);
+    apple_modern_pmgr_storage_core_reset(&s->core);
+    memset(s->rejected, 0, sizeof(s->rejected));
 }
 static void storage_realize(DeviceState *dev, Error **errp)
 {
     AppleModernPMGRStorageState *s = APPLE_MODERN_PMGR_STORAGE(dev);
     for (unsigned i = 0; i < s->core.plan.count; i++) {
         char name[48];
-        s->views[i] = (StorageView){&s->core, i};
+        s->views[i] = (StorageView){&s->core, i, s->rejected[i]};
         snprintf(name, sizeof(name), "apple-modern.pmgr-storage-%u",
                  s->core.plan.windows[i].group);
         memory_region_init_io(&s->regions[i], OBJECT(dev), &storage_ops, &s->views[i],

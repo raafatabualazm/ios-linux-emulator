@@ -26,16 +26,22 @@
  * driver never writes these registers.
  *
  * In every window the driver only reads and republishes the values. DECLARED,
- * not attested: each window is a plain storage page that resets to zero. The
- * real contents are per-chip firmware-written entries (frequencies, voltage
- * ids and the field values above); none is available for this device, so this
- * is a boot-progress diagnostic profile, not calibration or silicon behaviour.
- * The model accepts the whole RegMap page although the BootKC attests only the
- * registers named above; the machine logs the first access to each 8-byte word
- * so a run shows which words the guest really touched. 8-byte and 4-byte
- * accesses are accepted; anything else faults.
+ * not attested: the registers hold zero; the real contents are per-chip
+ * firmware-written entries (frequencies, voltage ids and the field values
+ * above); none is available for this device, so this is a boot-progress
+ * diagnostic profile, not calibration or silicon behaviour.
+ *
+ * Windows 0 and 1 (state tables) accept every aligned 4-byte and 8-byte access
+ * and keep what is written. Windows 2 and 3 (control pages) accept ONLY the
+ * attested 8-byte reads named above, which return zero; writes, 4-byte
+ * accesses and every other offset of the page fault, so an unattested access
+ * shows up as the next frontier instead of being absorbed. The machine logs
+ * the first access to each 8-byte word so a run shows which words the guest
+ * really touched.
  */
 #define APPLE_MODERN_DVFM_WINDOWS 4
+/* Windows [0, TABLE_WINDOWS) are state tables; the rest are control pages. */
+#define APPLE_MODERN_DVFM_TABLE_WINDOWS 2
 #define APPLE_MODERN_DVFM_SPAN 0x1000
 #define APPLE_MODERN_DVFM_WORDS (APPLE_MODERN_DVFM_SPAN / 8)
 

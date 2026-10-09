@@ -82,6 +82,7 @@ struct AppleModernMachine {
     bool has_amcc;
     bool img4_ignition_compat;
     bool md0_width_compat;
+    bool trustcache_v2;
     bool pauth_compat;
     bool sep_trace;
     bool sep_mailbox;
@@ -1817,6 +1818,7 @@ static void modern_init(MachineState *machine)
         .framebuffer_width = s->boot_display ? s->display_width : 0,
         .framebuffer_height = s->boot_display ? s->display_height : 0,
         .framebuffer_stride = s->boot_display ? s->display_stride : 0,
+        .trustcache_v2 = s->trustcache_v2,
     };
     if (s->large_ramdisk) {
         if (!apple_modern_large_ramdisk_map(s->paths[ASSET_RAMDISK],
@@ -2233,6 +2235,7 @@ ASSET_PROPERTY(ramdisk, ASSET_RAMDISK)
       if (check_mutable(s, errp)) { s->field = value; } }
 BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
 BOOL_PROPERTY(md0_width_compat, md0_width_compat)
+BOOL_PROPERTY(trustcache_v2, trustcache_v2)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(sep_trace, sep_trace)
 BOOL_PROPERTY(sep_mailbox, sep_mailbox)
@@ -2444,6 +2447,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_pmgr_aon_fuse_image);
     object_class_property_add_str(oc, "boot-command-line", get_boot_command_line,
                                   set_boot_command_line);
+    object_class_property_add_bool(oc, "trustcache-v2", get_trustcache_v2,
+                                   set_trustcache_v2);
     object_class_property_add_bool(oc, "pauth-compat", get_pauth_compat,
                                    set_pauth_compat);
     object_class_property_add_bool(oc, "sep-trace", get_sep_trace,
