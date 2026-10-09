@@ -99,6 +99,8 @@ struct AppleModernMachine {
     char *pmgr_aon_fuse_image;
     /* Declared profile for the iBoot-computed /arm-io/pmgr voltage-states*. */
     char *pmgr_voltage_states;
+    /* Publish the modelled counter frequency as /cpus/cpu0 timebase-frequency. */
+    bool adt_timebase_match;
     AppleModernPMGRFusePlan pmgr_fuse_plan;
     AppleDARTT8110State *sep_mapper;
     AddressSpace *sep_dma_as;
@@ -1601,6 +1603,10 @@ static void modern_init(MachineState *machine)
 {
     AppleModernMachine *s = APPLE_MODERN_MACHINE(machine);
     AppleModernBootMetadataInput metadata_input = {0};
+    AppleModernAdtOverride overrides[APPLE_MODERN_MAX_ADT_OVERRIDES];
+    const AppleModernAdtOverride *profile = NULL;
+    size_t profile_count = 0, override_count = 0;
+    uint8_t timebase_bytes[4];
     uint64_t uart, uart_span;
     size_t asset_budget = GiB;
     Error *error = NULL;
@@ -1654,9 +1660,9 @@ static void modern_init(MachineState *machine)
     }
     metadata_input.aic_iack_offset = s->aic_iack_offset;
     if (s->pmgr_voltage_states) {
-        metadata_input.overrides = apple_modern_pmgr_voltage_profile(
-            s->pmgr_voltage_states, &metadata_input.override_count);
-        if (!metadata_input.overrides) {
+        profile = apple_modern_pmgr_voltage_profile(s->pmgr_voltage_states,
+                                                    &profile_count);
+        if (!profile) {
             error_report("apple-modern: unknown pmgr-voltage-states profile "
                          "'%s' (supported: %s)", s->pmgr_voltage_states,
                          APPLE_MODERN_PMGR_VOLTAGE_J700);
@@ -1666,11 +1672,56 @@ static void modern_init(MachineState *machine)
                     "'%s' profile (MacBook Neo A18 Pro; analogy for "
                     "iPhone17,3, not an attested value)", s->pmgr_voltage_states);
     }
+    for (size_t i = 0; i < profile_count; i++) {
+        overrides[override_count++] = profile[i];
+    }
+    if (s->adt_timebase_match) {
+        /*
+         * XNU's clock and every deadline derive from the ADT value, while the
+         * modelled generic counter runs at timebase-frequency; a template
+         * tree whose value differs makes guest time run fast or slow.
+         */
+        stl_le_p(timebase_bytes, (uint32_t)s->timebase_frequency);
+        overrides[override_count++] = (AppleModernAdtOverride){
+            "/cpus/cpu0", "timebase-frequency", timebase_bytes,
+            sizeof(timebase_bytes)};
+    }
+    if (override_count) {
+        metadata_input.overrides = overrides;
+        metadata_input.override_count = override_count;
+    }
     if (!apple_modern_boot_metadata_build(&metadata_input, &s->metadata, &error) ||
         !uart_address(s->components.dtree, &uart, &uart_span, &s->uart_irq,
                       &error)) {
         error_report_err(error);
         exit(EXIT_FAILURE);
+    }
+    {
+        AppleModernBlob tb;
+        Error *tb_error = NULL;
+        /* The tree itself was just validated, so a failed lookup means the
+         * property is absent (XNU then has no timebase at all). */
+        if (apple_modern_adt_property((AppleModernBlob){s->metadata.dtree,
+                s->metadata.dtree_size}, "/cpus/cpu0", "timebase-frequency",
+                &tb, &tb_error)) {
+            uint64_t served = 0;
+            for (size_t i = 0; i < tb.size && i < 8; i++) {
+                served |= (uint64_t)tb.data[i] << (8 * i);
+            }
+            if (served != s->timebase_frequency) {
+                warn_report("apple-modern: served ADT /cpus/cpu0 "
+                            "timebase-frequency is %" PRIu64 " Hz but the "
+                            "modelled counter runs at %" PRIu64 " Hz; guest "
+                            "time will run %.2fx real time (set "
+                            "adt-timebase-match=on to publish the counter "
+                            "frequency)", served, s->timebase_frequency,
+                            (double)s->timebase_frequency / (double)served);
+            }
+        } else {
+            error_free(tb_error);
+            warn_report("apple-modern: served ADT has no /cpus/cpu0 "
+                        "timebase-frequency (iBoot normally supplies it)");
+        }
     }
     if (s->img4_ignition_compat) {
         /*
@@ -1900,6 +1951,7 @@ BOOL_PROPERTY(modern_mcc_perf, modern_mcc_perf)
 BOOL_PROPERTY(modern_mcc_socni, modern_mcc_socni)
 BOOL_PROPERTY(modern_mcc_socni_command, modern_mcc_socni_command)
 BOOL_PROPERTY(modern_mcc_dcs_perf, modern_mcc_dcs_perf)
+BOOL_PROPERTY(adt_timebase_match, adt_timebase_match)
 BOOL_PROPERTY(modern_mcc_dsid, modern_mcc_dsid)
 BOOL_PROPERTY(modern_mcc_slc, modern_mcc_slc)
 BOOL_PROPERTY(aic_trace, aic_trace)
@@ -2061,6 +2113,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "dtree", get_dtree, set_dtree);
     object_class_property_add_str(oc, "tc", get_tc, set_tc);
     object_class_property_add_str(oc, "ramdisk", get_ramdisk, set_ramdisk);
+    object_class_property_add_bool(oc, "adt-timebase-match", get_adt_timebase_match,
+                                   set_adt_timebase_match);
     object_class_property_add_str(oc, "pmgr-voltage-states",
                                   get_pmgr_voltage_states,
                                   set_pmgr_voltage_states);

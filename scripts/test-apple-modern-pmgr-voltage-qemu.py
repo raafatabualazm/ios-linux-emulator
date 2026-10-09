@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -97,6 +98,8 @@ def run_case(binary: Path, components: Path, extra: str, blobs: dict, label: str
             result["pmgr"] = {n: p["value"].hex() for n, p in nodes["/arm-io/pmgr"].items()
                               if n.startswith("voltage-states")}
             result["nodes"] = order
+            result["cpu0_timebase"] = (nodes["/cpus/cpu0"].get("timebase-frequency", {})
+                                       .get("value", b"").hex())
             result["tree"] = tree
             if extra:
                 result["property_immutable"] = qmp_immutable(qmp)
@@ -147,11 +150,69 @@ def refused(binary: Path, components: Path, evidence: Path) -> dict:
     return {"exit_code": run.returncode, "stderr": run.stderr.strip()}
 
 
+def changed_properties(base: dict, other: dict) -> list:
+    changed = []
+    for path, props in base.items():
+        require(set(props) <= set(other[path]), "no property disappeared")
+        for name, prop in props.items():
+            if prop["raw"] != other[path][name]["raw"]:
+                changed.append((path, name))
+        changed += [(path, n) for n in other[path] if n not in props]
+    require(set(other) == set(base), "node set unchanged")
+    return sorted(changed)
+
+
+def timebase_cases(binary: Path, components: Path, served_tree: Path, scratch: Path,
+                   evidence: Path) -> dict:
+    """adt-timebase-match: template tree without the property, and a served tree
+    whose Darwin-derived 1,048,576 Hz disagrees with the 24 MHz counter."""
+    out = {}
+    # The board refuses symlinked assets; hard links keep one copy on disk.
+    served_dir = evidence / "served-components"
+    served_dir.mkdir()
+    for name in machine_gate.ASSETS:
+        source = (served_tree if name == "dtree" else components / name).resolve()
+        try:
+            os.link(source, served_dir / name)
+        except OSError:
+            (served_dir / name).write_bytes(source.read_bytes())
+    for label, directory in (("template", components), ("served", served_dir)):
+        blobs = {name: (directory / name).read_bytes() for name in machine_gate.ASSETS}
+        base = run_case(binary, directory, "", blobs, f"tb-{label}-default", evidence)
+        match = run_case(binary, directory, ",adt-timebase-match=on", blobs,
+                         f"tb-{label}-match", evidence)
+        odd = run_case(binary, directory, ",adt-timebase-match=on,timebase-frequency=12000000",
+                       blobs, f"tb-{label}-match-12MHz", evidence)
+        b_nodes, _ = oracle.parse_adt(base["tree"])
+        for case, hz in ((match, 24000000), (odd, 12000000)):
+            nodes, _ = oracle.parse_adt(case["tree"])
+            require(case["cpu0_timebase"] == hz.to_bytes(4, "little").hex(),
+                    f"{label}: published timebase equals the counter frequency {hz}")
+            require(changed_properties(b_nodes, nodes) == [("/cpus/cpu0", "timebase-frequency")],
+                    f"{label}: only timebase-frequency differs")
+        if label == "template":
+            require(base["cpu0_timebase"] == "", "template tree carries no timebase")
+            require("served ADT has no /cpus/cpu0 timebase-frequency" in base["log"],
+                    "template default warns about the missing property")
+        else:
+            require(base["cpu0_timebase"] == (1048576).to_bytes(4, "little").hex(),
+                    "served tree carries the Darwin 1,048,576 Hz value")
+            require("timebase-frequency is 1048576 Hz but the modelled counter runs at "
+                    "24000000 Hz; guest time will run 22.89x real time" in base["log"],
+                    "served default warns with the exact skew")
+        require("timebase-frequency is" not in match["log"], f"{label}: matched board is silent")
+        out[label] = {"default": base["cpu0_timebase"], "match": match["cpu0_timebase"],
+                      "match_12MHz": odd["cpu0_timebase"]}
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--components", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--served-tree", type=Path,
+                        help="Darwin-derived served ADT with /cpus/cpu0 timebase-frequency")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=False)
     assets = {name: args.components / name for name in machine_gate.ASSETS}
@@ -197,6 +258,10 @@ def main() -> int:
                 "three tables replaced, eight added")
         require(j700["property_immutable"], "creation-only option")
         report["unknown_profile"] = refused(args.binary, args.components, args.output_dir)
+        if args.served_tree:
+            with tempfile.TemporaryDirectory(prefix="pmgr-voltage-tb-") as temp:
+                report["timebase"] = timebase_cases(args.binary, args.components,
+                                                    args.served_tree, Path(temp), args.output_dir)
         report["j700_changed_properties"] = [f"{p}:{n}" for p, n in sorted(changed)]
         report["stock_pmgr_voltage"] = stock_voltage
         report["passed"] = True
