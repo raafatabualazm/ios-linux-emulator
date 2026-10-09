@@ -28,6 +28,8 @@
 #include "hw/arm/apple-silicon/modern-mcc-socni-command.h"
 #include "hw/arm/apple-silicon/modern-mcc-dcs-perf.h"
 #include "hw/arm/apple-silicon/modern-pmgr-voltage.h"
+#include "hw/arm/apple-silicon/modern-pmp-ptd.h"
+#include "hw/arm/apple-silicon/modern-cpu-dvfm.h"
 #include "hw/arm/apple-silicon/modern-mcc-dsid.h"
 #include "hw/arm/apple-silicon/modern-mcc-slc.h"
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
@@ -99,6 +101,10 @@ struct AppleModernMachine {
     char *pmgr_aon_fuse_image;
     /* Declared profile for the iBoot-computed /arm-io/pmgr voltage-states*. */
     char *pmgr_voltage_states;
+    bool modern_pmp_ptd;
+    AppleModernPTDPlan pmp_ptd_plan;
+    bool modern_cpu_dvfm;
+    AppleModernDVFMPlan cpu_dvfm_plan;
     /* Declared reset profile naming PMGR domains iBoot leaves powered on. */
     char *pmgr_boot_on;
     /* Publish the modelled counter frequency as /cpus/cpu0 timebase-frequency. */
@@ -579,6 +585,22 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
             return false;
         }
     }
+    for (unsigned i = 0; i < APPLE_MODERN_PTD_VIEWS; i++) {
+        if (s->pmp_ptd_plan.addresses[i] &&
+            !append_pmgr_exclusion(exclusions, &count,
+                (AppleModernAddressRange){s->pmp_ptd_plan.addresses[i],
+                                         APPLE_MODERN_PTD_SPAN}, errp)) {
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < APPLE_MODERN_DVFM_WINDOWS; i++) {
+        if (s->cpu_dvfm_plan.addresses[i] &&
+            !append_pmgr_exclusion(exclusions, &count,
+                (AppleModernAddressRange){s->cpu_dvfm_plan.addresses[i],
+                                         APPLE_MODERN_DVFM_SPAN}, errp)) {
+            return false;
+        }
+    }
     if (s->pmgr_fuse_plan.size &&
         !append_pmgr_exclusion(exclusions, &count,
             (AppleModernAddressRange){s->pmgr_fuse_plan.base,
@@ -926,6 +948,60 @@ static bool map_mcc_slc(AppleModernMachine *s, uint64_t uart,
                 "Macs, m1n1 PR #664, analogy), "
                 "global writes broadcast and requested ways report powered at once; "
                 "no cache model");
+    return true;
+}
+
+static bool map_pmp_ptd(AppleModernMachine *s, uint64_t uart,
+                        uint64_t uart_span, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernPTDPlan plan;
+    size_t count;
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp) ||
+        !apple_modern_pmp_ptd_plan_build(dtree, s->components.dram_base,
+            s->components.dram_size, exclusions, count, &plan, errp)) {
+        return false;
+    }
+    DeviceState *dev = apple_modern_pmp_ptd_new();
+    dev->id = g_strdup("pmp-ptd");
+    object_property_add_child(OBJECT(s), "pmp-ptd", OBJECT(dev));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    for (unsigned i = 0; i < APPLE_MODERN_PTD_VIEWS; i++) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), i, plan.addresses[i]);
+    }
+    s->pmp_ptd_plan = plan;
+    warn_report("apple-modern: opt-in PMP PTD message board (MCC reg[6] Dashboard, "
+                "reg[7] Update); Update stores mirror into the Dashboard "
+                "(declared); no PMP responder: no acknowledgement or response "
+                "is ever produced");
+    return true;
+}
+
+static bool map_cpu_dvfm(AppleModernMachine *s, uint64_t uart,
+                         uint64_t uart_span, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernDVFMPlan plan;
+    size_t count;
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp) ||
+        !apple_modern_cpu_dvfm_plan_build(dtree, s->components.dram_base,
+            s->components.dram_size, exclusions, count, &plan, errp)) {
+        return false;
+    }
+    DeviceState *dev = apple_modern_cpu_dvfm_new();
+    dev->id = g_strdup("cpu-dvfm");
+    object_property_add_child(OBJECT(s), "cpu-dvfm", OBJECT(dev));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    for (unsigned i = 0; i < APPLE_MODERN_DVFM_WINDOWS; i++) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), i, plan.addresses[i]);
+    }
+    s->cpu_dvfm_plan = plan;
+    warn_report("apple-modern: opt-in CPU DVFM state-table windows (E 0x%" PRIx64
+                ", P 0x%" PRIx64 "); declared zero-reset storage, NOT calibration "
+                "data (a boot-progress diagnostic profile)",
+                plan.addresses[0], plan.addresses[1]);
     return true;
 }
 
@@ -1809,6 +1885,8 @@ static void modern_init(MachineState *machine)
          !map_mcc_dcs_perf(s, uart, uart_span, &error)) ||
         (s->modern_mcc_dsid && !map_mcc_dsid(s, uart, uart_span, &error)) ||
         (s->modern_mcc_slc && !map_mcc_slc(s, uart, uart_span, &error)) ||
+        (s->modern_pmp_ptd && !map_pmp_ptd(s, uart, uart_span, &error)) ||
+        (s->modern_cpu_dvfm && !map_cpu_dvfm(s, uart, uart_span, &error)) ||
         (s->pmgr_aon_fuse_image &&
          !map_pmgr_fuse(s, uart, uart_span, &error)) ||
         (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error))) {
@@ -1991,6 +2069,8 @@ BOOL_PROPERTY(modern_mcc_socni, modern_mcc_socni)
 BOOL_PROPERTY(modern_mcc_socni_command, modern_mcc_socni_command)
 BOOL_PROPERTY(modern_mcc_dcs_perf, modern_mcc_dcs_perf)
 BOOL_PROPERTY(adt_timebase_match, adt_timebase_match)
+BOOL_PROPERTY(modern_pmp_ptd, modern_pmp_ptd)
+BOOL_PROPERTY(modern_cpu_dvfm, modern_cpu_dvfm)
 BOOL_PROPERTY(modern_mcc_dsid, modern_mcc_dsid)
 BOOL_PROPERTY(modern_mcc_slc, modern_mcc_slc)
 BOOL_PROPERTY(aic_trace, aic_trace)
@@ -2153,6 +2233,10 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "dtree", get_dtree, set_dtree);
     object_class_property_add_str(oc, "tc", get_tc, set_tc);
     object_class_property_add_str(oc, "ramdisk", get_ramdisk, set_ramdisk);
+    object_class_property_add_bool(oc, "modern-pmp-ptd", get_modern_pmp_ptd,
+                                   set_modern_pmp_ptd);
+    object_class_property_add_bool(oc, "modern-cpu-dvfm", get_modern_cpu_dvfm,
+                                   set_modern_cpu_dvfm);
     object_class_property_add_bool(oc, "adt-timebase-match", get_adt_timebase_match,
                                    set_adt_timebase_match);
     object_class_property_add_str(oc, "pmgr-boot-on", get_pmgr_boot_on,
