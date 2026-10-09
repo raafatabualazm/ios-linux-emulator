@@ -235,7 +235,19 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     [this+0x98]. No poll. The guest's first stateChange that reached a register had
  *     device id 0x3a (MEASURED: saved x22 in the faulting frame). The kind 1 register
  *     (0xac020), the DVMR registers and the LTR write are NOT listed.
- *  19-28: ten block-local register pairs the T8140 PS-write hook read-modify-writes. The
+ *  19: the DVMR state register +0xa4000 and its busy flag +0xa4020 of the same PMC group
+ *     (reg[43] +0x8a4000 and +0x8a4020; window 0x24 bytes with those two registers listed).
+ *     ApplePMC::stateChange's DVMR handler (bit 2, 0xfffffff0092e43ec) reads the state
+ *     register through PMC vtable slot 0x90 (AppleT8140PMC::readPMCStateReg,
+ *     0xfffffff00984ce14: always 0xa4000, whatever the interface argument), sets or clears
+ *     the device's bit and writes it back through slot 0x98 (writePMCStateReg,
+ *     0xfffffff00984ce4c), which then POLLS 0xa4020 until bit 0 is clear (waitReg32,
+ *     offset 0xa4020, mask 1, value 0, timeout 0x2ee00), reads 0xa4000 again and writes
+ *     its population count to +0xa9c14. THE POLL: it passes on the first read only
+ *     because bit 0 of 0xa4020 is never set (declared: busy never asserted; a driver or
+ *     firmware that set it would hang until the timeout).
+ *  20: the population-count destination +0xa9c14 (reg[43] +0x8a9c14), write-only here.
+ *  21-30: ten block-local register pairs the T8140 PS-write hook read-modify-writes. The
  *     AppleT8140PMGR write32 override (vtable slot 0xd20, 0xfffffff00984b768; ApplePMGR's
  *     PS-level writer 0xfffffff00929fe20 calls it) runs when this+0x738f0 is non-zero
  *     (0x3ff, MEASURED in the guest: all ten entries enabled). It searches the static table
@@ -277,9 +289,11 @@ static const FixedWindow fixed_windows[] = {
     DPE_CHANNEL(8), DPE_CHANNEL(9),
     {43, 0x8ac000, 0x2c, 6, {0, 4, 8, 0xc, 0x24, 0x28}},  /* PMC votes 0..3, dynamic control, boost */
     {43, 0x860000, 0x4, 0, {0}},            /* PMC +0x60000 (kRegGroupPMCDVFM + 0x60000) */
+    {43, 0x8a4000, 0x24, 2, {0, 0x20}},     /* PMC DVMR state +0xa4000, busy +0xa4020 */
+    {43, 0x8a9c14, 0x4, 0, {0}},            /* PMC DVMR popcount +0xa9c14 */
 };
 
-/* Block bases of the T8140 PS-write hook table (see item 19-28 above), in table order. The window
+/* Block bases of the T8140 PS-write hook table (see item 21-30 above), in table order. The window
  * of block b is the register pair at b + 0x104 and b + 0x108; each must lie inside the /arm-io
  * bus ranges. Their tags continue the fixed windows' (FIXED_TAG_BASE + count + index). */
 #define ACG_OFFSET 0x104
@@ -592,13 +606,30 @@ bool apple_modern_pmgr_storage_core_write(AppleModernPMGRStorageCore *core,
 typedef struct StorageView {
     AppleModernPMGRStorageCore *core;
     unsigned index;
+    uint64_t *rejected;     /* diagnostics only: one bit per 4-byte slot already announced */
 } StorageView;
 struct AppleModernPMGRStorageState {
     SysBusDevice parent_obj;
     AppleModernPMGRStorageCore core;
     StorageView views[APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS];
     MemoryRegion regions[APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS];
+    uint64_t rejected[APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS][APPLE_MODERN_PMGR_STORAGE_MASKS];
 };
+/* A rejected access INSIDE a window (a hole between listed registers, a size or alignment the
+ * window does not take) is not logged by -d invalid_mem, which only reports unmapped addresses.
+ * Announce the first one per 4-byte slot so a run shows the next unmodelled register. */
+static void announce_reject(StorageView *view, hwaddr offset, unsigned size, const char *what)
+{
+    uint64_t slot = offset / 4;
+    if (slot < APPLE_MODERN_PMGR_STORAGE_SLOTS &&
+        !((view->rejected[slot / 64] >> (slot % 64)) & 1)) {
+        view->rejected[slot / 64] |= UINT64_C(1) << (slot % 64);
+        info_report("apple-modern pmgr-storage: REJECTED %s of window %u (group %u) +0x%"
+                    HWADDR_PRIx " (%u bytes, address 0x%" PRIx64 ")", what, view->index,
+                    view->core->plan.windows[view->index].group, offset, size,
+                    view->core->plan.windows[view->index].address + offset);
+    }
+}
 /* A register is announced once, on its first successful access (at most one line
  * per listed register), so a run shows exactly which registers the guest touched. */
 static void announce(StorageView *view, bool fresh, hwaddr offset, unsigned size,
@@ -617,6 +648,7 @@ static MemTxResult storage_read(void *opaque, hwaddr offset, uint64_t *value,
     bool fresh = !apple_modern_pmgr_storage_core_touched(view->core, view->index, offset);
     if (!apple_modern_pmgr_storage_core_read(view->core, view->index, offset, size,
                                              value)) {
+        announce_reject(view, offset, size, "read");
         return MEMTX_ACCESS_ERROR;
     }
     announce(view, fresh, offset, size, "read");
@@ -629,6 +661,7 @@ static MemTxResult storage_write(void *opaque, hwaddr offset, uint64_t value,
     bool fresh = !apple_modern_pmgr_storage_core_touched(view->core, view->index, offset);
     if (!apple_modern_pmgr_storage_core_write(view->core, view->index, offset, size,
                                               value)) {
+        announce_reject(view, offset, size, "write");
         return MEMTX_ACCESS_ERROR;
     }
     announce(view, fresh, offset, size, "write");
@@ -642,14 +675,16 @@ static const MemoryRegionOps storage_ops = {
 };
 static void storage_reset(DeviceState *dev)
 {
-    apple_modern_pmgr_storage_core_reset(&APPLE_MODERN_PMGR_STORAGE(dev)->core);
+    AppleModernPMGRStorageState *s = APPLE_MODERN_PMGR_STORAGE(dev);
+    apple_modern_pmgr_storage_core_reset(&s->core);
+    memset(s->rejected, 0, sizeof(s->rejected));
 }
 static void storage_realize(DeviceState *dev, Error **errp)
 {
     AppleModernPMGRStorageState *s = APPLE_MODERN_PMGR_STORAGE(dev);
     for (unsigned i = 0; i < s->core.plan.count; i++) {
         char name[48];
-        s->views[i] = (StorageView){&s->core, i};
+        s->views[i] = (StorageView){&s->core, i, s->rejected[i]};
         snprintf(name, sizeof(name), "apple-modern.pmgr-storage-%u",
                  s->core.plan.windows[i].group);
         memory_region_init_io(&s->regions[i], OBJECT(dev), &storage_ops, &s->views[i],

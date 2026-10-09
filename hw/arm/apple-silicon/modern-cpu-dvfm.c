@@ -225,13 +225,27 @@ bool apple_modern_cpu_dvfm_core_write(AppleModernDVFMCore *core, unsigned window
 typedef struct DVFMView {
     AppleModernDVFMCore *core;
     unsigned index;
+    uint64_t *rejected;     /* diagnostics only: one bit per 4-byte slot already announced */
 } DVFMView;
 struct AppleModernDVFMState {
     SysBusDevice parent_obj;
     AppleModernDVFMCore core;
     DVFMView views[APPLE_MODERN_DVFM_WINDOWS];
     MemoryRegion regions[APPLE_MODERN_DVFM_WINDOWS];
+    uint64_t rejected[APPLE_MODERN_DVFM_WINDOWS][APPLE_MODERN_DVFM_SPAN / 4 / 64];
 };
+/* A rejected access inside a window is not logged by -d invalid_mem (it reports only unmapped
+ * addresses); announce the first one per 4-byte slot so a run shows the next unattested access. */
+static void announce_reject(DVFMView *view, hwaddr offset, unsigned size, const char *what)
+{
+    uint64_t slot = offset / 4;
+    if (slot < APPLE_MODERN_DVFM_SPAN / 4 &&
+        !((view->rejected[slot / 64] >> (slot % 64)) & 1)) {
+        view->rejected[slot / 64] |= UINT64_C(1) << (slot % 64);
+        info_report("apple-modern cpu-dvfm: REJECTED %s of window %u +0x%" HWADDR_PRIx
+                    " (%u bytes)", what, view->index, offset, size);
+    }
+}
 /* Each distinct 8-byte word is announced once (at most 4 x 512 lines), so a run
  * shows exactly which words the guest touched; no word is ever announced twice. */
 static void announce(DVFMView *view, bool fresh, hwaddr offset, unsigned size,
@@ -248,6 +262,7 @@ static MemTxResult dvfm_read(void *opaque, hwaddr offset, uint64_t *value,
     DVFMView *view = opaque;
     bool fresh = !apple_modern_cpu_dvfm_core_touched(view->core, view->index, offset);
     if (!apple_modern_cpu_dvfm_core_read(view->core, view->index, offset, size, value)) {
+        announce_reject(view, offset, size, "read");
         return MEMTX_ACCESS_ERROR;
     }
     announce(view, fresh, offset, size, "read");
@@ -259,6 +274,7 @@ static MemTxResult dvfm_write(void *opaque, hwaddr offset, uint64_t value,
     DVFMView *view = opaque;
     bool fresh = !apple_modern_cpu_dvfm_core_touched(view->core, view->index, offset);
     if (!apple_modern_cpu_dvfm_core_write(view->core, view->index, offset, size, value)) {
+        announce_reject(view, offset, size, "write");
         return MEMTX_ACCESS_ERROR;
     }
     announce(view, fresh, offset, size, "write");
@@ -272,13 +288,15 @@ static const MemoryRegionOps dvfm_ops = {
 };
 static void dvfm_reset(DeviceState *dev)
 {
-    apple_modern_cpu_dvfm_core_reset(&APPLE_MODERN_CPU_DVFM(dev)->core);
+    AppleModernDVFMState *s = APPLE_MODERN_CPU_DVFM(dev);
+    apple_modern_cpu_dvfm_core_reset(&s->core);
+    memset(s->rejected, 0, sizeof(s->rejected));
 }
 static void dvfm_realize(DeviceState *dev, Error **errp)
 {
     AppleModernDVFMState *s = APPLE_MODERN_CPU_DVFM(dev);
     for (unsigned i = 0; i < APPLE_MODERN_DVFM_WINDOWS; i++) {
-        s->views[i] = (DVFMView){&s->core, i};
+        s->views[i] = (DVFMView){&s->core, i, s->rejected[i]};
         static const char *const names[APPLE_MODERN_DVFM_WINDOWS] = {
             "apple-modern.cpu-dvfm-e", "apple-modern.cpu-dvfm-p",
             "apple-modern.cpu-dvfm-e-ctl", "apple-modern.cpu-dvfm-p-ctl"};

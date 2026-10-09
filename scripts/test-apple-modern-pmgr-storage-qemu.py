@@ -33,10 +33,10 @@ mailbox, board = helper.mailbox, helper.board
 require, digest = helper.require, helper.digest
 
 SENTINEL = 0x5e57e11a5e57e11a
-FLAG = 0x1000         # fault flag written by the owned vector handler (up to 512 result slots)
-LAST_ESR = 0x1008
-LAST_ELR = 0x1010
-RESULT_BYTES = 0x1018
+FLAG = 0x2000         # fault flag written by the owned vector handler (up to 1024 result slots)
+LAST_ESR = 0x2008
+LAST_ELR = 0x2010
+RESULT_BYTES = 0x2018
 DONE = 0xf05e1234face5678
 ESR_DATA_ABORT_SAME_EL = 0x25
 ESR_SYNC_EXTERNAL_ABORT = 0x10     # DFSC
@@ -50,6 +50,8 @@ PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40
 DPE = 0x300208000                  # PMGR_SOC_DPE: ten channels of 3 registers (channel 7: 2)
 PMC = 0x3028ac000                  # reg[43] (0x302000000) + 0x8ac000: PMC vote registers 0..3 and +0x24
 PMC2 = 0x302860000                 # reg[43] + 0x860000: PMC +0x60000
+PMC3 = 0x3028a4000                 # reg[43] + 0x8a4000: PMC DVMR state (+0x0) and busy flag (+0x20)
+PMC4 = 0x3028a9c14                 # reg[43] + 0x8a9c14: PMC DVMR population count
 # T8140 PS-write hook blocks (table 0xfffffff00b9257c0): registers at block + 0x104 and + 0x108
 ACG_BLOCKS = (0x408000000, 0x413000000, 0x417000000, 0x38b000000, 0x380000000,
               0x284000000, 0x288000000, 0x481000000, 0x28c000000, 0x396000000)
@@ -69,7 +71,7 @@ def storage_registers():
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
     regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40}
-    regs |= {PMC + 4 * i for i in range(4)} | {PMC + 0x24, PMC + 0x28, PMC2}
+    regs |= {PMC + 4 * i for i in range(4)} | {PMC + 0x24, PMC + 0x28, PMC2, PMC3, PMC3 + 0x20, PMC4}
     for block in ACG_BLOCKS:
         regs |= {block + 0x104, block + 0x108}
     for channel in range(10):
@@ -300,6 +302,27 @@ PROGRAM = [
     ('r32', 0x413000000, None),
     ('r32', 0x413000204, None),
 ]
+PROGRAM.extend([
+    ('r32', PMC3, None),                        # the step-5 frontier (DVMR state)
+    ('w32', PMC3, 8),
+    ('r32', PMC3 + 0x20, None),                 # busy flag, polled until bit 0 is clear
+    ('r32', PMC3, None),
+    ('w32', PMC4, 1),                           # population count
+    ('r32', PMC4, None),
+    ('w32', PMC3 + 0x20, 1),
+    ('r32', PMC3 + 0x20, None),
+    ('w32', PMC3 + 0x20, 0),
+    ('r32', PMC3 + 4, None),                    # between and around the listed registers
+    ('r32', PMC3 + 0x1c, None),
+    ('r32', PMC3 + 0x24, None),
+    ('r32', PMC3 - 4, None),
+    ('r64', PMC3, None),
+    ('r64', PMC3 + 0x20, None),
+    ('r32', PMC4 + 4, None),
+    ('r32', PMC4 - 4, None),
+    ('r64', PMC4, None),
+    ('r32', PMC4 + 0x4c0, None),
+])
 for _block in ACG_BLOCKS:
     if _block != 0x413000000:                   # the other nine pairs: RMW and the edges
         PROGRAM.extend([('r32', _block + 0x104, None), ('w32', _block + 0x104, 1),
@@ -471,6 +494,23 @@ def run(binary, components, output, no_device):
             qmp.request('quit')
             require(process.wait(timeout=10) == 0, 'Clean emulator exit')
             process = None
+            # A rejected access INSIDE a window is announced once per 4-byte slot (-d invalid_mem
+            # does not report it); probes 'r32 PMC+0x20' and 'w64 0x210e700a8' make two such rejections.
+            text = (output / 'emulator.log').read_text(errors='replace')
+            announced = [line for line in text.splitlines() if 'REJECTED' in line]
+            wanted = ['pmgr-storage: REJECTED read of window 19 (group 273) +0x20 (4 bytes, address 0x3028ac020)',
+                      'cpu-dvfm: REJECTED write of window 2 +0xa8 (8 bytes)']
+            if enabled:
+                for item in wanted:
+                    require(any(item in line for line in announced), 'Announced rejection: ' + item)
+                counts = {}
+                for line in announced:
+                    counts[line] = counts.get(line, 0) + 1
+                require(all(count == 2 for count in counts.values()),
+                        'Each rejected slot is announced once per pass (two passes around system_reset)')
+            else:
+                require(not announced, 'Without the devices nothing is announced')
+            report['announced_rejections'] = len(announced)
             report['passed'] = len(report['passes']) == 2
     except Exception as error:
         report['error'] = str(error)
