@@ -283,7 +283,8 @@ int main(int argc, char **argv)
     mutate32("ADT property out of bounds", &in, in.dtree, 8 + 32, 0x7fffffff);
     mutate32("ADT excessive property count", &in, in.dtree, 0, 0xffffffff);
     changed = in; changed.trustcache.size--; rejected("trustcache bounds mismatch", &changed);
-    mutate32("unsupported trustcache version", &in, in.trustcache, 0, 2);
+    mutate32("version-2 trustcache without the opt-in", &in, in.trustcache, 0, 2);
+    mutate32("unsupported trustcache version", &in, in.trustcache, 0, 3);
     changed = in; changed.trustcache.data = NULL; rejected("missing trustcache", &changed);
     changed = in; changed.dram_size = 16 * 1024 * 1024; rejected("insufficient DRAM", &changed);
     changed = in; changed.dram_size = (UINT64_C(1) << 36) + PAGE;

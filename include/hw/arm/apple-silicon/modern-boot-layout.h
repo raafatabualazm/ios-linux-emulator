@@ -52,6 +52,10 @@ typedef struct AppleModernBootInput {
     uint32_t framebuffer_width;
     uint32_t framebuffer_height;
     uint32_t framebuffer_stride;
+    /* Opt-in: also accept a version-2 trustcache module (24-byte entries).
+     * False keeps the version-1-only acceptance of every earlier revision.
+     */
+    bool trustcache_v2;
 } AppleModernBootInput;
 
 typedef struct AppleModernBootRegion {
@@ -101,7 +105,10 @@ typedef struct AppleModernBootLayout {
  * input blobs or guest memory, patches executable bytes, registers a board,
  * selects a CPU, or starts guest execution. Does not verify signatures.
  *
- * A nonempty version-1 trustcache is required. Optional ramdisk bytes are
+ * A nonempty version-1 trustcache is required, or a version-2 one when
+ * trustcache_v2 is set; either way the module's own bytes are reserved
+ * unchanged behind the catalog offsets header and no entry is parsed.
+ * Optional ramdisk bytes are
  * reserved unchanged after BootArgs; no trustcache is fabricated.
  * An optional framebuffer is rounded to 2 MiB and carved out of the DRAM tail
  * as PurpleGfxMem, outside the boot-data area. top_of_kernel_data is unchanged.

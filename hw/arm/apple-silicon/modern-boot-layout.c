@@ -441,6 +441,7 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
     Image images[3] = {0};
     DTree tree = { .blob = in->dtree };
     uint64_t tc_size, before, index, cursor, sptm_base, start;
+    uint32_t tc_version, tc_entries, tc_entry_size;
     uint64_t framebuffer_size = 0;
     Image *bkc = &images[0], *sptm = &images[1], *txm = &images[2];
     if ((!in->ramdisk.data != !in->ramdisk.size) ||
@@ -520,11 +521,38 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
     if (tree.cursor != in->dtree.size || !tree.platform || !tree.cpu0) {
         return fail(errp, "device tree trailing data or missing T8140/CPU0");
     }
+    /*
+     * Trust-cache module geometry only; no entry is read, compared, merged or
+     * rewritten here. The 24-byte module header is uint32 version, uuid[16],
+     * uint32 numEntries, followed by numEntries packed entries. A version-1
+     * entry is 22 bytes and a version-2 entry is 24 bytes; both start with the
+     * 20-byte CDHash. Version 2 is accepted only when the caller opts in, so
+     * the default board keeps refusing it exactly as before.
+     */
     if (!in->trustcache.data || in->trustcache.size < 24 ||
-        in->trustcache.size > MAX_DT_SIZE || le32(in->trustcache.data) != 1 ||
-        !le32(in->trustcache.data + 20) ||
-        (uint64_t)le32(in->trustcache.data + 20) * 22 + 24 != in->trustcache.size) {
+        in->trustcache.size > MAX_DT_SIZE) {
         return fail(errp, "missing or malformed version-1 trustcache");
+    }
+    tc_version = le32(in->trustcache.data);
+    if (tc_version == 1) {
+        tc_entry_size = 22;
+    } else if (tc_version == 2 && in->trustcache_v2) {
+        tc_entry_size = 24;
+    } else if (tc_version == 2) {
+        return fail(errp, "version-2 trustcache needs trustcache-v2=on");
+    } else if (in->trustcache_v2) {
+        return fail(errp, "trustcache module version is neither 1 nor 2");
+    } else {
+        return fail(errp, "missing or malformed version-1 trustcache");
+    }
+    /* uint32 count widened to uint64 before scaling, so no 32-bit wrap can
+     * make a truncated or overlong module look exactly sized. */
+    tc_entries = le32(in->trustcache.data + 20);
+    if (!tc_entries || (uint64_t)tc_entries * tc_entry_size + 24 !=
+                       in->trustcache.size) {
+        return fail(errp, tc_version == 1 ?
+                    "missing or malformed version-1 trustcache" :
+                    "version-2 trustcache entry count does not match length");
     }
     out->dram_base = in->dram_base;
     out->dram_size = in->dram_size;
