@@ -20,6 +20,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'modern-mcc-socni-command.c',
     'modern-mcc-dcs-perf.c',
     'modern-pmgr-voltage.c',
+    'modern-pmgr-ungate.c',
     'modern-pmp-ptd.c',
     'modern-cpu-dvfm.c',
     'modern-pmgr-storage.c',

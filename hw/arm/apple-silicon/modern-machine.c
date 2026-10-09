@@ -28,6 +28,7 @@
 #include "hw/arm/apple-silicon/modern-mcc-socni-command.h"
 #include "hw/arm/apple-silicon/modern-mcc-dcs-perf.h"
 #include "hw/arm/apple-silicon/modern-pmgr-voltage.h"
+#include "hw/arm/apple-silicon/modern-pmgr-ungate.h"
 #include "hw/arm/apple-silicon/modern-pmp-ptd.h"
 #include "hw/arm/apple-silicon/modern-cpu-dvfm.h"
 #include "hw/arm/apple-silicon/modern-pmgr-storage.h"
@@ -115,6 +116,15 @@ struct AppleModernMachine {
     bool adt_timebase_match;
     /* Serve a unique dart-id on every dart,t8110 node (ADT order, declared). */
     bool adt_dart_ids;
+    /*
+     * Declared guest modification: serve /arm-io no-clock-gate and
+     * no-power-gate so AppleH17PPlatformIO::start skips resolving
+     * function-clock_gate / function-power_gate (AppleT8140,
+     * AppleH17PPlatformIO.cpp:94 and :100). Removes the kernel's ability to
+     * clock- or power-gate any /arm-io device through /arm-io/pmgr, and with
+     * it the panic those two absent properties otherwise cause.
+     */
+    bool pmgr_ungate;
     AppleModernPMGRFusePlan pmgr_fuse_plan;
     AppleDARTT8110State *sep_mapper;
     AddressSpace *sep_dma_as;
@@ -1847,6 +1857,30 @@ static void modern_init(MachineState *machine)
             "/cpus/cpu0", "timebase-frequency", timebase_bytes,
             sizeof(timebase_bytes)};
     }
+    if (s->pmgr_ungate) {
+        size_t ungate_count = 0;
+        const AppleModernAdtOverride *ungate =
+            apple_modern_pmgr_ungate_overrides(&ungate_count);
+
+        /*
+         * Attested (AppleT8140, AppleH17PPlatformIO::start at
+         * 0xfffffff00979775c in BootKC a36b9241...): the driver reads
+         * "no-clock-gate" and "no-power-gate" off its /arm-io node and, when
+         * either is present, branches over the matching
+         * function-clock_gate / function-power_gate lookup, so no gate action
+         * is ever registered. Absent both the property and the escape hatch it
+         * panics at AppleH17PPlatformIO.cpp:94 / :100. Only presence is
+         * tested, so the value is a single declared nonzero byte (the
+         * override ABI has no zero-length form).
+         */
+        for (size_t i = 0; i < ungate_count; i++) {
+            overrides[override_count++] = ungate[i];
+        }
+        warn_report("apple-modern: pmgr-ungate serves /arm-io no-clock-gate "
+                    "and no-power-gate (declared guest modification: the "
+                    "kernel can no longer clock- or power-gate any /arm-io "
+                    "device through /arm-io/pmgr)");
+    }
     if (override_count) {
         metadata_input.overrides = overrides;
         metadata_input.override_count = override_count;
@@ -2139,6 +2173,7 @@ BOOL_PROPERTY(modern_mcc_socni_command, modern_mcc_socni_command)
 BOOL_PROPERTY(modern_mcc_dcs_perf, modern_mcc_dcs_perf)
 BOOL_PROPERTY(adt_timebase_match, adt_timebase_match)
 BOOL_PROPERTY(adt_dart_ids, adt_dart_ids)
+BOOL_PROPERTY(pmgr_ungate, pmgr_ungate)
 BOOL_PROPERTY(modern_pmp_ptd, modern_pmp_ptd)
 BOOL_PROPERTY(modern_cpu_dvfm, modern_cpu_dvfm)
 BOOL_PROPERTY(modern_pmgr_storage, modern_pmgr_storage)
@@ -2313,6 +2348,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    get_modern_pmgr_storage, set_modern_pmgr_storage);
     object_class_property_add_bool(oc, "adt-timebase-match", get_adt_timebase_match,
                                    set_adt_timebase_match);
+    object_class_property_add_bool(oc, "pmgr-ungate", get_pmgr_ungate,
+                                   set_pmgr_ungate);
     object_class_property_add_bool(oc, "adt-dart-ids", get_adt_dart_ids,
                                    set_adt_dart_ids);
     object_class_property_add_str(oc, "pmgr-boot-on", get_pmgr_boot_on,
