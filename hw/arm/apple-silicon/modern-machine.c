@@ -115,6 +115,8 @@ struct AppleModernMachine {
     DeviceState *sep_mbox;
     bool aic_trace;
     bool modern_aic;
+    /* Opt-in: accept and record nonzero IRQ_CFG words (see apple-modern-aic.h). */
+    bool aic_record_irq_config;
     DeviceState *aic;
     uint32_t uart_irq;
     uint32_t aic_num_irqs;
@@ -1268,11 +1270,19 @@ static bool map_aic(AppleModernMachine *s, Error **errp)
         }
         qdev_prop_set_uint32(s->aic, "mmio-size", size);
         qdev_prop_set_bit(s->aic, "trace", s->aic_trace);
+        qdev_prop_set_bit(s->aic, "record-irq-config",
+                          s->aic_record_irq_config);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(s->aic), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(s->aic), 0, base);
         s->aic_num_irqs = num_irqs;
         warn_report("apple-modern: AIC%u enabled, %u IRQs, config at 0x%x "
                     "(opt-in modern-aic)", revision, num_irqs, extint);
+        if (s->aic_record_irq_config) {
+            warn_report("apple-modern: AIC records IRQ_CFG words and delivers "
+                        "every interrupt to CPU0 whatever target is written "
+                        "(opt-in aic-record-irq-config; delay groups are not "
+                        "modelled)");
+        }
         return true;
     }
     if (s->aic_trace) {
@@ -1760,6 +1770,12 @@ static void modern_init(MachineState *machine)
                      "otherwise there are no power cells to reset");
         exit(EXIT_FAILURE);
     }
+    if (s->aic_record_irq_config && !s->modern_aic) {
+        error_report("apple-modern: aic-record-irq-config needs "
+                     "modern-aic=on; otherwise there is no controller to "
+                     "record IRQ_CFG words");
+        exit(EXIT_FAILURE);
+    }
     if (s->pmgr_voltage_states) {
         profile = apple_modern_pmgr_voltage_profile(s->pmgr_voltage_states,
                                                     &profile_count);
@@ -2075,6 +2091,7 @@ BOOL_PROPERTY(modern_mcc_dsid, modern_mcc_dsid)
 BOOL_PROPERTY(modern_mcc_slc, modern_mcc_slc)
 BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
+BOOL_PROPERTY(aic_record_irq_config, aic_record_irq_config)
 BOOL_PROPERTY(boot_display, boot_display)
 BOOL_PROPERTY(prepare_only, prepare_only)
 BOOL_PROPERTY(mte, mte)
@@ -2297,6 +2314,9 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_aic_trace);
     object_class_property_add_bool(oc, "modern-aic", get_modern_aic,
                                    set_modern_aic);
+    object_class_property_add_bool(oc, "aic-record-irq-config",
+                                   get_aic_record_irq_config,
+                                   set_aic_record_irq_config);
     object_class_property_add(oc, "aic-revision", "uint32",
                               get_display_geometry, set_display_geometry,
                               NULL, (void *)offsetof(AppleModernMachine,
