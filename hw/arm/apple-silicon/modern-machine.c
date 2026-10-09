@@ -1679,6 +1679,11 @@ static void modern_init(MachineState *machine)
         exit(EXIT_FAILURE);
     }
     metadata_input.aic_iack_offset = s->aic_iack_offset;
+    if (s->pmgr_boot_on && !s->modern_pmgr) {
+        error_report("apple-modern: pmgr-boot-on needs modern-pmgr=on; "
+                     "otherwise there are no power cells to reset");
+        exit(EXIT_FAILURE);
+    }
     if (s->pmgr_voltage_states) {
         profile = apple_modern_pmgr_voltage_profile(s->pmgr_voltage_states,
                                                     &profile_count);
