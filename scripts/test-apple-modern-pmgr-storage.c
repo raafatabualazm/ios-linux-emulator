@@ -60,7 +60,7 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
  * and the vector-config array, windows 3..5 (tags 0x101..0x103). */
 #define PTD_BASE UINT64_C(0x3003c0000)
 #define FIXED_WINDOWS 29
-#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 2 + 2 + 29 + 5 + 1 + 20)
+#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 2 + 2 + 29 + 6 + 1 + 20)
 /* PMGR_SOC_CLUSTER_CTL (reg_index 28, 0x300780000) +0x0 and +0x4: window 6, tag 0x104. */
 #define CLUSTER_BASE UINT64_C(0x300780000)
 #define CLUSTER_TAG 0x104
@@ -73,7 +73,7 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
 #define DPE_TAG 0x107
 /* PMC registers in reg_index 43 (0x302000000): the four static-voter vote registers
  * +0x8ac000..+0x8ac00c and the dynamic control register +0x8ac024 (window 19, tag 0x111,
- * size 0x28), and the single register +0x860000 (window 20, tag 0x112, size 4). */
+ * size 0x2c), and the single register +0x860000 (window 20, tag 0x112, size 4). */
 #define PMC_BASE UINT64_C(0x3028ac000)
 #define PMC_TAG 0x111
 #define PMC_WINDOW 19
@@ -109,7 +109,7 @@ static bool expected_valid(unsigned group, uint64_t offset)
         return offset == 0;
     }
     if (group == PMC_TAG) {
-        return offset < 0x10 || offset == 0x24;
+        return offset < 0x10 || offset == 0x24 || offset == 0x28;
     }
     if (group == PMC_TAG + 1) {
         return offset == 0;
@@ -161,7 +161,7 @@ static void plan_exact(AppleModernBlob tree)
               plan.windows[9 + n].size == dpe_size(n));
     }
     CHECK(plan.windows[PMC_WINDOW].group == PMC_TAG && plan.windows[PMC_WINDOW].address == PMC_BASE &&
-          plan.windows[PMC_WINDOW].size == 0x28);
+          plan.windows[PMC_WINDOW].size == 0x2c);
     CHECK(plan.windows[PMC2_WINDOW].group == PMC_TAG + 1 && plan.windows[PMC2_WINDOW].address == PMC2_BASE &&
           plan.windows[PMC2_WINDOW].size == 4);
     for (unsigned k = 0; k < 10; k++) {
@@ -400,13 +400,13 @@ static void plan_tamper(AppleModernBlob tree)
     CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
     clear_error(&error);
     memcpy(reg + 32 * 16, saved, 16);
-    /* The PMC window needs reg[43] to hold 0x8ac028 bytes (the +0x24 register ends there). */
+    /* The PMC window needs reg[43] to hold 0x8ac02c bytes (the +0x28 register ends there). */
     CHECK(reg_size >= 44 * 16);
     memcpy(saved, reg + 43 * 16, 16);
     memset(reg + 43 * 16 + 8, 0, 8);
-    reg[43 * 16 + 8] = 0x28; reg[43 * 16 + 9] = 0xc0; reg[43 * 16 + 10] = 0x8a;      /* 0x8ac028 */
+    reg[43 * 16 + 8] = 0x2c; reg[43 * 16 + 9] = 0xc0; reg[43 * 16 + 10] = 0x8a;      /* 0x8ac02c */
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    reg[43 * 16 + 8] = 0x27;                                                           /* one byte short */
+    reg[43 * 16 + 8] = 0x2b;                                                           /* one byte short */
     CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
     clear_error(&error);
     reg[43 * 16 + 8] = 0x00; reg[43 * 16 + 9] = 0xc0; reg[43 * 16 + 10] = 0x86;       /* 0x86c000 */
@@ -606,8 +606,18 @@ static void core_stock(AppleModernBlob tree)
         CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x1c, 4, &v));
         CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x20, 4, &v));
         CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x20, 8, &v));
-        CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x28, 4, &v));
+        CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x2c, 4, &v));
         CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x24, 8, &v));
+        CHECK(!apple_modern_pmgr_storage_core_write(&core, PMC_WINDOW, 0x2c, 4, 1));
+        CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x28, 8, &v));   /* runs past the end */
+        /* The BOOST interface (ApplePMC::stateChange bit 1): read-modify-write of +0x28, setting
+         * (enable) and then clearing (disable) the device's bit; here bit 5 as an example. */
+        CHECK(apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x28, 4, &v) && v == 0);
+        CHECK(apple_modern_pmgr_storage_core_write(&core, PMC_WINDOW, 0x28, 4, v | (1u << 5)));
+        CHECK(apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x28, 4, &v) && v == 0x20);
+        CHECK(apple_modern_pmgr_storage_core_write(&core, PMC_WINDOW, 0x28, 4, v & ~(1u << 5)));
+        CHECK(apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x28, 4, &v) && v == 0);
+        CHECK(apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x24, 4, &v) && v == 3);   /* neighbour kept */
         CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC2_WINDOW, 4, 4, &v));
         CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC2_WINDOW, 0, 8, &v));
         /* A neighbouring window is separate storage. */

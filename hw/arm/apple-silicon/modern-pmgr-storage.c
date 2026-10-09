@@ -221,7 +221,20 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     which writes 0xffffffff to PMC +0x60000.
  *  18: PMC +0x60000 of the same group, i.e. reg[43] +0x860000, one write-only register
  *     (plain storage here; nothing on this path reads it).
- *  The kind 1 and kind 3 registers (0xac020, 0xac028) are NOT listed.
+ *  17 (again): +0x28 (0x3028ac028, AppleT8140PMC kind 3, the BOOST interface). The per-device
+ *     loop of the slot-0x5a0 routine (0xfffffff0092ab2e8 -> 0xfffffff0092c3f8c ->
+ *     0xfffffff0092c41ec) writes each device's PMGR power state and then calls
+ *     ApplePMC::stateChange(enable = 1, device id, die) through PMC vtable slot 8
+ *     (0xfffffff0092c4238); the base stateChange (0xfffffff0092e4160) runs one handler per
+ *     bit of the PMC flags (this+0x24 = 0x3f): bit 0 VOTER (0xfffffff0092e3dd0, kind 0
+ *     vote registers, only for dynamic voter agents whose id matches), bit 1 BOOST
+ *     (0xfffffff0092e42e0), bit 2 DVMR (0xfffffff0092e43ec), bit 3 BWR (0xfffffff0092e44e4,
+ *     kind 1), bit 5 LTR (0xfffffff0092e45f8). The BOOST handler is, for a device id whose
+ *     map entry (this+0x106ec + 2 * id) is not -1, a read-modify-write of 0xac028: set
+ *     (enable) or clear the bit given by byte 2 of the device's 24-byte record at
+ *     [this+0x98]. No poll. The guest's first stateChange that reached a register had
+ *     device id 0x3a (MEASURED: saved x22 in the faulting frame). The kind 1 register
+ *     (0xac020), the DVMR registers and the LTR write are NOT listed.
  *  19-28: ten block-local register pairs the T8140 PS-write hook read-modify-writes. The
  *     AppleT8140PMGR write32 override (vtable slot 0xd20, 0xfffffff00984b768; ApplePMGR's
  *     PS-level writer 0xfffffff00929fe20 calls it) runs when this+0x738f0 is non-zero
@@ -262,7 +275,7 @@ static const FixedWindow fixed_windows[] = {
     DPE_CHANNEL(5), DPE_CHANNEL(6),
     {32, 0x4200, 0x104, 2, {0, 0x100}},     /* channel 7 has no +0x0 register */
     DPE_CHANNEL(8), DPE_CHANNEL(9),
-    {43, 0x8ac000, 0x28, 5, {0, 4, 8, 0xc, 0x24}},  /* PMC voter votes 0..3, dynamic control */
+    {43, 0x8ac000, 0x2c, 6, {0, 4, 8, 0xc, 0x24, 0x28}},  /* PMC votes 0..3, dynamic control, boost */
     {43, 0x860000, 0x4, 0, {0}},            /* PMC +0x60000 (kRegGroupPMCDVFM + 0x60000) */
 };
 

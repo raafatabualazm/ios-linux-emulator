@@ -69,7 +69,7 @@ def storage_registers():
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
     regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40}
-    regs |= {PMC + 4 * i for i in range(4)} | {PMC + 0x24, PMC2}
+    regs |= {PMC + 4 * i for i in range(4)} | {PMC + 0x24, PMC + 0x28, PMC2}
     for block in ACG_BLOCKS:
         regs |= {block + 0x104, block + 0x108}
     for channel in range(10):
@@ -266,13 +266,19 @@ PROGRAM = [
     ('w32', PMC + 0x10, 1),
     ('r64', PMC + 0xc, None),                   # 8 bytes over the end
     ('r32', PMC - 4, None),
-    ('r32', PMC + 0x20, None),                  # kind 1 and 3 registers: not listed
+    ('r32', PMC + 0x20, None),                  # kind 1 register: not listed
+    ('r32', PMC + 0x28, None),                  # the step-4 frontier (kind 3, boost)
+    ('w32', PMC + 0x28, 0x20),                  # set the device's bit
     ('r32', PMC + 0x28, None),
+    ('w32', PMC + 0x28, 0),                     # clear it
+    ('r32', PMC + 0x2c, None),                  # past the end
+    ('w32', PMC + 0x2c, 1),
+    ('r64', PMC + 0x28, None),                  # 8 bytes running past the end
     ('r32', PMC + 0x24, None),                  # the step-2 frontier (kind 2, dynamic control)
     ('w32', PMC + 0x24, 3),                     # (v & ~3) | 2 | 1
     ('r32', PMC + 0x24, None),
     ('r64', PMC + 0x20, None),                  # 8 bytes over a hole and the register
-    ('r64', PMC + 0x24, None),                  # 8 bytes running past the end
+    ('r64', PMC + 0x24, None),                  # both adjacent registers (+0x24, +0x28) in one access
     ('w32', PMC2, 0xffffffff),                  # PMC +0x60000: write only on the driver's path
     ('r32', PMC2, None),
     ('r32', PMC2 + 4, None),
