@@ -45,7 +45,7 @@ G6 = 0x30827b800                   # PMGRCLKGEN_AON_TOP + 0x7b800
 G7 = 0x3082b4000                   # PMGR_AON + 0x34000
 WAKE = 0x308004008                 # NUB_FR_GLOBAL_AP_CONTROLS + 0x8
 PTD = 0x3003c0000                  # PMS_PTS_PTD: banks at +0x18200, +0x18300, config +0x18400
-CLUSTER = 0x300780000              # PMGR_SOC_CLUSTER_CTL +0x0 (one register)
+CLUSTER = 0x300780000              # PMGR_SOC_CLUSTER_CTL +0x0 and +0x4
 DVFM_WINDOWS = (0x210e78000, 0x211e78000, 0x210e70000, 0x211e70000)
 DVFM_SPAN = 0x1000
 
@@ -58,7 +58,7 @@ def storage_registers():
     regs |= {PTD + 0x18200 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
-    regs.add(CLUSTER)
+    regs |= {CLUSTER, CLUSTER + 4}
     return regs
 
 
@@ -171,8 +171,11 @@ PROGRAM = [
     ('r32', CLUSTER, None),                     # the step-5 frontier
     ('w32', CLUSTER, 0xf),                      # (v & ~0xf) | 0xf
     ('r32', CLUSTER, None),                     # the wait polls (v & 0x10) == 0
-    ('r32', CLUSTER + 4, None),                 # the index-1 register: not listed
-    ('r64', CLUSTER, None),
+    ('r32', CLUSTER + 4, None),                 # the step-6 frontier (index 1)
+    ('w32', CLUSTER + 4, 0xf),
+    ('r64', CLUSTER, None),                     # both registers in one access
+    ('r32', CLUSTER + 8, None),                 # past them
+    ('r64', CLUSTER + 8, None),
     ('r32', CLUSTER - 4, None),
 ]
 

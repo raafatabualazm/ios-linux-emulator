@@ -60,8 +60,8 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
  * and the vector-config array, windows 3..5 (tags 0x101..0x103). */
 #define PTD_BASE UINT64_C(0x3003c0000)
 #define FIXED_WINDOWS 5
-#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 1)
-/* PMGR_SOC_CLUSTER_CTL (reg_index 28, 0x300780000) +0x0: window 6, tag 0x104. */
+#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 2)
+/* PMGR_SOC_CLUSTER_CTL (reg_index 28, 0x300780000) +0x0 and +0x4: window 6, tag 0x104. */
 #define CLUSTER_BASE UINT64_C(0x300780000)
 #define CLUSTER_TAG 0x104
 static const struct { uint64_t offset; uint32_t size; } PTD[3] = {
@@ -78,7 +78,7 @@ static bool expected_valid(unsigned group, uint64_t offset)
         return offset < WAKE_SIZE;
     }
     if (group == CLUSTER_TAG) {
-        return offset == 0;
+        return offset < 8;
     }
     if (group > WAKE_TAG) {
         return offset < PTD[group - WAKE_TAG - 1].size;
@@ -108,7 +108,7 @@ static void plan_exact(AppleModernBlob tree)
     CHECK(plan.windows[2].group == WAKE_TAG && plan.windows[2].address == WAKE_BASE &&
           plan.windows[2].size == WAKE_SIZE);
     CHECK(plan.windows[6].group == CLUSTER_TAG && plan.windows[6].address == CLUSTER_BASE &&
-          plan.windows[6].size == 4);
+          plan.windows[6].size == 8);
     for (unsigned k = 0; k < 3; k++) {
         CHECK(plan.windows[3 + k].group == WAKE_TAG + 1 + k &&
               plan.windows[3 + k].address == PTD_BASE + PTD[k].offset &&
@@ -309,13 +309,13 @@ static void plan_tamper(AppleModernBlob tree)
     CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
     clear_error(&error);
     memcpy(reg + 34 * 16, saved, 16);
-    /* The cluster-control register needs reg[28] to hold at least 4 bytes. */
+    /* The cluster-control registers need reg[28] to hold at least 8 bytes. */
     CHECK(reg_size >= 29 * 16);
     memcpy(saved, reg + 28 * 16, 16);
     memset(reg + 28 * 16 + 8, 0, 8);
-    reg[28 * 16 + 8] = 4;
+    reg[28 * 16 + 8] = 8;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    reg[28 * 16 + 8] = 3;
+    reg[28 * 16 + 8] = 7;
     CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
     clear_error(&error);
     memcpy(reg + 28 * 16, saved, 16);
@@ -408,8 +408,11 @@ static void core_stock(AppleModernBlob tree)
     CHECK(apple_modern_pmgr_storage_core_read(&core, 6, 0, 4, &v) && v == 0);
     CHECK(apple_modern_pmgr_storage_core_write(&core, 6, 0, 4, (v & ~0xfULL) | 0xf));
     CHECK(apple_modern_pmgr_storage_core_read(&core, 6, 0, 4, &v) && v == 0xf && !(v & 0x10));
-    CHECK(!apple_modern_pmgr_storage_core_read(&core, 6, 4, 4, &v));          /* the index-1 register */
-    CHECK(!apple_modern_pmgr_storage_core_read(&core, 6, 0, 8, &v));
+    CHECK(apple_modern_pmgr_storage_core_read(&core, 6, 4, 4, &v) && v == 0);  /* the index-1 register */
+    CHECK(apple_modern_pmgr_storage_core_write(&core, 6, 4, 4, 0xf));
+    CHECK(apple_modern_pmgr_storage_core_read(&core, 6, 0, 8, &v) && v == 0xf0000000fULL);
+    CHECK(!apple_modern_pmgr_storage_core_read(&core, 6, 8, 4, &v));
+    CHECK(!apple_modern_pmgr_storage_core_read(&core, 6, 8, 8, &v));
     CHECK(!apple_modern_pmgr_storage_core_read(&core, 7, 0, 4, &v));
     /* Holes between listed registers, past the end, 8-byte accesses over a hole,
      * unaligned, odd sizes and bad windows are refused. */

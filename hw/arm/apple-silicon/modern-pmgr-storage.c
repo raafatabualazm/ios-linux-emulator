@@ -149,7 +149,7 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     enable register (+0x18100) are deliberately NOT listed.
  *  4: PMGR_SOC_CLUSTER_CTL (reg 28, RegMap selector 98, 0x300780000; reg 37 repeats the
  *     same range, and /arm-io/mcc reg[0] panic-save is the same physical page, which
- *     no model here owns) +0x0, one register. ApplePMGR's start calls vtable slot
+ *     no model here owns) +0x0 and +0x4, two registers. ApplePMGR's start calls vtable slot
  *     0x590 (AppleT8140PMGR wrapper 0xfffffff009847d84, then slot 0x9f0) which reaches
  *     the cluster power routine at 0xfffffff009847bf0 with index 0 and enable 1: it
  *     reads the register (readPMGRSOCClusterCtlReg, 0xfffffff0092b09f8), writes it back
@@ -161,8 +161,9 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     the driver writes just the low nibble and bit 4 never becomes set; real
  *     hardware presumably raises bit 4 while the cluster power transition is pending.
  *     That timing is NOT modelled (declared: the transition completes instantly), and
- *     a driver that ever wrote bit 4 would hang here. The index-1 path of the same
- *     routine uses +0x4, which is not listed.
+ *     a driver that ever wrote bit 4 would hang here. The routine is called a second
+ *     time with index 1, which does the identical read, write ((v & ~0xf) | 0xf) and
+ *     wait at +0x4 (measured as the next frontier after +0x0 alone was listed).
  */
 typedef struct FixedWindow {
     unsigned reg_index;
@@ -173,7 +174,7 @@ static const FixedWindow fixed_windows[] = {
     {34, 0x18200, 0x80},
     {34, 0x18300, 0x80},
     {34, 0x18400, 0x400},
-    {28, 0x0, 0x4},
+    {28, 0x0, 0x8},
 };
 
 /* Append one window after the geometry checks; *plan is unchanged on failure. */
