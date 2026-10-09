@@ -109,6 +109,8 @@ struct AppleModernMachine {
     char *pmgr_boot_on;
     /* Publish the modelled counter frequency as /cpus/cpu0 timebase-frequency. */
     bool adt_timebase_match;
+    /* Serve a unique dart-id on every dart,t8110 node (ADT order, declared). */
+    bool adt_dart_ids;
     AppleModernPMGRFusePlan pmgr_fuse_plan;
     AppleDARTT8110State *sep_mapper;
     AddressSpace *sep_dma_as;
@@ -1807,11 +1809,18 @@ static void modern_init(MachineState *machine)
         metadata_input.overrides = overrides;
         metadata_input.override_count = override_count;
     }
+    metadata_input.assign_dart_ids = s->adt_dart_ids;
     if (!apple_modern_boot_metadata_build(&metadata_input, &s->metadata, &error) ||
         !uart_address(s->components.dtree, &uart, &uart_span, &s->uart_irq,
                       &error)) {
         error_report_err(error);
         exit(EXIT_FAILURE);
+    }
+    if (s->adt_dart_ids) {
+        warn_report("apple-modern: served dart-id 0..%u on %u dart,t8110 "
+                    "nodes in ADT order (declared: SPTM requires the "
+                    "property, iBoot's own numbering is unmeasured)",
+                    s->metadata.dart_id_count - 1, s->metadata.dart_id_count);
     }
     {
         AppleModernBlob tb;
@@ -2085,6 +2094,7 @@ BOOL_PROPERTY(modern_mcc_socni, modern_mcc_socni)
 BOOL_PROPERTY(modern_mcc_socni_command, modern_mcc_socni_command)
 BOOL_PROPERTY(modern_mcc_dcs_perf, modern_mcc_dcs_perf)
 BOOL_PROPERTY(adt_timebase_match, adt_timebase_match)
+BOOL_PROPERTY(adt_dart_ids, adt_dart_ids)
 BOOL_PROPERTY(modern_pmp_ptd, modern_pmp_ptd)
 BOOL_PROPERTY(modern_cpu_dvfm, modern_cpu_dvfm)
 BOOL_PROPERTY(modern_mcc_dsid, modern_mcc_dsid)
@@ -2256,6 +2266,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_modern_cpu_dvfm);
     object_class_property_add_bool(oc, "adt-timebase-match", get_adt_timebase_match,
                                    set_adt_timebase_match);
+    object_class_property_add_bool(oc, "adt-dart-ids", get_adt_dart_ids,
+                                   set_adt_dart_ids);
     object_class_property_add_str(oc, "pmgr-boot-on", get_pmgr_boot_on,
                                   set_pmgr_boot_on);
     object_class_property_add_str(oc, "pmgr-voltage-states",
