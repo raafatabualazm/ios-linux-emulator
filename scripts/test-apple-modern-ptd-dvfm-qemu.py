@@ -65,7 +65,10 @@ PTD_SPAN = 0x4000
 PTD_ENTRIES = PTD_SPAN // 16    # 1024 Dashboard entries of {msg, meta}
 DVFM = (0x210e78000, 0x211e78000)   # E and P cluster DVFM state tables
 DVFM_SPAN = 0x1000
-DVFM_FRONTIER = (0x210e700a8, 0x211e700a8)   # E_ACC_CPM_DVFM selector-12 read, unmodelled
+# First page above each E/P ACC_CPM_DVFM control page. The control pages themselves
+# (selector 12/24, 0x210e70000 and 0x211e70000) became modelled in 39f40db, so on the
+# integration branch the probe moved from +0xa8 to the next unmodelled page.
+DVFM_FRONTIER = (0x210e71000, 0x211e71000)
 STATES = tuple(range(32)) + (63,)    # reader offset = 0x8 + state * 0x40
 MASK64 = (1 << 64) - 1
 
@@ -636,8 +639,11 @@ class QMP(transport.QMP):
 
 def hmp_xp64(qmp, address):
     out = qmp.request('human-monitor-command', {'command-line': f'xp /1gx {address:#x}'})
-    match = re.search(r':\s+0x([0-9a-f]{16})\b', out)
-    require(match is not None, f'xp output at {address:#x}: {out!r}')
+    # The device may log an 'info:' first-touch line before the value line; the value
+    # is the last 16-digit hex token (the info text only carries short hex offsets).
+    values = re.findall(r'\b0x([0-9a-f]{16})\b', out)
+    require(len(values) >= 1, f'xp output at {address:#x}: {out!r}')
+    match = re.match(r'([0-9a-f]{16})', values[-1])
     return int(match.group(1), 16)
 
 
