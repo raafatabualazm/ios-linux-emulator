@@ -147,6 +147,22 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     storage (no W1S/W1C effect, no status) because nothing on this path reads
  *     either bank back. The status bank (+0x18000, read by opcode 5) and the
  *     enable register (+0x18100) are deliberately NOT listed.
+ *  4: PMGR_SOC_CLUSTER_CTL (reg 28, RegMap selector 98, 0x300780000; reg 37 repeats the
+ *     same range, and /arm-io/mcc reg[0] panic-save is the same physical page, which
+ *     no model here owns) +0x0, one register. ApplePMGR's start calls vtable slot
+ *     0x590 (AppleT8140PMGR wrapper 0xfffffff009847d84, then slot 0x9f0) which reaches
+ *     the cluster power routine at 0xfffffff009847bf0 with index 0 and enable 1: it
+ *     reads the register (readPMGRSOCClusterCtlReg, 0xfffffff0092b09f8), writes it back
+ *     with the low nibble set to 0xf ((v & ~0xf) | 0xf), then calls
+ *     waitPMGRSOCClusterCtlReg (0xfffffff0092b0adc -> generic wait 0xfffffff0092afba0)
+ *     with offset 0, mask 0x10, value 0 and a 1 s timeout: it re-reads the register
+ *     until (v & 0x10) == 0, and on timeout panics only if this+0x16d bit 0 is set.
+ *     THIS IS A POLL. Zero-reset storage satisfies it on the first read only because
+ *     the driver writes just the low nibble and bit 4 never becomes set; real
+ *     hardware presumably raises bit 4 while the cluster power transition is pending.
+ *     That timing is NOT modelled (declared: the transition completes instantly), and
+ *     a driver that ever wrote bit 4 would hang here. The index-1 path of the same
+ *     routine uses +0x4, which is not listed.
  */
 typedef struct FixedWindow {
     unsigned reg_index;
@@ -157,6 +173,7 @@ static const FixedWindow fixed_windows[] = {
     {34, 0x18200, 0x80},
     {34, 0x18300, 0x80},
     {34, 0x18400, 0x400},
+    {28, 0x0, 0x4},
 };
 
 /* Append one window after the geometry checks; *plan is unchanged on failure. */
