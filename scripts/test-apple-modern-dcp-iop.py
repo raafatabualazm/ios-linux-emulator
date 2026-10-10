@@ -10,7 +10,7 @@ What it qualifies:
   * the two trees carry BYTE-IDENTICAL /arm-io/dcp "reg", "role" and
     "interrupts" and /arm-io "ranges", and differ only by the two stripped
     "compatible" values the disp0-probe arms restore;
-  * the endpoint arithmetic the whole module turns on: name index = raw - 31,
+  * the declared endpoint arithmetic (not modern guest naming): name index = raw - 31,
     so AppleDCPLinkServiceSoC's "DCPEndpoint24" is raw 55 (0x37) and
     user-relative 23; the in-tree SMC precedent (user-relative 0 -> raw 32 ->
     "SMCEndpoint1"), public Asahi's SYSTEM_ENDPOINT 0x20 -> index 1, and
@@ -32,7 +32,7 @@ What it qualifies:
     interrupt lines, and the DRAM / exclusion / alias / NULL-output refusals.
 
 What it does NOT qualify: the transport (that is the in-tree a7iop RTKit, used
-by five other devices), nor that publishing an endpoint makes any guest driver
+by four existing devices), nor that publishing an endpoint makes any guest driver
 proceed. That is the whole-machine gate and the arm table.
 """
 import argparse

@@ -504,6 +504,9 @@ static void dcp_iop_reset_hold(Object *obj, ResetType type)
     if (dc->parent_phases.hold) {
         dc->parent_phases.hold(obj, type);
     }
+    /* The inherited A7IOP reset clears status but retains CPU_CTRL. DCP
+     * reset must clear RUN before optionally establishing prestarted state. */
+    apple_a7iop_set_cpu_ctrl(APPLE_A7IOP(obj), 0);
     s->messages = 0;
     s->cpu_starts = 0;
     s->cpu_wakeups = 0;
