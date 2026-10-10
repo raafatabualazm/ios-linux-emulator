@@ -87,7 +87,7 @@
 #define APPLE_MODERN_DCP_IOP_IRQS 4
 /* RTKit reserves raw endpoints below this for its own control channels. */
 #define APPLE_MODERN_DCP_IOP_EP_USER_START 32u
-/* Apple's name index is 1-based over the user range: name = raw - bias. */
+/* Declared inferred name bias from legacy precedent; not modern measured. */
 #define APPLE_MODERN_DCP_IOP_EP_NAME_BIAS 31u
 /* The IOMFB channel's Apple name index, attested from AppleDCPLinkServiceSoC. */
 #define APPLE_MODERN_DCP_IOP_EP_NAME_INDEX 24u
