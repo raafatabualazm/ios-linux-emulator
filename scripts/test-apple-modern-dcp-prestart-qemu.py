@@ -2,7 +2,7 @@
 """Owned-ROM DCP RTKit bootstrap: default mode vs declared prestart, two resets.
 No firmware executes; this qualifies the model and claimed reset state only.
 """
-import argparse, hashlib, importlib.util, json, re, struct, subprocess, tempfile, time
+import argparse, hashlib, importlib.util, json, re, resource, struct, subprocess, tempfile, time
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('transport',Path(__file__).with_name('test-apple-modern-sep-transport-qemu.py'))
 t=importlib.util.module_from_spec(spec);spec.loader.exec_module(t)
@@ -32,6 +32,9 @@ class ROM(m.ROM):
   for offset in range(0x4000,0x4800,0x80):
    self.at(offset);self.mov(0,1);self.store(0,0x500);self.emit(m.sysreg('ESR_EL2',0,True));self.store(0,0x508);self.branch(len(self.words))
   return b''.join(struct.pack('<I',word) for word in self.words)
+def child_limits():
+ resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+ resource.setrlimit(resource.RLIMIT_FSIZE,(1<<20,1<<20))
 def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def mem():return int(re.search(r"MemAvailable:\s+(\d+)",Path("/proc/meminfo").read_text())[1])
 def run(a,mode):
@@ -43,7 +46,7 @@ def run(a,mode):
  try:
   assert mem()>=7000000,'Memory launch floor'
   with tempfile.TemporaryDirectory() as tmp,logp.open('xb') as log:
-   process=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,bufsize=0,preexec_fn=m.child_limits)
+   process=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,bufsize=0,preexec_fn=child_limits)
    def guard():
     left=60-(time.monotonic()-start);assert left>0 and logp.stat().st_size<(1<<20) and mem()>=900000;return left
    qmp=t.QMP(None,guard,process)
