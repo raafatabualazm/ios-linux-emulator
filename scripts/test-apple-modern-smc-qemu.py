@@ -2,7 +2,7 @@
 """Owned-ROM modern SMC RTKit/key transport, two resets.
 No firmware executes; this qualifies the model and claimed reset state only.
 """
-import argparse, hashlib, importlib.util, json, struct, subprocess, tempfile, time
+import argparse, hashlib, importlib.util, json, resource, struct, subprocess, tempfile, time
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('transport',Path(__file__).with_name('test-apple-modern-sep-transport-qemu.py'))
 t=importlib.util.module_from_spec(spec);spec.loader.exec_module(t)
@@ -46,6 +46,9 @@ class ROM(m.ROM):
   return b''.join(struct.pack('<I',word) for word in self.words)
  def finish(self):
   self.mov(0,DONE);self.trace('completion',DONE);self.branch(len(self.words))
+def child_limits():
+ resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+ resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, 1 << 20))
 def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def available():return int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:')))
 def run(a,mode):
@@ -58,7 +61,7 @@ def run(a,mode):
  try:
   assert report['mem_available_start_kb']>=7000000,'Below project start memory floor'
   with tempfile.TemporaryDirectory() as tmp,logp.open('xb') as log:
-   process=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,bufsize=0,preexec_fn=m.child_limits)
+   process=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,bufsize=0,preexec_fn=child_limits)
    def guard():
     left=60-(time.monotonic()-start);avail=available();report['mem_available_min_kb']=min(report['mem_available_min_kb'],avail);assert avail>=900000,'Below project abort memory floor';assert left>0 and logp.stat().st_size<(1<<20);return left
    qmp=t.QMP(None,guard,process)
