@@ -35,7 +35,7 @@ class ROM(m.ROM):
 def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def mem():return int(re.search(r"MemAvailable:\s+(\d+)",Path("/proc/meminfo").read_text())[1])
 def run(a,mode):
- out=a.out/mode;out.mkdir();pre=mode=='v6-prestarted';rom=ROM(pre);content=rom.build();rp=out/'owned.rom';rp.write_bytes(content);zp=out/'zero.bin';zp.write_bytes(bytes(0x510));logp=out/'qemu.log'
+ out=a.out/mode;out.mkdir();pre='prestarted' in mode;rom=ROM(pre);content=rom.build();rp=out/'owned.rom';rp.write_bytes(content);zp=out/'zero.bin';zp.write_bytes(bytes(0x510));logp=out/'qemu.log'
  assets=[a.components/n for n in b.ASSETS];before={str(p):digest(p) for p in assets};binaryhash=digest(a.binary)
  machine='apple-modern,'+','.join(n+'='+str(p) for n,p in zip(['bootkc','sptm','txm','dtree','tc'],assets))+',prepare-only=on,modern-aic=on,aic-record-irq-config=on,disp0-probe=dcp-mapper,dcp-iop='+mode
  argv=[str(a.binary),'-M',machine,'-m','8G','-smp','1','-nodefaults','-display','none','-serial','none','-monitor','none','-device',f'loader,file={rp},addr={m.BASE},cpu-num=0,force-raw=true','-device',f'loader,file={zp},addr={m.SCRATCH},force-raw=true','-S','-qmp','stdio']
@@ -70,6 +70,6 @@ def run(a,mode):
   if after!=before or digest(a.binary)!=binaryhash:report['passed']=False;report['error']='Input changed'
   report['elapsed_seconds']=time.monotonic()-start;(out/'report.json').write_text(json.dumps(report,indent=2)+'\n')
  return report
-p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--components',required=True,type=Path);p.add_argument('--out',required=True,type=Path);a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--components',required=True,type=Path);p.add_argument('--out',required=True,type=Path);p.add_argument('--modes',nargs='+',choices=['v6','v6-prestarted','v6-prestarted-quiesced'],default=['v6','v6-prestarted']);a=p.parse_args()
 a.binary=a.binary.resolve();a.components=a.components.resolve();a.out=a.out.resolve();a.out.mkdir(exist_ok=False,parents=True)
-r=[run(a,mode) for mode in ['v6','v6-prestarted']];result={'passed':all(v['passed'] for v in r),'firmware_executed':False,'modern_endpoint_name_measured':False,'arms':r};(a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps({'passed':result['passed'],'errors':[v.get('error') for v in r]}));raise SystemExit(0 if result['passed'] else 1)
+r=[run(a,mode) for mode in a.modes];result={'passed':all(v['passed'] for v in r),'firmware_executed':False,'modern_endpoint_name_measured':False,'arms':r};(a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps({'passed':result['passed'],'errors':[v.get('error') for v in r]}));raise SystemExit(0 if result['passed'] else 1)
