@@ -23,7 +23,12 @@ What it qualifies:
     existing caller entry, and ten malformed lists plus NULL arguments and three
     capacity cases, each refused with the caller's count and buffer untouched;
   * a mutation oracle: one byte flipped in a restored value makes the
-    stock-comparison the gate performs fail, and restoring it makes it pass.
+    stock-comparison the gate performs fail, and restoring it makes it pass;
+  * with --components, the END-TO-END check: the PRODUCTION metadata builder is
+    run once per group against the real served tree, and every restored
+    property is read back out of the tree it would hand a guest and compared
+    byte for byte - and eight nodes no group names are confirmed to still carry
+    no "compatible", so nothing leaks between groups.
 
 What it does NOT qualify: that restoring any of this makes a guest better. A
 driver that newly attaches and then blocks is a regression. That is measured
@@ -65,6 +70,10 @@ def main():
                         help='served Darwin-derived T8140 ADT')
     parser.add_argument('--stock', type=Path, required=True,
                         help='the stock T8140 ADT it was derived from')
+    parser.add_argument('--components', type=Path,
+                        help='directory with the five decoded boot components; with it, the '
+                             'PRODUCTION metadata builder is run per group and the tree it would '
+                             'serve a guest is checked property by property')
     parser.add_argument('--evidence', type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
@@ -88,7 +97,8 @@ def main():
             if built.returncode:
                 raise SystemExit(built.stdout + built.stderr)
             executed = subprocess.run(
-                [str(binary), str(trees[0]), str(trees[1])],
+                [str(binary), str(trees[0]), str(trees[1])] +
+                ([str(args.components.resolve())] if args.components else []),
                 capture_output=True, text=True, timeout=300,
                 env=dict(os.environ, ASAN_OPTIONS='detect_leaks=1',
                          UBSAN_OPTIONS='halt_on_error=1'))
@@ -109,6 +119,7 @@ def main():
         'passed': True, 'checks_per_run': results[0]['checks'],
         'groups': results[0]['groups'], 'rows': results[0]['rows'],
         'compatible_rows': results[0]['compatible_rows'],
+        'builder_checked': results[0]['builder_checked'],
         'source_root': str(root), 'source_sha256': before, 'dtrees': tree_hashes,
         'runs': runs, 'firmware_executed': False, 'guest_executed': False,
         'scope': __doc__,
@@ -137,7 +148,7 @@ def main():
             fp.write('\n')
     print(json.dumps({k: report[k] for k in
                       ('passed', 'checks_per_run', 'groups', 'rows',
-                       'compatible_rows')}, indent=2))
+                       'compatible_rows', 'builder_checked')}, indent=2))
 
 
 if __name__ == '__main__':
