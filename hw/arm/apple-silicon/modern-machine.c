@@ -1242,7 +1242,6 @@ static bool map_dcp_asc(AppleModernMachine *s, uint64_t uart,
                 mode == APPLE_MODERN_DCP_ASC_FIRMWARE_LOADED ? 1u : 0u);
     return true;
 }
-<<<<<<< HEAD
 static bool map_modern_smc(AppleModernMachine *s, uint64_t uart,
                            uint64_t uart_span, Error **errp)
 {
@@ -1278,7 +1277,8 @@ static bool map_modern_smc(AppleModernMachine *s, uint64_t uart,
                 "pre-loaded/running/core-loaded are DECLARED, no SMC firmware placed; "
                 "timers unmodelled, modern input acceptance unqualified",
                 plan.address[0], plan.address[1], plan.address[2], plan.address[3]);
-=======
+    return true;
+}
 /*
  * Mapped BEFORE map_disp_trace for the same reason map_dcp_asc is: disp0
  * reg[4] contains the /arm-io/dcp windows, and the trace plan must skip it
@@ -1358,7 +1358,6 @@ static bool map_dcp_iop(AppleModernMachine *s, uint64_t uart,
                 s->dcp_iop, plan.wrapper_address, plan.wrapper_size,
                 mode == APPLE_MODERN_DCP_IOP_MODE_V4 ? "v4" : "v6", plan.role,
                 plan.endpoint_user, plan.endpoint_raw, plan.nub_name);
->>>>>>> 1647aad (apple-modern: declared, default-off RTKit peer for /arm-io/dcp (dcp-iop))
     return true;
 }
 static bool map_disp_trace(AppleModernMachine *s, uint64_t uart,
@@ -2343,7 +2342,6 @@ static void modern_init(MachineState *machine)
                     "distribution tree file is never written)",
                     s->disp0_probe, disp_count);
     }
-<<<<<<< HEAD
     if (s->modern_smc) {
         size_t count = 0;
         const AppleModernAdtOverride *flags = apple_modern_smc_overrides(&count);
@@ -2390,7 +2388,7 @@ static void modern_init(MachineState *machine)
                     "any declared dart-id; the distribution tree file is never "
                     "written)", s->adt_compat_restore,
                     override_count - before);
-=======
+    }
     if (s->dcp_iop) {
         unsigned dcp_iop_mode = 0;
         if (!apple_modern_dcp_iop_mode(s->dcp_iop, &dcp_iop_mode)) {
@@ -2444,7 +2442,6 @@ static void modern_init(MachineState *machine)
                         "RTKit devices set the same pair on their own nub",
                         s->dcp_iop, flag_count);
         }
->>>>>>> 1647aad (apple-modern: declared, default-off RTKit peer for /arm-io/dcp (dcp-iop))
     }
     if (s->pmgr_voltage_states) {
         profile = apple_modern_pmgr_voltage_profile(s->pmgr_voltage_states,
@@ -2689,11 +2686,8 @@ static void modern_init(MachineState *machine)
         (s->modern_pmp_ptd && !map_pmp_ptd(s, uart, uart_span, &error)) ||
         (s->modern_cpu_dvfm && !map_cpu_dvfm(s, uart, uart_span, &error)) ||
         (s->dcp_asc && !map_dcp_asc(s, uart, uart_span, &error)) ||
-<<<<<<< HEAD
         (s->modern_smc && !map_modern_smc(s, uart, uart_span, &error)) ||
-=======
         (s->dcp_iop && !map_dcp_iop(s, uart, uart_span, &error)) ||
->>>>>>> 1647aad (apple-modern: declared, default-off RTKit peer for /arm-io/dcp (dcp-iop))
         (s->disp0_probe && !map_disp_trace(s, uart, uart_span, &error)) ||
         (s->modern_pmgr_storage &&
          !map_pmgr_storage(s, uart, uart_span, &error)) ||
@@ -2830,7 +2824,6 @@ static void set_disp0_probe(Object *obj, const char *value, Error **errp)
     }
 }
 
-<<<<<<< HEAD
 static char *get_adt_compat_restore(Object *obj, Error **errp)
 {
     return g_strdup(APPLE_MODERN_MACHINE(obj)->adt_compat_restore);
@@ -2845,7 +2838,8 @@ static void set_adt_compat_restore(Object *obj, const char *value, Error **errp)
     g_free(s->adt_compat_restore);
     s->adt_compat_restore = (value && *value && strcmp(value, "off")) ?
                             g_strdup(value) : NULL;
-=======
+}
+
 static char *get_dcp_iop(Object *obj, Error **errp)
 {
     return g_strdup(APPLE_MODERN_MACHINE(obj)->dcp_iop);
@@ -2859,7 +2853,6 @@ static void set_dcp_iop(Object *obj, const char *value, Error **errp)
         s->dcp_iop = value && value[0] && strcmp(value, "off") ?
                      g_strdup(value) : NULL;
     }
->>>>>>> 1647aad (apple-modern: declared, default-off RTKit peer for /arm-io/dcp (dcp-iop))
 }
 
 static char *get_dcp_asc(Object *obj, Error **errp)

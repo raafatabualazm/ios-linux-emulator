@@ -30,11 +30,8 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'modern-compat-groups.c',
     'modern-compat-groups-resolve.c',
     'modern-dcp-asc.c',
-<<<<<<< HEAD
     'modern-smc.c',
-=======
     'modern-dcp-iop.c',
->>>>>>> 1647aad (apple-modern: declared, default-off RTKit peer for /arm-io/dcp (dcp-iop))
     'modern-pmgr-storage.c',
     'modern-mcc-dsid.c',
     'modern-mcc-slc.c',
