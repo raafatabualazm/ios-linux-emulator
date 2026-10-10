@@ -1164,8 +1164,11 @@ static bool map_dcp_asc(AppleModernMachine *s, uint64_t uart,
         return false;
     }
     dev = apple_modern_dcp_asc_new(&plan, mode);
-    dev->id = g_strdup("dcp-asc");
-    object_property_add_child(OBJECT(s), "dcp-asc", OBJECT(dev));
+    /* The child's name must NOT collide with the board property of the same
+     * name: object_property_add_child() aborts with "attempt to add duplicate
+     * property 'dcp-asc'". Caught by the whole-machine gate's g3 arm. */
+    dev->id = g_strdup("dcp-asc-dev");
+    object_property_add_child(OBJECT(s), "dcp-asc-dev", OBJECT(dev));
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     for (unsigned i = 0, region = 0; i < plan.count; i++) {
         warn_report("apple-modern: dcp-asc candidate reg[%u] %s 0x%" PRIx64
