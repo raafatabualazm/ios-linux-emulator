@@ -9,9 +9,9 @@
  * Declared, default-off RTKit coprocessor stand-in for /arm-io/dcp
  * (w14-endpoint, ledger W-12 continuation).  Where modern-dcp-asc.h is an
  * OBSERVATION model with an empty mailbox and no peer, this one gives
- * /arm-io/dcp an actual AppleRTKit peer, so that RTBuddy's management endpoint
- * can complete its HELLO / endpoint-roll-call handshake and publish the
- * RTBuddyEndpointService nub named in APPLE_MODERN_DCP_IOP_NUB_NAME below.
+ * /arm-io/dcp an actual AppleRTKit peer, with the intended management HELLO / endpoint-roll-call exchange.
+ * Modern RTBuddy has not yet completed it; APPLE_MODERN_DCP_IOP_NUB_NAME
+ * below is the predicted nub name, not a measured runtime service.
  * The transport, the mailbox register file and the management protocol are NOT
  * written here: they are the in-tree hw/misc/apple-silicon/a7iop RTKit that
  * this board's own legacy A13 SMC, AOP, ANS, SIO and baseband devices already
@@ -42,32 +42,32 @@
  *     AOP2Endpoint24; AppleSMC names exactly SMCEndpoint1; AppleSmartIO2 names
  *     exactly SIOEndpoint1.  So Apple's name index is 1-based.
  *
- * THE ENDPOINT NUMBER, derived three independent ways that agree.  In-tree
- * RTKit reserves raw endpoints 0..31 (EP_USER_START = 32, a7iop/rtkit.c:28)
- * and apple_rtkit_register_user_ep() takes a USER-RELATIVE index, adding the
- * offset itself.  (1) in-tree precedent: smc.c registers user-relative
- * kSMCKeyEndpoint = 0, i.e. raw 32, and Apple's only SMC endpoint personality
- * is SMCEndpoint1 -- so name index = raw - 31 = user-relative + 1.
- * (2) public Asahi (ANALOGY, another SoC generation): dcp-internal.h gives
- * SYSTEM_ENDPOINT = 0x20 and IOMFB_ENDPOINT = 0x37; under name = raw - 31 that
- * maps SYSTEM -> 1 and IOMFB -> 24.  (3) the attested DCPEndpoint list stops
- * at exactly 24, the index AppleDCPLinkServiceSoC claims.  Therefore:
- *   name index 24  <->  raw 0x37 (55)  <->  user-relative 23.
- * This module passes the USER-RELATIVE index to the existing RTKit layer and
- * never hand-computes a raw number; the raw value and the nub name it implies
- * are reported at startup so a wrong index is visible, not silent.
+ * DECLARED ENDPOINT NUMBER (modern DCP naming remains unmeasured): in-tree
+ * RTKit reserves raw endpoints 0..31 and register_user_ep() takes a relative
+ * index. Legacy SMC registers relative 0/raw32, with an SMCEndpoint1
+ * personality. Public Asahi, by analogy to another generation, uses raw0x37
+ * for IOMFB; applying the inferred raw-minus31 bias predicts DCPEndpoint24.
+ * The modern personality's name24 is attested, but this does not establish
+ * modern DCP's raw number. This model advertises relative23/raw55 as a
+ * declared hypothesis, logs the predicted name, and implements no user ABI.
  *
- * DECLARED, the four modes:
- *   - "v6" / "v4": instantiate the RTKit peer with that register file and set
- *     the two ADT flags below.  Which register file /arm-io/dcp's driver wants
- *     is NOT decidable from the ADT string: sep.c:4153 passes APPLE_A7IOP_V4
- *     for a node whose compatible is "iop,ascwrap-v6", and a7iop/base.h says
- *     why ("this enum tracks our register files, not Apple's").  Both are
- *     offered so the question is settled by measurement.
- *   - "v6-quiesced": the V6 peer WITHOUT the two ADT flags, so the flags can
- *     be attributed separately from the peer.
- *   - "flags-only": the two ADT flags and NO peer at all, so the flags can be
- *     measured against the dcp-asc observation apertures.
+ * DECLARED modes:
+ *   - "v6" / "v4": a guest-started RTKit peer with preloaded/running flags.
+ *     Register layout remains a declared choice; the ascwrap-v6 compatible
+ *     string alone does not determine the emulator's layout enum.
+ *   - "v6-quiesced": guest-started V6 peer without those two flags.
+ *   - "flags-only": those two flags without a peer.
+ *   - "v6-prestarted": reset establishes RUN and queues the model HELLO,
+ *     with the two flags. No firmware is executed.
+ *   - "v6-prestarted-quiesced": the same reset-started peer without flags.
+ *
+ * Owned AP polling ROMs qualify HELLO/epmap/power exchanges through resets.
+ * Measured modern guest flagged v6 and v6-prestarted arms both fail the
+ * firmware-load REQUIRE before any handled DCP wrapper/mailbox accesses.
+ * The no-flags prestarted arm reaches its service-plane dump without that
+ * REQUIRE failure, still with no guest MMIO or endpoint/link/framebuffer.
+ * Reset start is thus not independently sufficient for modern bootstrap.
+ * See features-20261009/w14-endpoint for exact pins, traces and limitations.
  *
  * DECLARED, the two ADT flags ("pre-loaded" = 1 and "running" = 1 on
  * /arm-io/dcp/iop-dcp-nub).  They are NOT in the stock tree.  All five in-tree
@@ -91,7 +91,7 @@
 #define APPLE_MODERN_DCP_IOP_EP_NAME_BIAS 31u
 /* The IOMFB channel's Apple name index, attested from AppleDCPLinkServiceSoC. */
 #define APPLE_MODERN_DCP_IOP_EP_NAME_INDEX 24u
-/* The IOMFB channel's raw endpoint (= name index + bias; public Asahi agrees). */
+/* Declared raw IOMFB candidate; modern DCP mapping has not been measured. */
 #define APPLE_MODERN_DCP_IOP_EP_IOMFB \
     (APPLE_MODERN_DCP_IOP_EP_NAME_INDEX + APPLE_MODERN_DCP_IOP_EP_NAME_BIAS)
 /* What AppleDCPLinkServiceSoC's IONameMatch expects to see. */
@@ -139,7 +139,7 @@ typedef struct AppleModernDcpIopPlan {
     /* Raw RTKit endpoint published, and the user-endpoint index for it. */
     unsigned endpoint_raw;
     unsigned endpoint_user;
-    /* The nub name the guest is expected to create for it. */
+    /* Declared predicted nub name; not evidence of a published guest service. */
     char nub_name[APPLE_MODERN_DCP_IOP_ROLE_MAX + 16];
 } AppleModernDcpIopPlan;
 
