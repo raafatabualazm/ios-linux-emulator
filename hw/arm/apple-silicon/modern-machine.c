@@ -715,6 +715,12 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
                                      s->dcp_iop_plan.wrapper_size}, errp)) {
         return false;
     }
+    if (s->dcp_iop_mapped && s->dcp_iop_plan.expert_control_address &&
+        !append_pmgr_exclusion(exclusions, &count,
+            (AppleModernAddressRange){s->dcp_iop_plan.expert_control_address,
+                                     4}, errp)) {
+        return false;
+    }
     for (unsigned i = 0; i < s->disp_trace_plan.count; i++) {
         const AppleModernDispTraceWindow *w = &s->disp_trace_plan.windows[i];
         if (w->status == APPLE_MODERN_DISP_TRACE_MAPPED &&
@@ -1324,6 +1330,58 @@ static bool map_dcp_iop(AppleModernMachine *s, uint64_t uart,
             APPLE_MODERN_DCP_IOP_EP_IOMFB, &plan, errp)) {
         return false;
     }
+    if (mode == APPLE_MODERN_DCP_IOP_MODE_V6_EXPERT_START) {
+        const char *path = "/arm-io/dcp0-expert";
+        AppleModernBlob reg;
+        uint32_t index;
+        uint64_t bus, size, address;
+        if (!adt_u32(dtree, path, "dcp-controls-reg-index", &index, errp) ||
+            !adt_u32(dtree, path, "dcp-controls-value-on",
+                      &plan.expert_control_on, errp) ||
+            !adt_u32(dtree, path, "dcp-controls-value-off",
+                      &plan.expert_control_off, errp) ||
+            !apple_modern_adt_property(dtree, path, "reg", &reg, errp)) {
+            return false;
+        }
+        if (!reg.size || reg.size % 16 || index >= reg.size / 16 ||
+            plan.expert_control_on != 0x10 ||
+            plan.expert_control_off != 0) {
+            error_setg(errp, "dcp-iop expert control needs the measured "
+                             "on=0x10/off=0 and a valid ADT reg index");
+            return false;
+        }
+        bus = ldq_le_p(reg.data + index * 16);
+        size = ldq_le_p(reg.data + index * 16 + 8);
+        if (size != 4 || bus % 4 ||
+            !arm_io_translate(dtree, bus, size, &address, errp)) {
+            if (errp && !*errp) {
+                error_setg(errp, "dcp-iop expert control must be a translated "
+                                 "aligned 4-byte ADT window");
+            }
+            return false;
+        }
+        if ((address >= s->components.dram_base &&
+             address - s->components.dram_base < s->components.dram_size) ||
+            (address < s->components.dram_base &&
+             s->components.dram_base - address < size) ||
+            (address >= plan.wrapper_address &&
+             address - plan.wrapper_address < plan.wrapper_size) ||
+            (address < plan.wrapper_address &&
+             plan.wrapper_address - address < size)) {
+            error_setg(errp, "dcp-iop expert control overlaps DRAM/wrapper");
+            return false;
+        }
+        for (size_t i = 0; i < count; i++) {
+            if ((address >= exclusions[i].physical_address &&
+                 address - exclusions[i].physical_address < exclusions[i].size) ||
+                (address < exclusions[i].physical_address &&
+                 exclusions[i].physical_address - address < size)) {
+                error_setg(errp, "dcp-iop expert control overlaps another device");
+                return false;
+            }
+        }
+        plan.expert_control_address = address;
+    }
     s->dcp_iop_plan = plan;
     if (!apple_modern_dcp_iop_mode_has_peer(mode)) {
         warn_report("apple-modern: opt-in dcp-iop '%s' serves ONLY the two "
@@ -1341,6 +1399,13 @@ static bool map_dcp_iop(AppleModernMachine *s, uint64_t uart,
     sbd = SYS_BUS_DEVICE(s->dcp_iop_dev);
     sysbus_realize_and_unref(sbd, &error_fatal);
     sysbus_mmio_map(sbd, 0, plan.wrapper_address);
+    if (plan.expert_control_address) {
+        sysbus_mmio_map(sbd, 1, plan.expert_control_address);
+        warn_report("apple-modern: declared DCP expert-control bridge at "
+                    "0x%" PRIx64 " size4 on0x%x/off0x%x, no firmware executes",
+                    plan.expert_control_address, plan.expert_control_on,
+                    plan.expert_control_off);
+    }
     /*
      * Positional IRQ mapping, in ADT "interrupts" order, exactly as t8030
      * wires SMC, SIO and ANS.  The four lines are the AP mailbox's

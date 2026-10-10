@@ -7,9 +7,9 @@ from pathlib import Path
 spec=importlib.util.spec_from_file_location('transport',Path(__file__).with_name('test-apple-modern-sep-transport-qemu.py'))
 t=importlib.util.module_from_spec(spec);spec.loader.exec_module(t)
 m=t.mailbox;b=t.board
-BASE=0x412e00000;DONE=0xfedcba9876543210
+BASE=0x412e00000;EXPERT=0x308008000;DONE=0xfedcba9876543210
 class ROM(m.ROM):
- def __init__(self,prestart):super().__init__();self.prestart=prestart
+ def __init__(self,prestart,expert=False):super().__init__();self.prestart=prestart;self.expert=expert
  def send(self,data):self.write64(BASE+0x8800,data);self.write64(BASE+0x8808,0)
  def receive(self,label,expected):
   poll=len(self.words);self.read32(BASE+0x8114,23);self.mov(24,1|(1<<20));self.emit(0x6b1802ff);self.branch(poll,1)
@@ -19,7 +19,18 @@ class ROM(m.ROM):
   self.mov(20,m.SCRATCH);self.mov(0,m.NORMAL_SP);self.emit(0x9100001f);self.emit(0xd5034fdf);self.set('VBAR_EL2',m.BASE+0x4000)
   self.read32(BASE+0x8000,23);self.trace('reset_idle',0 if self.prestart else 3,register=23)
   self.read32(BASE+0x44,23);self.trace('reset_cpu_ctrl',16 if self.prestart else 0,register=23)
-  if not self.prestart:self.write32(BASE+0x44,16)
+  if self.expert:
+   self.read32(EXPERT,23);self.trace('expert_reset_off',0,register=23)
+   self.write32(EXPERT,17)
+   self.read32(EXPERT,23);self.trace('expert_unknown_ignored',0,register=23)
+   self.read32(BASE+0x44,23);self.trace('unknown_keeps_run_clear',0,register=23)
+   self.read32(BASE+0x8114,23);self.trace('unknown_keeps_mailbox_empty',m.CTRL_ENABLE|m.CTRL_EMPTY,register=23)
+   self.write32(EXPERT,0)
+   self.read32(EXPERT,23);self.trace('expert_off_readback',0,register=23)
+   self.write32(EXPERT,16)
+   self.read32(EXPERT,23);self.trace('expert_on_readback',16,register=23)
+   self.read32(BASE+0x44,23);self.trace('expert_on_starts_run',16,register=23)
+  elif not self.prestart:self.write32(BASE+0x44,16)
   self.receive('hello',(1<<52)|(12<<16)|3)
   self.send((2<<52)|(12<<16)|12)
   self.receive('map_control',(8<<52)|3)
@@ -28,6 +39,9 @@ class ROM(m.ROM):
   self.send((8<<52)|(1<<51)|(1<<32))
   self.receive('power_ack',(7<<52)|32)
   self.send((11<<52)|32);self.receive('ap_power_ack',(11<<52)|32)
+  if self.expert:
+   self.write32(EXPERT,16)
+   self.read32(BASE+0x8114,23);self.trace('repeat_on_no_second_hello',m.CTRL_ENABLE|m.CTRL_EMPTY,register=23)
   self.mov(0,DONE);self.trace('completion',DONE);self.branch(len(self.words))
   for offset in range(0x4000,0x4800,0x80):
    self.at(offset);self.mov(0,1);self.store(0,0x500);self.emit(m.sysreg('ESR_EL2',0,True));self.store(0,0x508);self.branch(len(self.words))
@@ -38,7 +52,7 @@ def child_limits():
 def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def mem():return int(re.search(r"MemAvailable:\s+(\d+)",Path("/proc/meminfo").read_text())[1])
 def run(a,mode):
- out=a.out/mode;out.mkdir();pre='prestarted' in mode;rom=ROM(pre);content=rom.build();rp=out/'owned.rom';rp.write_bytes(content);zp=out/'zero.bin';zp.write_bytes(bytes(0x510));logp=out/'qemu.log'
+ out=a.out/mode;out.mkdir();pre='prestarted' in mode;rom=ROM(pre,mode=='v6-expert-start');content=rom.build();rp=out/'owned.rom';rp.write_bytes(content);zp=out/'zero.bin';zp.write_bytes(bytes(0x510));logp=out/'qemu.log'
  assets=[a.components/n for n in b.ASSETS];before={str(p):digest(p) for p in assets};binaryhash=digest(a.binary)
  machine='apple-modern,'+','.join(n+'='+str(p) for n,p in zip(['bootkc','sptm','txm','dtree','tc'],assets))+',prepare-only=on,modern-aic=on,aic-record-irq-config=on,disp0-probe=dcp-mapper,dcp-iop='+mode
  argv=[str(a.binary),'-M',machine,'-m','8G','-smp','1','-nodefaults','-display','none','-serial','none','-monitor','none','-device',f'loader,file={rp},addr={m.BASE},cpu-num=0,force-raw=true','-device',f'loader,file={zp},addr={m.SCRATCH},force-raw=true','-S','-qmp','stdio']
@@ -73,6 +87,6 @@ def run(a,mode):
   if after!=before or digest(a.binary)!=binaryhash:report['passed']=False;report['error']='Input changed'
   report['elapsed_seconds']=time.monotonic()-start;(out/'report.json').write_text(json.dumps(report,indent=2)+'\n')
  return report
-p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--components',required=True,type=Path);p.add_argument('--out',required=True,type=Path);p.add_argument('--modes',nargs='+',choices=['v6','v6-prestarted','v6-prestarted-quiesced'],default=['v6','v6-prestarted']);a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--components',required=True,type=Path);p.add_argument('--out',required=True,type=Path);p.add_argument('--modes',nargs='+',choices=['v6','v6-prestarted','v6-prestarted-quiesced','v6-expert-start'],default=['v6','v6-prestarted']);a=p.parse_args()
 a.binary=a.binary.resolve();a.components=a.components.resolve();a.out=a.out.resolve();a.out.mkdir(exist_ok=False,parents=True)
 r=[run(a,mode) for mode in a.modes];result={'passed':all(v['passed'] for v in r),'firmware_executed':False,'modern_endpoint_name_measured':False,'arms':r};(a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps({'passed':result['passed'],'errors':[v.get('error') for v in r]}));raise SystemExit(0 if result['passed'] else 1)
