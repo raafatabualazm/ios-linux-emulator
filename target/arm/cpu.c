@@ -2045,6 +2045,8 @@ static const Property arm_cpu_properties[] = {
     DEFINE_PROP_BOOL("apple-modern-apsts", ARMCPU, apple_modern_apsts, false),
     DEFINE_PROP_BOOL("apple-modern-sysregs", ARMCPU, apple_modern_sysregs, false),
     DEFINE_PROP_BOOL("apple-modern-pauth-compat", ARMCPU, apple_modern_pauth_compat, false),
+    DEFINE_PROP_BOOL("apple-modern-el0-trap-trace", ARMCPU,
+                     apple_modern_el0_trap_trace, false),
     DEFINE_PROP_UINT64("midr", ARMCPU, midr, 0),
     DEFINE_PROP_UINT64("mp-affinity", ARMCPU,
                         mp_affinity, ARM64_AFFINITY_INVALID),

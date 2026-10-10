@@ -1,3 +1,6 @@
+# Read-only EL0 BRK classification. Added unconditionally: it is called from
+# target/arm/debug_helper.c, which is built for every arm target.
+arm_common_ss.add(files('modern-el0-trap.c'))
 arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: tasn1)
 arm_common_ss.add(when: 'CONFIG_APPLE_DART', if_true: files('dart.c'),
                                              if_false: files('dart-stub.c'))
