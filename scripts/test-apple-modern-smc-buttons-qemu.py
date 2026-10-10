@@ -50,7 +50,7 @@ def run(a):
  try:
   assert minimum>=7000000
   with tempfile.TemporaryDirectory() as tmp,logp.open('xb') as log:
-   process=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,bufsize=0,preexec_fn=m.child_limits)
+   process=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,bufsize=0,preexec_fn=s.child_limits)
    def guard():
     nonlocal minimum
     minimum=min(minimum,s.available());assert minimum>=900000
