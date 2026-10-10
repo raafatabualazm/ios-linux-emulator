@@ -104,8 +104,9 @@ def main():
         'source_root': str(root), 'source_sha256': before, 'dtrees': tree_hashes,
         'runs': runs, 'firmware_executed': False, 'guest_executed': False,
         'qemu_mmio_wrapper_exercised': False,
-        'scope': ('disp0 bind probe core: the five override profiles (disp0, '
-                  'disp0-nodcp, dcp-chain, override-control, gate-control), '
+        'scope': ('disp0 bind probe core: the six override profiles (disp0, '
+                  'disp0-nodcp, dcp-chain, dcp-mapper, override-control, '
+                  'gate-control), '
                   'each restored compatible checked byte-for-byte against the '
                   'stock tree and checked absent from the served tree, the two '
                   'declared properties checked absent from both, the 29-window '
@@ -120,6 +121,9 @@ def main():
             'dart-id 0 and 1 on dart-dcp / dart-disp0: the served tree has no '
             'dart,t8110 node at all, so the numbers are free; iBoot\'s own '
             'numbering is unmeasured',
+            'dcp-mapper restores only ATTESTED stock bytes, but the CLAIM that '
+            'an IODARTMapper is what AppleA7IOP::start waits for is '
+            'declared-inferred until a guest arm shows the wrapper register',
             'the apertures are an observation instrument, not a hardware model: '
             'no disp0 or dcp register has any meaning or side effect',
         ],

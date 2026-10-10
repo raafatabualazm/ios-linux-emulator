@@ -19,7 +19,7 @@ static unsigned checks;
 static const char *const profile_names[] = {
     APPLE_MODERN_DISP_PROBE_DISP0, APPLE_MODERN_DISP_PROBE_NO_DCP,
     APPLE_MODERN_DISP_PROBE_DCP_CHAIN, APPLE_MODERN_DISP_PROBE_CONTROL,
-    APPLE_MODERN_DISP_PROBE_GATE_CONTROL,
+    APPLE_MODERN_DISP_PROBE_GATE_CONTROL, APPLE_MODERN_DISP_PROBE_DCP_MAPPER,
 };
 #define PROFILES (sizeof(profile_names) / sizeof(profile_names[0]))
 
@@ -133,7 +133,7 @@ static void check_profiles(AppleModernBlob served, AppleModernBlob stock)
             clear_error(&error);
         }
     }
-    CHECK(compat_overrides == 12 && declared_overrides == 3);
+    CHECK(compat_overrides == 21 && declared_overrides == 5);
 
     CHECK(!apple_modern_disp_probe_supplies_dart_id(
               APPLE_MODERN_DISP_PROBE_DISP0));
@@ -145,6 +145,8 @@ static void check_profiles(AppleModernBlob served, AppleModernBlob stock)
               APPLE_MODERN_DISP_PROBE_GATE_CONTROL));
     CHECK(apple_modern_disp_probe_supplies_dart_id(
               APPLE_MODERN_DISP_PROBE_DCP_CHAIN));
+    CHECK(apple_modern_disp_probe_supplies_dart_id(
+              APPLE_MODERN_DISP_PROBE_DCP_MAPPER));
     CHECK(!apple_modern_disp_probe_supplies_dart_id("nonsense"));
     CHECK(!apple_modern_disp_probe_supplies_dart_id(NULL));
 
@@ -450,8 +452,8 @@ int main(int argc, char **argv)
 
     printf("{\"passed\": true, \"checks\": %u, \"firmware_executed\": false,"
            " \"guest_executed\": false, \"windows\": 29, \"mapped\": 25,"
-           " \"compat_overrides_anchored_to_stock\": 12,"
-           " \"declared_properties_absent_from_stock\": 3}\n", checks);
+           " \"compat_overrides_anchored_to_stock\": 21,"
+           " \"declared_properties_absent_from_stock\": 5}\n", checks);
     free(served_data);
     free(stock_data);
     return 0;

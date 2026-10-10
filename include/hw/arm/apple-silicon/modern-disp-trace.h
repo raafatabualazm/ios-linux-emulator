@@ -96,6 +96,11 @@ typedef struct AppleModernDispTraceCore {
 #define APPLE_MODERN_DISP_PROBE_DISP0 "disp0"
 #define APPLE_MODERN_DISP_PROBE_NO_DCP "disp0-nodcp"
 #define APPLE_MODERN_DISP_PROBE_DCP_CHAIN "dcp-chain"
+/* w12-dcp: dcp-chain plus the stock "iommu-mapper" compatible on the three
+ * mapper nubs that /arm-io/dcp and /arm-io/disp0 name through iommu-parent,
+ * without which no IODARTMapper can match and AppleA7IOP::start's mapper wait
+ * never completes.  See modern-disp-trace.c for the measurement. */
+#define APPLE_MODERN_DISP_PROBE_DCP_MAPPER "dcp-mapper"
 /* Positive control: restores two unrelated zero-register nodes' compatible so
  * that a driver which certainly matches is observable through the same path. */
 #define APPLE_MODERN_DISP_PROBE_CONTROL "override-control"
@@ -105,7 +110,8 @@ typedef struct AppleModernDispTraceCore {
 #define APPLE_MODERN_DISP_PROBE_NAMES \
     APPLE_MODERN_DISP_PROBE_DISP0 ", " APPLE_MODERN_DISP_PROBE_NO_DCP ", " \
     APPLE_MODERN_DISP_PROBE_DCP_CHAIN ", " APPLE_MODERN_DISP_PROBE_CONTROL ", " \
-    APPLE_MODERN_DISP_PROBE_GATE_CONTROL
+    APPLE_MODERN_DISP_PROBE_GATE_CONTROL ", " \
+    APPLE_MODERN_DISP_PROBE_DCP_MAPPER
 const AppleModernAdtOverride *apple_modern_disp_probe_profile(const char *name,
                                                               size_t *count);
 /* True when the named profile restores a dart,t8110 compatible and therefore
