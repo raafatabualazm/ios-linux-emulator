@@ -31,6 +31,7 @@
 #include "hw/arm/apple-silicon/modern-pmgr-ungate.h"
 #include "hw/arm/apple-silicon/modern-pmp-ptd.h"
 #include "hw/arm/apple-silicon/modern-cpu-dvfm.h"
+#include "hw/arm/apple-silicon/modern-dcp-asc.h"
 #include "hw/arm/apple-silicon/modern-disp-trace.h"
 #include "hw/arm/apple-silicon/modern-pmgr-storage.h"
 #include "hw/arm/apple-silicon/modern-mcc-dsid.h"
@@ -139,6 +140,13 @@ struct AppleModernMachine {
      */
     char *disp0_probe;
     AppleModernDispTracePlan disp_trace_plan;
+    /*
+     * Declared, default-off ASC v6 wrapper apertures over the three
+     * /arm-io/dcp register windows (w12-dcp).  See modern-dcp-asc.h: three
+     * decoded registers, an empty mailbox with no peer, no endpoint.
+     */
+    char *dcp_asc;
+    AppleModernDcpAscPlan dcp_asc_plan;
     /* Declared storage for the PMGR perf-counter registers ApplePMGR programs. */
     bool modern_pmgr_storage;
     AppleModernPMGRStoragePlan pmgr_storage_plan;
@@ -665,6 +673,16 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
             return false;
         }
     }
+    for (unsigned i = 0; i < s->dcp_asc_plan.count; i++) {
+        if (s->dcp_asc_plan.contained[i]) {
+            continue;
+        }
+        if (!append_pmgr_exclusion(exclusions, &count,
+                (AppleModernAddressRange){s->dcp_asc_plan.addresses[i],
+                                         s->dcp_asc_plan.sizes[i]}, errp)) {
+            return false;
+        }
+    }
     for (unsigned i = 0; i < s->disp_trace_plan.count; i++) {
         const AppleModernDispTraceWindow *w = &s->disp_trace_plan.windows[i];
         if (w->status == APPLE_MODERN_DISP_TRACE_MAPPED &&
@@ -1141,6 +1159,59 @@ static bool map_cpu_dvfm(AppleModernMachine *s, uint64_t uart,
     return true;
 }
 
+/*
+ * Mapped BEFORE map_disp_trace so that the three /arm-io/dcp windows become
+ * board exclusions: disp0 reg[4] contains all three of them, and the trace
+ * plan must then skip reg[4] rather than answer the wrapper's registers with
+ * a logging aperture's zero.  Every skip is reported by map_disp_trace itself.
+ */
+static bool map_dcp_asc(AppleModernMachine *s, uint64_t uart,
+                        uint64_t uart_span, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernDcpAscPlan plan;
+    size_t count;
+    unsigned mode = 0;
+    DeviceState *dev;
+
+    if (!apple_modern_dcp_asc_mode(s->dcp_asc, &mode)) {
+        error_setg(errp, "unknown dcp-asc mode '%s' (supported: %s)",
+                   s->dcp_asc, APPLE_MODERN_DCP_ASC_MODE_NAMES);
+        return false;
+    }
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp) ||
+        !apple_modern_dcp_asc_plan_build(dtree, s->components.dram_base,
+            s->components.dram_size, exclusions, count, &plan, errp)) {
+        return false;
+    }
+    dev = apple_modern_dcp_asc_new(&plan, mode);
+    /* The child's name must NOT collide with the board property of the same
+     * name: object_property_add_child() aborts with "attempt to add duplicate
+     * property 'dcp-asc'". Caught by the whole-machine gate's g3 arm. */
+    dev->id = g_strdup("dcp-asc-dev");
+    object_property_add_child(OBJECT(s), "dcp-asc-dev", OBJECT(dev));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    for (unsigned i = 0, region = 0; i < plan.count; i++) {
+        warn_report("apple-modern: dcp-asc candidate reg[%u] %s 0x%" PRIx64
+                    "+0x%" PRIx64 " %s", i,
+                    apple_modern_dcp_asc_window_name(i), plan.addresses[i],
+                    plan.sizes[i], plan.contained[i] ?
+                    "skipped: inside an earlier window" : "mapped");
+        if (!plan.contained[i]) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(dev), region++, plan.addresses[i]);
+        }
+    }
+    s->dcp_asc_plan = plan;
+    warn_report("apple-modern: opt-in dcp-asc '%s': a handful of decoded "
+                "registers over the /arm-io/dcp ASC v6 windows (reg[2] is "
+                "inside reg[0], so TWO apertures), an EMPTY mailbox with no "
+                "peer and NO published endpoint; core offset 0 bit 0 = %u is a "
+                "DECLARED claim that iBoot pre-loaded the DCP firmware, which "
+                "this loader does not do", s->dcp_asc,
+                mode == APPLE_MODERN_DCP_ASC_FIRMWARE_LOADED ? 1u : 0u);
+    return true;
+}
 static bool map_disp_trace(AppleModernMachine *s, uint64_t uart,
                            uint64_t uart_span, Error **errp)
 {
@@ -2365,6 +2436,7 @@ static void modern_init(MachineState *machine)
         (s->modern_mcc_slc && !map_mcc_slc(s, uart, uart_span, &error)) ||
         (s->modern_pmp_ptd && !map_pmp_ptd(s, uart, uart_span, &error)) ||
         (s->modern_cpu_dvfm && !map_cpu_dvfm(s, uart, uart_span, &error)) ||
+        (s->dcp_asc && !map_dcp_asc(s, uart, uart_span, &error)) ||
         (s->disp0_probe && !map_disp_trace(s, uart, uart_span, &error)) ||
         (s->modern_pmgr_storage &&
          !map_pmgr_storage(s, uart, uart_span, &error)) ||
@@ -2501,6 +2573,19 @@ static void set_disp0_probe(Object *obj, const char *value, Error **errp)
     }
 }
 
+static char *get_dcp_asc(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->dcp_asc);
+}
+
+static void set_dcp_asc(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->dcp_asc);
+        s->dcp_asc = value && value[0] ? g_strdup(value) : NULL;
+    }
+}
 static char *get_pmgr_voltage_states(Object *obj, Error **errp)
 {
     return g_strdup(APPLE_MODERN_MACHINE(obj)->pmgr_voltage_states);
@@ -2761,6 +2846,8 @@ static void modern_finalize(Object *obj)
     g_free(s->pmgr_voltage_states);
     g_free(s->pmgr_boot_on);
     g_free(s->image_patches);
+    g_free(s->disp0_probe);
+    g_free(s->dcp_asc);
     for (size_t i = 0; i < ASSET_COUNT; i++) {
         g_free(s->paths[i]);
         g_free((void *)s->blobs[i].data);
@@ -2817,6 +2904,7 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                   set_pmgr_boot_on);
     object_class_property_add_str(oc, "disp0-probe", get_disp0_probe,
                                   set_disp0_probe);
+    object_class_property_add_str(oc, "dcp-asc", get_dcp_asc, set_dcp_asc);
     object_class_property_add_str(oc, "pmgr-voltage-states",
                                   get_pmgr_voltage_states,
                                   set_pmgr_voltage_states);

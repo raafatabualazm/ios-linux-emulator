@@ -27,6 +27,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'modern-pmp-ptd.c',
     'modern-cpu-dvfm.c',
     'modern-disp-trace.c',
+    'modern-dcp-asc.c',
     'modern-pmgr-storage.c',
     'modern-mcc-dsid.c',
     'modern-mcc-slc.c',

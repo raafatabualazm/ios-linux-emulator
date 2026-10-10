@@ -48,6 +48,7 @@ static const uint8_t compat_dcp[] = "iop,ascwrap-v6";         /* 15 B */
 static const uint8_t compat_dcp_nub[] = "iop-nub,rtbuddy-v2"; /* 19 B */
 static const uint8_t compat_dcp_expert[] = "dcp-expert-v1";   /* 14 B */
 static const uint8_t compat_dart[] = "dart,t8110";            /* 11 B */
+static const uint8_t compat_iommu_mapper[] = "iommu-mapper";  /* 13 B */
 /* DECLARED, not in the stock tree: a 4-byte non-zero value for the property
  * the kext's own accessor reads ("found ? value : 0"). */
 static const uint8_t no_dcp_driver_one[4] = {1, 0, 0, 0};
@@ -107,6 +108,37 @@ static const AppleModernAdtOverride profile_dcp_chain[] = {
     COMPAT("/arm-io/dart-disp0", compat_dart),
     {"/arm-io/dart-disp0", "dart-id", dart_id_1, (uint32_t)sizeof(dart_id_1)},
 };
+/*
+ * w12-dcp.  dcp-chain plus the one stock "compatible" the mapper NUBS need.
+ *
+ * MEASURED (w12-dcp runs/R1): under dcp-chain the guest's own IOService plane
+ * holds six IODARTMapperNub children of the two AppleT8110DARTs and ZERO
+ * IODARTMapper services.  ATTESTED (BootKC __PRELINK_INFO): the only
+ * IODARTMapper personality is com.apple.driver.IODARTFamily's, IOProviderClass
+ * IODARTMapperNub, IONameMatch "iommu-mapper" - and published XNU matches an
+ * IONameMatch token against a DT nub's name, compatible, device_type and model
+ * (IODTCompareNubName), none of which is "iommu-mapper" on the served tree,
+ * because the served tree strips every mapper node's compatible.  So no
+ * IOMapper can ever register, and AppleA7IOP::start - whose blocked frame in
+ * w11-clcdstart holds the live DART property string "truncate-dvas" - has
+ * nothing to wake it.  Restoring the stock compatible on the three mapper nodes
+ * that /arm-io/dcp (iommu-parent = mapper-dcp) and /arm-io/disp0 (iommu-parent
+ * = mapper-disp0, mapper-disp0-piodma) name is therefore the cheapest
+ * declared, anchored measure that can let the wrapper's mapper wait complete.
+ */
+static const AppleModernAdtOverride profile_dcp_mapper[] = {
+    COMPAT("/arm-io/disp0", compat_disp0),
+    COMPAT("/arm-io/dcp", compat_dcp),
+    COMPAT("/arm-io/dcp/iop-dcp-nub", compat_dcp_nub),
+    COMPAT("/arm-io/dcp0-expert", compat_dcp_expert),
+    COMPAT("/arm-io/dart-dcp", compat_dart),
+    {"/arm-io/dart-dcp", "dart-id", dart_id_0, (uint32_t)sizeof(dart_id_0)},
+    COMPAT("/arm-io/dart-disp0", compat_dart),
+    {"/arm-io/dart-disp0", "dart-id", dart_id_1, (uint32_t)sizeof(dart_id_1)},
+    COMPAT("/arm-io/dart-dcp/mapper-dcp", compat_iommu_mapper),
+    COMPAT("/arm-io/dart-disp0/mapper-disp0", compat_iommu_mapper),
+    COMPAT("/arm-io/dart-disp0/mapper-disp0-piodma", compat_iommu_mapper),
+};
 
 const AppleModernAdtOverride *apple_modern_disp_probe_profile(const char *name,
                                                               size_t *count)
@@ -133,6 +165,10 @@ const AppleModernAdtOverride *apple_modern_disp_probe_profile(const char *name,
     if (!strcmp(name, APPLE_MODERN_DISP_PROBE_DCP_CHAIN)) {
         *count = sizeof(profile_dcp_chain) / sizeof(profile_dcp_chain[0]);
         return profile_dcp_chain;
+    }
+    if (!strcmp(name, APPLE_MODERN_DISP_PROBE_DCP_MAPPER)) {
+        *count = sizeof(profile_dcp_mapper) / sizeof(profile_dcp_mapper[0]);
+        return profile_dcp_mapper;
     }
     *count = 0;
     return NULL;
