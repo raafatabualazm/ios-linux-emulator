@@ -96,6 +96,8 @@ struct AppleModernMachine {
     char *image_patches;
     AppleModernImagePatchResult image_patch_result;
     bool pauth_compat;
+    /* Read-only observability, default off: trace EL0 BRK traps. */
+    bool el0_trap_trace;
     bool sep_trace;
     bool sep_mailbox;
     bool sep_sim;
@@ -2394,6 +2396,14 @@ static void modern_init(MachineState *machine)
                     "are no-ops (opt-in pauth-compat; compatibility, not "
                     "Apple fidelity)");
     }
+    if (s->el0_trap_trace) {
+        object_property_set_bool(OBJECT(s->cpu),
+                                 "apple-modern-el0-trap-trace", true,
+                                 &error_fatal);
+        warn_report("apple-modern: EL0 BRK traps are reported on the QEMU side "
+                    "(opt-in el0-trap-trace; observability only, guest "
+                    "behaviour is unchanged)");
+    }
     object_property_set_bool(OBJECT(s->cpu), "apple-modern-sysregs", true,
                               &error_fatal);
     object_property_set_uint(OBJECT(s->cpu), "cntfrq", s->timebase_frequency,
@@ -2585,6 +2595,7 @@ BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
 BOOL_PROPERTY(trustcache_v2, trustcache_v2)
 BOOL_PROPERTY(md0_width_compat, md0_width_compat)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
+BOOL_PROPERTY(el0_trap_trace, el0_trap_trace)
 BOOL_PROPERTY(sep_trace, sep_trace)
 BOOL_PROPERTY(sep_mailbox, sep_mailbox)
 BOOL_PROPERTY(sep_sim, sep_sim)
@@ -2817,6 +2828,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_trustcache_v2);
     object_class_property_add_bool(oc, "pauth-compat", get_pauth_compat,
                                    set_pauth_compat);
+    object_class_property_add_bool(oc, "el0-trap-trace", get_el0_trap_trace,
+                                   set_el0_trap_trace);
     object_class_property_add_bool(oc, "sep-trace", get_sep_trace,
                                    set_sep_trace);
     object_class_property_add_bool(oc, "sep-mailbox", get_sep_mailbox,

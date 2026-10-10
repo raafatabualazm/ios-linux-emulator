@@ -1071,6 +1071,12 @@ struct ArchCPU {
      * once several processes reprogram the per-process key registers.
      */
     bool apple_modern_pauth_compat;
+    /*
+     * Read-only observability, default off: report every AArch64 BRK taken
+     * while the guest is at EL0, with its immediate, pc and TTBR0_EL1. Guest
+     * behaviour is identical either way; only QEMU-side output changes.
+     */
+    bool apple_modern_el0_trap_trace;
     /* Stable alias metadata for the opt-in modern register interface. */
     GPtrArray *modern_vhe_snapshots;
     /* CPU has security extension */

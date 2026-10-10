@@ -13,6 +13,8 @@
 #include "cpregs.h"
 #include "exec/watchpoint.h"
 #include "system/tcg.h"
+#include "qemu/error-report.h"
+#include "hw/arm/apple-silicon/modern-el0-trap.h"
 
 #define HELPER_H "tcg/helper.h"
 #include "exec/helper-proto.h.inc"
@@ -518,6 +520,23 @@ void HELPER(exception_bkpt_insn)(CPUARMState *env, uint32_t syndrome)
 {
     int debug_el = arm_debug_target_el(env);
     int cur_el = arm_current_el(env);
+
+    /*
+     * Opt-in, default-off observability for the apple-modern board: a
+     * userspace process that dies with SIGTRAP "sent by exc handler" died from
+     * EXC_BREAKPOINT, whose only architectural source without a debugger is a
+     * BRK. Report the immediate, the pc and the user address space; change
+     * nothing about how the exception is taken.
+     */
+    if (env_archcpu(env)->apple_modern_el0_trap_trace && cur_el == 0 &&
+        is_a64(env)) {
+        char line[160];
+
+        /* ISS[15:0] of a BRK syndrome is the instruction's own immediate. */
+        apple_modern_el0_trap_format(line, sizeof(line), syndrome & 0xffff,
+                                     env->pc, env->cp15.ttbr0_el[1]);
+        warn_report("%s", line);
+    }
 
     /* FSR will only be used if the debug target EL is AArch32. */
     env->exception.fsr = arm_debug_exception_fsr(env);
