@@ -344,6 +344,51 @@ static void test_multi_expected(void)
     free(one);
 }
 
+static void test_result_capacity(void)
+{
+    static const uint8_t first[] = "AAAA!", second[] = "BBBB!";
+    static const uint8_t replacement[] = "done!";
+    const AppleModernImagePatch patches[] = {
+        {.name = "first", .image = APPLE_MODERN_BOOTKC, .anchor = first,
+         .anchor_len = 5, .replacement = replacement, .replacement_len = 5,
+         .expected_count = 2, .changes = "c", .removes = "r"},
+        {.name = "second", .image = APPLE_MODERN_BOOTKC, .anchor = second,
+         .anchor_len = 5, .replacement = replacement, .replacement_len = 5,
+         .expected_count = 2, .changes = "c", .removes = "r"},
+    };
+    const AppleModernImagePatchSet set = {"capacity", patches, 2};
+    uint8_t bytes[] = "AAAA!....BBBB!....AAAA!....BBBB!";
+    uint8_t original[sizeof(bytes)];
+    Error *error = NULL;
+    AppleModernImagePatchResult result = {
+        .count = APPLE_MODERN_MAX_IMAGE_PATCHES - 3,
+    };
+    memcpy(original, bytes, sizeof(bytes));
+    /* The total across two entries must fit, including prior images' slots. */
+    CHECK(!apple_modern_image_patch_apply_image(&set, APPLE_MODERN_BOOTKC,
+            bytes, sizeof(bytes), &result, &error));
+    CHECK(error && strstr(error->message, "result slots left"));
+    CHECK(result.count == APPLE_MODERN_MAX_IMAGE_PATCHES - 3);
+    CHECK(!memcmp(bytes, original, sizeof(bytes)));
+    clear_error(&error);
+    result.count = APPLE_MODERN_MAX_IMAGE_PATCHES - 4;
+    CHECK(apple_modern_image_patch_apply_image(&set, APPLE_MODERN_BOOTKC,
+            bytes, sizeof(bytes), &result, &error));
+    CHECK(error == NULL && result.count == APPLE_MODERN_MAX_IMAGE_PATCHES);
+    CHECK(!memcmp(bytes, "done!....done!....done!....done!", sizeof(bytes)));
+    memcpy(bytes, original, sizeof(bytes));
+    CHECK(!apple_modern_image_patch_apply_image(&set, APPLE_MODERN_BOOTKC,
+            bytes, sizeof(bytes), NULL, &error));
+    CHECK(error && strstr(error->message, "null argument"));
+    clear_error(&error);
+    result.count = APPLE_MODERN_MAX_IMAGE_PATCHES + 1;
+    CHECK(!apple_modern_image_patch_apply_image(&set, APPLE_MODERN_BOOTKC,
+            bytes, sizeof(bytes), &result, &error));
+    CHECK(error && strstr(error->message, "invalid result count"));
+    CHECK(!memcmp(bytes, original, sizeof(bytes)));
+    clear_error(&error);
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -356,6 +401,7 @@ int main(void)
     test_no_targeted_patch();
     test_multi_expected();
     test_entry_budget();
+    test_result_capacity();
     printf("PASS %u image-patch checks; no guest writes or execution\n", checks);
     return 0;
 }
