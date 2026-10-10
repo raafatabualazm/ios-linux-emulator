@@ -61,6 +61,10 @@
  *     with the two flags. No firmware is executed.
  *   - "v6-prestarted-quiesced": the same reset-started peer without flags.
  *
+ *   - "v6-expert-start": no flags/reset prestart; additionally owns the ADT
+ *     expert control register. Its measured on-write starts this peer later.
+ *     This bridge and register readback are declared; no firmware executes.
+ *
  * Owned AP polling ROMs qualify HELLO/epmap/power exchanges through resets.
  * Measured modern guest flagged v6 and v6-prestarted arms both fail the
  * firmware-load REQUIRE before any handled DCP wrapper/mailbox accesses.
@@ -105,6 +109,7 @@ enum {
     APPLE_MODERN_DCP_IOP_MODE_FLAGS_ONLY,
     APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED,
     APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED_QUIESCED,
+    APPLE_MODERN_DCP_IOP_MODE_V6_EXPERT_START,
 };
 #define APPLE_MODERN_DCP_IOP_NAME_V6 "v6"
 #define APPLE_MODERN_DCP_IOP_NAME_V4 "v4"
@@ -112,11 +117,13 @@ enum {
 #define APPLE_MODERN_DCP_IOP_NAME_FLAGS "flags-only"
 #define APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED "v6-prestarted"
 #define APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED_QUIESCED "v6-prestarted-quiesced"
+#define APPLE_MODERN_DCP_IOP_NAME_V6_EXPERT_START "v6-expert-start"
 #define APPLE_MODERN_DCP_IOP_MODE_NAMES \
     APPLE_MODERN_DCP_IOP_NAME_V6 ", " APPLE_MODERN_DCP_IOP_NAME_V4 ", " \
     APPLE_MODERN_DCP_IOP_NAME_V6_QUIESCED ", " APPLE_MODERN_DCP_IOP_NAME_FLAGS ", " \
     APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED ", " \
-    APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED_QUIESCED
+    APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED_QUIESCED ", " \
+    APPLE_MODERN_DCP_IOP_NAME_V6_EXPERT_START
 
 /* Returns false for an unknown name. */
 bool apple_modern_dcp_iop_mode(const char *name, unsigned *mode);
@@ -133,6 +140,11 @@ const AppleModernAdtOverride *apple_modern_dcp_iop_overrides(size_t *count);
 typedef struct AppleModernDcpIopPlan {
     uint64_t wrapper_address;
     uint64_t wrapper_size;
+    /* Optional expert control, validated from ADT only for v6-expert-start.
+     * On/off readback and control-to-peer start are declared behavior. */
+    uint64_t expert_control_address;
+    uint32_t expert_control_on;
+    uint32_t expert_control_off;
     uint32_t interrupts[APPLE_MODERN_DCP_IOP_IRQS];
     /* ADT "role" of /arm-io/dcp, NUL-terminated; the %s of "%sEndpoint%u". */
     char role[APPLE_MODERN_DCP_IOP_ROLE_MAX];

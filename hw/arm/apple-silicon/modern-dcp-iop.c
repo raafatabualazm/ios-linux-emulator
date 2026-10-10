@@ -85,6 +85,8 @@ bool apple_modern_dcp_iop_mode(const char *name, unsigned *mode)
           APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED },
         { APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED_QUIESCED,
           APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED_QUIESCED },
+        { APPLE_MODERN_DCP_IOP_NAME_V6_EXPERT_START,
+          APPLE_MODERN_DCP_IOP_MODE_V6_EXPERT_START },
     };
     if (!name || !mode) {
         return false;
@@ -104,7 +106,8 @@ bool apple_modern_dcp_iop_mode_has_peer(unsigned mode)
            mode == APPLE_MODERN_DCP_IOP_MODE_V4 ||
            mode == APPLE_MODERN_DCP_IOP_MODE_V6_QUIESCED ||
            mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED ||
-           mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED_QUIESCED;
+           mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED_QUIESCED ||
+           mode == APPLE_MODERN_DCP_IOP_MODE_V6_EXPERT_START;
 }
 
 bool apple_modern_dcp_iop_mode_has_flags(unsigned mode)
@@ -381,6 +384,11 @@ struct AppleModernDcpIop {
     bool rollcall_done;
     bool prestarted;
     bool reset_start;
+    bool expert_start;
+    MemoryRegion expert_control;
+    uint32_t expert_control_value;
+    uint32_t expert_control_on;
+    uint32_t expert_control_off;
 };
 
 static void dcp_iop_handle_message(void *opaque, uint8_t ep, uint64_t message)
@@ -432,6 +440,7 @@ static void dcp_iop_started(void *opaque)
     warn_report("apple-modern: dcp-iop CPU start #%" PRIu64
                 " (%s); RTKit HELLO queued", s->cpu_starts,
                 s->reset_start ? "declared reset prestart; no guest write" :
+                s->expert_start ? "declared expert-control on-write bridge" :
                                  "CPU_CTRL RUN");
 }
 
@@ -461,6 +470,45 @@ bool apple_modern_dcp_iop_rollcall_done(DeviceState *dev)
     return APPLE_MODERN_DCP_IOP(dev)->rollcall_done;
 }
 
+/* The ADT names the register and on/off values; bridging this external
+ * control to our existing RTKit start callback is an explicit opt-in model.
+ * Unknown values do not start or stop the peer. No firmware runs. */
+static uint64_t dcp_expert_control_read(void *opaque, hwaddr offset,
+                                       unsigned size)
+{
+    AppleModernDcpIop *s = opaque;
+    qemu_log_mask(LOG_UNIMP, "DCP-EXPERT-CONTROL read offset 0x%" PRIx64
+                  " size %u value 0x%x\n", (uint64_t)offset, size,
+                  s->expert_control_value);
+    return s->expert_control_value;
+}
+
+static void dcp_expert_control_write(void *opaque, hwaddr offset,
+                                      uint64_t value, unsigned size)
+{
+    AppleModernDcpIop *s = opaque;
+    qemu_log_mask(LOG_UNIMP, "DCP-EXPERT-CONTROL write offset 0x%" PRIx64
+                  " size %u value 0x%" PRIx64 "\n", (uint64_t)offset,
+                  size, value);
+    if (value != s->expert_control_on && value != s->expert_control_off) {
+        qemu_log_mask(LOG_UNIMP, "DCP-EXPERT-CONTROL ignored unknown value\n");
+        return;
+    }
+    s->expert_control_value = value;
+    s->expert_start = true;
+    apple_a7iop_set_cpu_ctrl(APPLE_A7IOP(s),
+                            value == s->expert_control_on ? CPU_CTRL_RUN : 0);
+    s->expert_start = false;
+}
+
+static const MemoryRegionOps dcp_expert_control_ops = {
+    .read = dcp_expert_control_read,
+    .write = dcp_expert_control_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
 DeviceState *apple_modern_dcp_iop_new(const AppleModernDcpIopPlan *plan,
                                       unsigned mode)
 {
@@ -484,6 +532,15 @@ DeviceState *apple_modern_dcp_iop_new(const AppleModernDcpIopPlan *plan,
     snprintf(s->nub_name, sizeof(s->nub_name), "%s", plan->nub_name);
     apple_rtkit_init(APPLE_RTKIT(dev), s, plan->role, plan->wrapper_size,
                      version, &dcp_iop_rtkit_ops);
+    if (mode == APPLE_MODERN_DCP_IOP_MODE_V6_EXPERT_START) {
+        s->expert_control_on = plan->expert_control_on;
+        s->expert_control_off = plan->expert_control_off;
+        s->expert_control_value = s->expert_control_off;
+        memory_region_init_io(&s->expert_control, OBJECT(s),
+                               &dcp_expert_control_ops, s,
+                               "apple-modern.dcp-expert-control", 4);
+        sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->expert_control);
+    }
     /*
      * USER-RELATIVE index: the a7iop layer adds EP_USER_START itself.  Never
      * hand-compute the raw number here; the plan carries it only to report it.
@@ -516,6 +573,8 @@ static void dcp_iop_reset_hold(Object *obj, ResetType type)
     s->cpu_wakeups = 0;
     s->rollcall_done = false;
     s->reset_start = false;
+    s->expert_start = false;
+    s->expert_control_value = s->expert_control_off;
 }
 
 static void dcp_iop_reset_exit(Object *obj, ResetType type)
