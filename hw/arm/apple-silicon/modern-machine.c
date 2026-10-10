@@ -2267,6 +2267,7 @@ static void modern_init(MachineState *machine)
                     md0.blockcount_before[0], md0.blockcount_before[1],
                     md0.blockcount_before[2], md0.blockcount_after[0],
                     md0.blockcount_after[1], md0.blockcount_after[2]);
+    }
     if (s->image_patches) {
         /*
          * Declared, opt-in anchored image patches on the board's private
