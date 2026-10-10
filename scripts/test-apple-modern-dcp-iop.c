@@ -461,6 +461,110 @@ static void check_plan(AppleModernBlob stock, AppleModernBlob served)
     free(mutated);
 }
 
+static void check_expert_plan(AppleModernBlob stock)
+{
+    AppleModernDcpIopPlan plan, peer;
+    AppleModernAddressRange exclusion;
+    Error *error = NULL;
+    uint8_t *mutated = malloc(stock.size);
+    size_t size, offset;
+    const struct {
+        const char *path, *property;
+        unsigned within, width;
+        uint64_t value;
+    } cases[] = {
+        {"/arm-io/dcp0-expert", "dcp-controls-reg-index", 0, 4, 99},
+        {"/arm-io/dcp0-expert", "dcp-controls-value-on", 0, 4, 17},
+        {"/arm-io/dcp0-expert", "dcp-controls-value-off", 0, 4, 1},
+        {"/arm-io/dcp0-expert", "reg", 24, 8, 8},
+        {"/arm-io/dcp0-expert", "reg", 16, 8, UINT64_MAX - 3},
+        {"/arm-io/dcp0-expert", "reg", 16, 8, UINT64_C(0x202e00000)},
+        {"/arm-io", "ranges", 8, 8, UINT64_C(0x210000001)},
+    };
+    CHECK(mutated != NULL);
+    CHECK(apple_modern_dcp_iop_plan_build(stock, DRAM_BASE, DRAM_SIZE,
+              NULL, 0, APPLE_MODERN_DCP_IOP_EP_IOMFB, &peer, &error));
+    CHECK(error == NULL);
+    plan = peer;
+    CHECK(apple_modern_dcp_iop_expert_plan_build(stock, DRAM_BASE, DRAM_SIZE,
+                                                NULL, 0, &plan, &error));
+    CHECK(error == NULL);
+    CHECK(plan.expert_control_address == UINT64_C(0x308008000));
+    CHECK(plan.expert_control_on == 16 && plan.expert_control_off == 0);
+    CHECK(plan.wrapper_address == peer.wrapper_address);
+
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        memcpy(mutated, stock.data, stock.size);
+        offset = property_offset((AppleModernBlob){mutated, stock.size},
+                                  cases[i].path, cases[i].property, &size);
+        CHECK(cases[i].within + cases[i].width <= size);
+        for (unsigned j = 0; j < cases[i].width; j++) {
+            mutated[offset + cases[i].within + j] = cases[i].value >> (j * 8);
+        }
+        CHECK(!apple_modern_dcp_iop_expert_plan_build(
+                  (AppleModernBlob){mutated, stock.size}, DRAM_BASE, DRAM_SIZE,
+                  NULL, 0, &plan, &error));
+        clear_error(&error);
+        CHECK(plan.expert_control_address == 0 &&
+              plan.expert_control_on == 0 && plan.expert_control_off == 0);
+        CHECK(plan.wrapper_address == peer.wrapper_address);
+    }
+    /* Ambiguous parent translation must not pick whichever range is first. */
+    memcpy(mutated, stock.data, stock.size);
+    offset = property_offset((AppleModernBlob){mutated, stock.size},
+                              "/arm-io", "ranges", &size);
+    CHECK(size >= 48);
+    memcpy(mutated + offset + 24, mutated + offset, 24);
+    CHECK(!apple_modern_dcp_iop_expert_plan_build(
+              (AppleModernBlob){mutated, stock.size}, DRAM_BASE, DRAM_SIZE,
+              NULL, 0, &plan, &error));
+    clear_error(&error);
+
+    exclusion = (AppleModernAddressRange){UINT64_C(0x308008000), 4};
+    CHECK(!apple_modern_dcp_iop_expert_plan_build(stock, DRAM_BASE, DRAM_SIZE,
+                                                &exclusion, 1, &plan, &error));
+    clear_error(&error);
+    CHECK(!apple_modern_dcp_iop_expert_plan_build(stock, UINT64_C(0x308008000),
+                                                0x1000, NULL, 0, &plan, &error));
+    clear_error(&error);
+    exclusion.size = 0;
+    CHECK(!apple_modern_dcp_iop_expert_plan_build(stock, DRAM_BASE, DRAM_SIZE,
+                                                &exclusion, 1, &plan, &error));
+    clear_error(&error);
+    exclusion = (AppleModernAddressRange){UINT64_MAX, 2};
+    CHECK(!apple_modern_dcp_iop_expert_plan_build(stock, DRAM_BASE, DRAM_SIZE,
+                                                &exclusion, 1, &plan, &error));
+    clear_error(&error);
+    CHECK(!apple_modern_dcp_iop_expert_plan_build(stock, DRAM_BASE, DRAM_SIZE,
+                                                NULL, 1, &plan, &error));
+    clear_error(&error);
+    CHECK(!apple_modern_dcp_iop_expert_plan_build(stock, DRAM_BASE, DRAM_SIZE,
+                                                NULL, 0, NULL, &error));
+    clear_error(&error);
+    CHECK(!apple_modern_dcp_iop_expert_plan_build(
+              (AppleModernBlob){(const uint8_t *)&plan, sizeof(plan)},
+              DRAM_BASE, DRAM_SIZE, NULL, 0, &plan, &error));
+    clear_error(&error);
+    CHECK(!apple_modern_dcp_iop_expert_plan_build(stock, DRAM_BASE, 0,
+                                                NULL, 0, &plan, &error));
+    clear_error(&error);
+    CHECK(!apple_modern_dcp_iop_expert_plan_build(stock, UINT64_MAX, 2,
+                                                NULL, 0, &plan, &error));
+    clear_error(&error);
+    CHECK(!apple_modern_dcp_iop_expert_plan_build(stock, DRAM_BASE, DRAM_SIZE,
+              &exclusion, APPLE_MODERN_MAX_BOARD_EXCLUSIONS + 1, &plan, &error));
+    clear_error(&error);
+    plan.wrapper_size = 4;
+    CHECK(!apple_modern_dcp_iop_expert_plan_build(stock, DRAM_BASE, DRAM_SIZE,
+                                                NULL, 0, &plan, &error));
+    clear_error(&error);
+    plan = peer;
+    CHECK(apple_modern_dcp_iop_expert_plan_build(stock, DRAM_BASE, DRAM_SIZE,
+                                                NULL, 0, &plan, &error));
+    CHECK(error == NULL && plan.expert_control_address == UINT64_C(0x308008000));
+    free(mutated);
+}
+
 /*
  * The two trees must agree on everything this model reads except the stripped
  * "compatible" values, because that is what lets the stock tree stand in for
@@ -471,6 +575,10 @@ static void check_trees_agree(AppleModernBlob served, AppleModernBlob stock)
     static const char *const same[][2] = {
         {"/arm-io/dcp", "reg"}, {"/arm-io/dcp", "role"},
         {"/arm-io/dcp", "interrupts"}, {"/arm-io", "ranges"},
+        {"/arm-io/dcp0-expert", "reg"},
+        {"/arm-io/dcp0-expert", "dcp-controls-reg-index"},
+        {"/arm-io/dcp0-expert", "dcp-controls-value-on"},
+        {"/arm-io/dcp0-expert", "dcp-controls-value-off"},
     };
     for (unsigned i = 0; i < sizeof(same) / sizeof(same[0]); i++) {
         AppleModernBlob a, b;
@@ -522,6 +630,7 @@ int main(int argc, char **argv)
     check_overrides(served, stock);
     check_trees_agree(served, stock);
     check_plan(stock, served);
+    check_expert_plan(stock);
 
     printf("{\"passed\": true, \"checks\": %u, \"firmware_executed\": false,"
            " \"guest_executed\": false, \"endpoint_raw\": %u,"

@@ -170,6 +170,14 @@ bool apple_modern_dcp_iop_plan_build(AppleModernBlob tree,
     const AppleModernAddressRange *exclusions, size_t exclusion_count,
     unsigned endpoint_raw, AppleModernDcpIopPlan *output, Error **errp);
 
+/* Extend a completed peer plan atomically. On failure control fields are zero,
+ * except alias/null refusals which leave all inputs untouched. Wrapper and
+ * endpoint fields are preserved. No register behavior is qualified here. */
+bool apple_modern_dcp_iop_expert_plan_build(AppleModernBlob tree,
+    uint64_t dram_base, uint64_t dram_size,
+    const AppleModernAddressRange *exclusions, size_t exclusion_count,
+    AppleModernDcpIopPlan *plan, Error **errp);
+
 #ifndef APPLE_MODERN_LAYOUT_STANDALONE
 #include "hw/sysbus.h"
 #define TYPE_APPLE_MODERN_DCP_IOP "apple-modern-dcp-iop"

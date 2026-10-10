@@ -366,6 +366,126 @@ bool apple_modern_dcp_iop_plan_build(AppleModernBlob tree,
     return true;
 }
 
+static bool expert_u32(AppleModernBlob tree, const char *name,
+                        uint32_t *value, Error **errp)
+{
+    AppleModernBlob prop;
+    if (!apple_modern_adt_property(tree, "/arm-io/dcp0-expert", name,
+                                   &prop, errp)) {
+        return false;
+    }
+    if (prop.size != 4) {
+        error_setg(errp, "dcp-iop expert %s must be a 4-byte ADT value", name);
+        return false;
+    }
+    *value = (uint32_t)little(prop.data, 4);
+    return true;
+}
+
+/* Extend an already validated peer plan with the separate expert control.
+ * Geometry/value names come from ADT; control-to-peer behavior is declared. */
+bool apple_modern_dcp_iop_expert_plan_build(AppleModernBlob tree,
+    uint64_t dram_base, uint64_t dram_size,
+    const AppleModernAddressRange *exclusions, size_t exclusion_count,
+    AppleModernDcpIopPlan *plan, Error **errp)
+{
+    const char *path = "/arm-io/dcp0-expert";
+    AppleModernBlob reg, ranges;
+    uint32_t index, on, off;
+    uint64_t bus, size, address = 0;
+    unsigned matches = 0;
+
+    if (!plan || aliases(plan, sizeof(*plan), tree.data, tree.size) ||
+        exclusion_count > APPLE_MODERN_MAX_BOARD_EXCLUSIONS ||
+        (exclusion_count && !exclusions) ||
+        (exclusions && aliases(plan, sizeof(*plan), exclusions,
+                               exclusion_count * sizeof(*exclusions)))) {
+        error_setg(errp, "dcp-iop expert output aliases input or exclusions "
+                         "are invalid");
+        return false;
+    }
+    plan->expert_control_address = 0;
+    plan->expert_control_on = 0;
+    plan->expert_control_off = 0;
+    if (!dram_size || dram_size > UINT64_MAX - dram_base ||
+        plan->wrapper_size != APPLE_MODERN_DCP_IOP_WRAPPER_SIZE ||
+        plan->wrapper_size > UINT64_MAX - plan->wrapper_address) {
+        error_setg(errp, "dcp-iop expert requires valid DRAM and peer extents");
+        return false;
+    }
+    for (size_t i = 0; i < exclusion_count; i++) {
+        if (!exclusions[i].size ||
+            exclusions[i].size > UINT64_MAX - exclusions[i].physical_address) {
+            error_setg(errp, "dcp-iop expert exclusion is empty or wraps");
+            return false;
+        }
+    }
+    if (!expert_u32(tree, "dcp-controls-reg-index", &index, errp) ||
+        !expert_u32(tree, "dcp-controls-value-on", &on, errp) ||
+        !expert_u32(tree, "dcp-controls-value-off", &off, errp)) {
+        return false;
+    }
+    if (!apple_modern_adt_property(tree, path, "reg", &reg, errp) ||
+        !apple_modern_adt_property(tree, "/arm-io", "ranges", &ranges, errp)) {
+        return false;
+    }
+    if (!reg.size || reg.size % 16 || index >= reg.size / 16 ||
+        on != 0x10 || off != 0) {
+        error_setg(errp, "dcp-iop expert control needs the measured "
+                         "on=0x10/off=0 and a valid ADT reg index");
+        return false;
+    }
+    bus = little(reg.data + index * 16, 8);
+    size = little(reg.data + index * 16 + 8, 8);
+    if (size != 4 || bus % 4 || size > UINT64_MAX - bus ||
+        !ranges.size || ranges.size % 24) {
+        error_setg(errp, "dcp-iop expert control must be a translated "
+                         "aligned 4-byte ADT window");
+        return false;
+    }
+    for (size_t i = 0; i < ranges.size; i += 24) {
+        uint64_t child = little(ranges.data + i, 8);
+        uint64_t parent = little(ranges.data + i + 8, 8);
+        uint64_t span = little(ranges.data + i + 16, 8);
+        if (!span || span > UINT64_MAX - child ||
+            span > UINT64_MAX - parent) {
+            error_setg(errp, "dcp-iop expert bus range is empty or wraps");
+            return false;
+        }
+        if (bus >= child && bus - child < span &&
+            size <= span - (bus - child)) {
+            address = parent + (bus - child);
+            matches++;
+        }
+    }
+    if (matches != 1) {
+        error_setg(errp, "dcp-iop expert control translation is missing "
+                         "or ambiguous");
+        return false;
+    }
+    if (!address || address % 4) {
+        error_setg(errp, "dcp-iop expert control physical address must be "
+                         "nonzero and aligned to 4 bytes");
+        return false;
+    }
+    if (overlaps(address, size, dram_base, dram_size) ||
+        overlaps(address, size, plan->wrapper_address, plan->wrapper_size)) {
+        error_setg(errp, "dcp-iop expert control overlaps DRAM/wrapper");
+        return false;
+    }
+    for (size_t i = 0; i < exclusion_count; i++) {
+        if (overlaps(address, size, exclusions[i].physical_address,
+                     exclusions[i].size)) {
+            error_setg(errp, "dcp-iop expert control overlaps another device");
+            return false;
+        }
+    }
+    plan->expert_control_address = address;
+    plan->expert_control_on = on;
+    plan->expert_control_off = off;
+    return true;
+}
+
 #ifndef APPLE_MODERN_LAYOUT_STANDALONE
 
 struct AppleModernDcpIopClass {
