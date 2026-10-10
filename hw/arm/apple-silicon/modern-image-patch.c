@@ -224,12 +224,18 @@ bool apple_modern_image_patch_apply_image(const AppleModernImagePatchSet *set,
     size_t n = 0;
     /* Result slots already used by earlier images, plus those this image will
      * need; pass 2 writes one entry per MATCH (see the budget check below). */
-    size_t entries = result->count;
+    size_t entries;
 
     if (!set || !buf || !result) {
         error_setg(errp, "image-patch: null argument");
         return false;
     }
+    if (result->count > APPLE_MODERN_MAX_IMAGE_PATCHES) {
+        error_setg(errp, "image-patch: invalid result count %zu (max %d)",
+                   result->count, APPLE_MODERN_MAX_IMAGE_PATCHES);
+        return false;
+    }
+    entries = result->count;
 
     /*
      * Pass 1 (no writes): select the patches for this image, validate each
