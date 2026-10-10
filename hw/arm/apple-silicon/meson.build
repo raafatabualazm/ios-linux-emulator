@@ -30,6 +30,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'modern-boot-layout.c',
     'modern-boot-metadata.c',
     'modern-boot-display.c',
+    'modern-disp0.c',
     'modern-boot-input.c',
     'modern-board-regions.c',
     'modern-machine.c',
