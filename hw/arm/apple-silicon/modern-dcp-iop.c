@@ -81,6 +81,8 @@ bool apple_modern_dcp_iop_mode(const char *name, unsigned *mode)
           APPLE_MODERN_DCP_IOP_MODE_V6_QUIESCED },
         { APPLE_MODERN_DCP_IOP_NAME_FLAGS,
           APPLE_MODERN_DCP_IOP_MODE_FLAGS_ONLY },
+        { APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED,
+          APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED },
     };
     if (!name || !mode) {
         return false;
@@ -98,14 +100,16 @@ bool apple_modern_dcp_iop_mode_has_peer(unsigned mode)
 {
     return mode == APPLE_MODERN_DCP_IOP_MODE_V6 ||
            mode == APPLE_MODERN_DCP_IOP_MODE_V4 ||
-           mode == APPLE_MODERN_DCP_IOP_MODE_V6_QUIESCED;
+           mode == APPLE_MODERN_DCP_IOP_MODE_V6_QUIESCED ||
+           mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED;
 }
 
 bool apple_modern_dcp_iop_mode_has_flags(unsigned mode)
 {
     return mode == APPLE_MODERN_DCP_IOP_MODE_V6 ||
            mode == APPLE_MODERN_DCP_IOP_MODE_V4 ||
-           mode == APPLE_MODERN_DCP_IOP_MODE_FLAGS_ONLY;
+           mode == APPLE_MODERN_DCP_IOP_MODE_FLAGS_ONLY ||
+           mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED;
 }
 
 bool apple_modern_dcp_iop_endpoint_name(const char *role, unsigned raw,
@@ -358,6 +362,11 @@ bool apple_modern_dcp_iop_plan_build(AppleModernBlob tree,
 
 #ifndef APPLE_MODERN_LAYOUT_STANDALONE
 
+struct AppleModernDcpIopClass {
+    AppleRTKitClass parent_class;
+    ResettablePhases parent_phases;
+};
+
 struct AppleModernDcpIop {
     AppleRTKit parent_obj;
     unsigned endpoint_user;
@@ -367,6 +376,8 @@ struct AppleModernDcpIop {
     uint64_t cpu_starts;
     uint64_t cpu_wakeups;
     bool rollcall_done;
+    bool prestarted;
+    bool reset_start;
 };
 
 static void dcp_iop_handle_message(void *opaque, uint8_t ep, uint64_t message)
@@ -415,9 +426,10 @@ static void dcp_iop_started(void *opaque)
     AppleModernDcpIop *s = opaque;
 
     s->cpu_starts++;
-    warn_report("apple-modern: dcp-iop the guest wrote CPU_CTRL RUN (start "
-                "#%" PRIu64 "); the RTKit HELLO is now in the mailbox",
-                s->cpu_starts);
+    warn_report("apple-modern: dcp-iop CPU start #%" PRIu64
+                " (%s); RTKit HELLO queued", s->cpu_starts,
+                s->reset_start ? "declared reset prestart; no guest write" :
+                                 "CPU_CTRL RUN");
 }
 
 static void dcp_iop_woken(void *opaque)
@@ -462,6 +474,7 @@ DeviceState *apple_modern_dcp_iop_new(const AppleModernDcpIopPlan *plan,
                                                      APPLE_A7IOP_V6;
     dev = qdev_new(TYPE_APPLE_MODERN_DCP_IOP);
     s = APPLE_MODERN_DCP_IOP(dev);
+    s->prestarted = mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED;
     s->endpoint_user = plan->endpoint_user;
     s->endpoint_raw = plan->endpoint_raw;
     snprintf(s->nub_name, sizeof(s->nub_name), "%s", plan->nub_name);
@@ -480,10 +493,48 @@ static const VMStateDescription vmstate_apple_modern_dcp_iop = {
     .name = TYPE_APPLE_MODERN_DCP_IOP, .unmigratable = 1,
 };
 
+/* Reset all diagnostic witnesses, then prestart only this declared mode after
+ * every device's reset hold phase. This mirrors the advertised preloaded/running
+ * state without executing firmware. The existing modes remain guest-started. */
+static void dcp_iop_reset_hold(Object *obj, ResetType type)
+{
+    AppleModernDcpIop *s = APPLE_MODERN_DCP_IOP(obj);
+    AppleModernDcpIopClass *dc = APPLE_MODERN_DCP_IOP_GET_CLASS(obj);
+
+    if (dc->parent_phases.hold) {
+        dc->parent_phases.hold(obj, type);
+    }
+    s->messages = 0;
+    s->cpu_starts = 0;
+    s->cpu_wakeups = 0;
+    s->rollcall_done = false;
+    s->reset_start = false;
+}
+
+static void dcp_iop_reset_exit(Object *obj, ResetType type)
+{
+    AppleModernDcpIop *s = APPLE_MODERN_DCP_IOP(obj);
+    AppleModernDcpIopClass *dc = APPLE_MODERN_DCP_IOP_GET_CLASS(obj);
+
+    if (dc->parent_phases.exit) {
+        dc->parent_phases.exit(obj, type);
+    }
+    if (s->prestarted) {
+        s->reset_start = true;
+        apple_a7iop_set_cpu_ctrl(APPLE_A7IOP(obj), CPU_CTRL_RUN);
+        s->reset_start = false;
+    }
+}
+
 static void apple_modern_dcp_iop_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
+    AppleModernDcpIopClass *dcp = APPLE_MODERN_DCP_IOP_CLASS(oc);
+
+    resettable_class_set_parent_phases(RESETTABLE_CLASS(oc), NULL,
+                                       dcp_iop_reset_hold, dcp_iop_reset_exit,
+                                       &dcp->parent_phases);
     dc->desc = "Apple modern DCP RTKit peer (declared, default-off)";
     dc->vmsd = &vmstate_apple_modern_dcp_iop;
     dc->user_creatable = false;
@@ -493,6 +544,7 @@ static const TypeInfo apple_modern_dcp_iop_info = {
     .name = TYPE_APPLE_MODERN_DCP_IOP,
     .parent = TYPE_APPLE_RTKIT,
     .instance_size = sizeof(AppleModernDcpIop),
+    .class_size = sizeof(AppleModernDcpIopClass),
     .class_init = apple_modern_dcp_iop_class_init,
 };
 

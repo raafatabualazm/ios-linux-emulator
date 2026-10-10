@@ -91,6 +91,12 @@ static void check_modes(void)
               APPLE_MODERN_DCP_IOP_MODE_V6_QUIESCED));
     CHECK(apple_modern_dcp_iop_mode_has_flags(
               APPLE_MODERN_DCP_IOP_MODE_FLAGS_ONLY));
+    CHECK(apple_modern_dcp_iop_mode("v6-prestarted", &mode) &&
+          mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED);
+    CHECK(apple_modern_dcp_iop_mode_has_peer(
+              APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED));
+    CHECK(apple_modern_dcp_iop_mode_has_flags(
+              APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED));
     /* v6-quiesced is the one arm that differs from v6 only in the flags. */
     CHECK(apple_modern_dcp_iop_mode_has_peer(APPLE_MODERN_DCP_IOP_MODE_V6) ==
           apple_modern_dcp_iop_mode_has_peer(
