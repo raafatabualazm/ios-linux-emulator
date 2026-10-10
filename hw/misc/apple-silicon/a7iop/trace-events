@@ -5,3 +5,7 @@ apple_rtkit_rollcall_finished(const char *role) "%s"
 apple_rtkit_mgmt_send_hello(const char *role) "%s"
 apple_rtkit_iop_start(const char *role) "%s"
 apple_rtkit_iop_wakeup(const char *role) "%s"
+
+# All wrapper callbacks, including handled registers. Disabled by default.
+apple_a7iop_wrapper_read(const char *role, int version, uint64_t addr, unsigned size) "%s v%d read @0x%" PRIx64 " size=%u"
+apple_a7iop_wrapper_write(const char *role, int version, uint64_t addr, unsigned size, uint64_t value) "%s v%d write @0x%" PRIx64 " size=%u value=0x%" PRIx64
