@@ -82,6 +82,7 @@ struct AppleModernMachine {
     bool has_amcc;
     bool img4_ignition_compat;
     bool trustcache_v2;
+    bool md0_width_compat;
     bool pauth_compat;
     bool sep_trace;
     bool sep_mailbox;
@@ -1951,6 +1952,39 @@ static void modern_init(MachineState *machine)
                     "to the in-memory kernel cache (compatibility, not Apple "
                     "fidelity)");
     }
+    if (s->md0_width_compat) {
+        /*
+         * Declared, opt-in guest-kernel compatibility edit on the private
+         * in-memory boot kernel cache only. See modern-kc-patch.h for the
+         * published-source root cause (xnu bsd/dev/memdev.c computes the md
+         * ram-disk byte size as a 32-bit `mdSize << 12`), the exact file:line
+         * list and what it removes.
+         */
+        AppleModernMd0WidthPatch md0 = { 0 };
+        uint8_t *bootkc = (uint8_t *)s->blobs[ASSET_BOOTKC].data;
+
+        if (!apple_modern_kc_md0_width_compat(bootkc,
+                                              s->blobs[ASSET_BOOTKC].size,
+                                              &md0, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: applied opt-in md0-width-compat patch to "
+                    "the in-memory kernel cache: mdevstrategy shift at "
+                    "0x%" PRIx64 " and DKIOCGETBLOCKCOUNT chain at "
+                    "0x%" PRIx64 " widened from 32 to 64 bit "
+                    "(4 instructions, 0x%08x->0x%08x and "
+                    "0x%08x/0x%08x/0x%08x->0x%08x/0x%08x/0x%08x). This "
+                    "REMOVES the 32-bit wrap that makes an md ram disk of "
+                    "4 GiB or more report (size mod 2^32) bytes; it removes "
+                    "no authentication, signing or integrity check. "
+                    "Compatibility, not Apple fidelity",
+                    md0.strategy_anchor, md0.blockcount_anchor,
+                    md0.strategy_before, md0.strategy_after,
+                    md0.blockcount_before[0], md0.blockcount_before[1],
+                    md0.blockcount_before[2], md0.blockcount_after[0],
+                    md0.blockcount_after[1], md0.blockcount_after[2]);
+    }
     AppleModernAddressRange exclusion = { uart, uart_span };
     if (!apple_modern_board_regions_build(s->components.dtree,
                                           s->components.dram_base,
@@ -2201,6 +2235,7 @@ ASSET_PROPERTY(ramdisk, ASSET_RAMDISK)
       if (check_mutable(s, errp)) { s->field = value; } }
 BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
 BOOL_PROPERTY(trustcache_v2, trustcache_v2)
+BOOL_PROPERTY(md0_width_compat, md0_width_compat)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(sep_trace, sep_trace)
 BOOL_PROPERTY(sep_mailbox, sep_mailbox)
@@ -2476,6 +2511,9 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "img4-ignition-compat",
                                    get_img4_ignition_compat,
                                    set_img4_ignition_compat);
+    object_class_property_add_bool(oc, "md0-width-compat",
+                                   get_md0_width_compat,
+                                   set_md0_width_compat);
     object_class_property_add_bool(oc, "prepare-only", get_prepare_only, set_prepare_only);
     object_class_property_add_bool(oc, "boot-display", get_boot_display,
                                    set_boot_display);
