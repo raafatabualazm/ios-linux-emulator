@@ -386,6 +386,97 @@ static void check_mutation_oracle(AppleModernBlob stock)
     free(flipped);
 }
 
+
+/*
+ * THE END-TO-END CHECK, host side: run the PRODUCTION metadata builder with each group's overrides
+ * against the real served tree and prove the tree it serves a guest carries the byte-exact stock
+ * value on every restored node - and that a node no group names still has no "compatible".
+ * Optional: only runs when a components directory is given, because the builder needs the five
+ * decoded boot components.
+ */
+static AppleModernBlob component(const char *dir, const char *name)
+{
+    char path[4096];
+    uint8_t *data;
+    size_t size;
+
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    data = slurp(path, &size);
+    return (AppleModernBlob){data, size};
+}
+
+static void check_builder(const char *components_dir, AppleModernBlob served)
+{
+    static const char *const untouched[] = {
+        "/arm-io/ans", "/arm-io/pmp", "/arm-io/sio", "/arm-io/wdt", "/arm-io/mcc",
+        "/arm-io/dcp", "/arm-io/disp0", "/arm-io/dart-dcp"};
+    AppleModernBootInput components = {.dram_base = UINT64_C(1) << 40,
+                                       .dram_size = UINT64_C(8) << 30};
+
+    components.bootkc = component(components_dir, "bootkc");
+    components.sptm = component(components_dir, "sptm");
+    components.txm = component(components_dir, "txm");
+    components.dtree = served;
+    components.trustcache = component(components_dir, "restore-trustcache");
+
+    for (size_t g = 0; g < apple_modern_compat_group_count; g++) {
+        const AppleModernCompatGroup *group = &apple_modern_compat_groups[g];
+        AppleModernAdtOverride list[APPLE_MODERN_MAX_ADT_OVERRIDES];
+        AppleModernBootMetadataInput input = {.components = &components,
+            .command_line = "-v", .command_line_length = 2,
+            .aic_iack_offset = 0x2000};
+        AppleModernBootMetadata out = {0};
+        AppleModernBlob built, value;
+        Error *error = NULL;
+        size_t count = 0;
+
+        CHECK(apple_modern_compat_groups_resolve(group->name, list, &count,
+                                                 sizeof(list) / sizeof(list[0]),
+                                                 &error));
+        CHECK(error == NULL && count == group->row_count);
+        input.overrides = list;
+        input.override_count = count;
+        CHECK(apple_modern_boot_metadata_build(&input, &out, &error));
+        CHECK(error == NULL && out.dtree != NULL && out.dtree_size > 0);
+        CHECK(out.dart_id_count == 0); /* the generator is off; groups serve their own */
+        built = (AppleModernBlob){out.dtree, out.dtree_size};
+
+        /* Every restored row is present, byte-exact, in the tree a guest would get. */
+        for (size_t r = 0; r < group->row_count; r++) {
+            const AppleModernAdtOverride *row = &group->rows[r];
+
+            CHECK(apple_modern_adt_property(built, row->path, row->name, &value,
+                                            &error));
+            CHECK(error == NULL);
+            CHECK(value.size == row->size);
+            CHECK(!memcmp(value.data, row->value, row->size));
+        }
+        /* And a node NO group names still has no compatible: nothing leaks. */
+        for (size_t i = 0; i < sizeof(untouched) / sizeof(untouched[0]); i++) {
+            bool named = false;
+
+            for (size_t h = 0; h < apple_modern_compat_group_count; h++) {
+                for (size_t r = 0; r < apple_modern_compat_groups[h].row_count;
+                     r++) {
+                    if (!strcmp(apple_modern_compat_groups[h].rows[r].path,
+                                untouched[i])) {
+                        named = true;
+                    }
+                }
+            }
+            CHECK(!named);
+            CHECK(!apple_modern_adt_property(built, untouched[i], "compatible",
+                                             &value, &error));
+            clear_error(&error);
+        }
+        apple_modern_boot_metadata_clear(&out);
+    }
+    free((void *)components.bootkc.data);
+    free((void *)components.sptm.data);
+    free((void *)components.txm.data);
+    free((void *)components.trustcache.data);
+}
+
 int main(int argc, char **argv)
 {
     uint8_t *served_data, *stock_data;
@@ -393,8 +484,9 @@ int main(int argc, char **argv)
     AppleModernBlob served, stock;
     unsigned compat_rows, rows = 0;
 
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s SERVED-ADT STOCK-ADT\n", argv[0]);
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "usage: %s SERVED-ADT STOCK-ADT [COMPONENTS-DIR]\n",
+                argv[0]);
         return 2;
     }
     served_data = slurp(argv[1], &served_size);
@@ -408,14 +500,18 @@ int main(int argc, char **argv)
     compat_rows = check_against_trees(served, stock);
     check_resolver();
     check_mutation_oracle(stock);
+    if (argc == 4) {
+        check_builder(argv[3], served);
+    }
 
     for (size_t g = 0; g < apple_modern_compat_group_count; g++) {
         rows += (unsigned)apple_modern_compat_groups[g].row_count;
     }
     printf("{\"passed\": true, \"checks\": %u, \"firmware_executed\": false,"
            " \"guest_executed\": false, \"groups\": %u, \"rows\": %u,"
-           " \"compatible_rows\": %u}\n", checks,
-           (unsigned)apple_modern_compat_group_count, rows, compat_rows);
+           " \"compatible_rows\": %u, \"builder_checked\": %s}\n", checks,
+           (unsigned)apple_modern_compat_group_count, rows, compat_rows,
+           argc == 4 ? "true" : "false");
     free(served_data);
     free(stock_data);
     return 0;
