@@ -103,14 +103,17 @@ enum {
     APPLE_MODERN_DCP_IOP_MODE_V4,
     APPLE_MODERN_DCP_IOP_MODE_V6_QUIESCED,
     APPLE_MODERN_DCP_IOP_MODE_FLAGS_ONLY,
+    APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED,
 };
 #define APPLE_MODERN_DCP_IOP_NAME_V6 "v6"
 #define APPLE_MODERN_DCP_IOP_NAME_V4 "v4"
 #define APPLE_MODERN_DCP_IOP_NAME_V6_QUIESCED "v6-quiesced"
 #define APPLE_MODERN_DCP_IOP_NAME_FLAGS "flags-only"
+#define APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED "v6-prestarted"
 #define APPLE_MODERN_DCP_IOP_MODE_NAMES \
     APPLE_MODERN_DCP_IOP_NAME_V6 ", " APPLE_MODERN_DCP_IOP_NAME_V4 ", " \
-    APPLE_MODERN_DCP_IOP_NAME_V6_QUIESCED ", " APPLE_MODERN_DCP_IOP_NAME_FLAGS
+    APPLE_MODERN_DCP_IOP_NAME_V6_QUIESCED ", " APPLE_MODERN_DCP_IOP_NAME_FLAGS ", " \
+    APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED
 
 /* Returns false for an unknown name. */
 bool apple_modern_dcp_iop_mode(const char *name, unsigned *mode);
@@ -155,7 +158,8 @@ bool apple_modern_dcp_iop_plan_build(AppleModernBlob tree,
 #ifndef APPLE_MODERN_LAYOUT_STANDALONE
 #include "hw/sysbus.h"
 #define TYPE_APPLE_MODERN_DCP_IOP "apple-modern-dcp-iop"
-OBJECT_DECLARE_SIMPLE_TYPE(AppleModernDcpIop, APPLE_MODERN_DCP_IOP)
+OBJECT_DECLARE_TYPE(AppleModernDcpIop, AppleModernDcpIopClass,
+                    APPLE_MODERN_DCP_IOP)
 /*
  * Creates the RTKit peer: MMIO region 0 is the wrapper block (the two mailbox
  * sub-regions sit inside it, placed by the existing a7iop code) and the four
