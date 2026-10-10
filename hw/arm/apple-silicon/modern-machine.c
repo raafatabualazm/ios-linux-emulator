@@ -32,6 +32,7 @@
 #include "hw/arm/apple-silicon/modern-pmp-ptd.h"
 #include "hw/arm/apple-silicon/modern-cpu-dvfm.h"
 #include "hw/arm/apple-silicon/modern-dcp-asc.h"
+#include "hw/arm/apple-silicon/modern-dcp-iop.h"
 #include "hw/arm/apple-silicon/modern-disp-trace.h"
 #include "hw/arm/apple-silicon/modern-compat-groups.h"
 #include "hw/arm/apple-silicon/modern-smc.h"
@@ -153,6 +154,17 @@ struct AppleModernMachine {
      */
     char *dcp_asc;
     AppleModernDcpAscPlan dcp_asc_plan;
+    /*
+     * Declared, default-off RTKit peer on /arm-io/dcp (w14-endpoint).  Unlike
+     * dcp-asc this one answers: it owns reg[0] with the in-tree a7iop register
+     * file, runs the existing RTKit management handshake and advertises one
+     * user endpoint.  See modern-dcp-iop.h for the derivation of the endpoint
+     * number and for the two declared ADT flags.
+     */
+    char *dcp_iop;
+    AppleModernDcpIopPlan dcp_iop_plan;
+    DeviceState *dcp_iop_dev;
+    bool dcp_iop_mapped;
     /* Declared storage for the PMGR perf-counter registers ApplePMGR programs. */
     bool modern_pmgr_storage;
     AppleModernPMGRStoragePlan pmgr_storage_plan;
@@ -695,6 +707,12 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
             return false;
         }
     }
+    if (s->dcp_iop_mapped &&
+        !append_pmgr_exclusion(exclusions, &count,
+            (AppleModernAddressRange){s->dcp_iop_plan.wrapper_address,
+                                     s->dcp_iop_plan.wrapper_size}, errp)) {
+        return false;
+    }
     for (unsigned i = 0; i < s->disp_trace_plan.count; i++) {
         const AppleModernDispTraceWindow *w = &s->disp_trace_plan.windows[i];
         if (w->status == APPLE_MODERN_DISP_TRACE_MAPPED &&
@@ -1224,6 +1242,7 @@ static bool map_dcp_asc(AppleModernMachine *s, uint64_t uart,
                 mode == APPLE_MODERN_DCP_ASC_FIRMWARE_LOADED ? 1u : 0u);
     return true;
 }
+<<<<<<< HEAD
 static bool map_modern_smc(AppleModernMachine *s, uint64_t uart,
                            uint64_t uart_span, Error **errp)
 {
@@ -1259,6 +1278,87 @@ static bool map_modern_smc(AppleModernMachine *s, uint64_t uart,
                 "pre-loaded/running/core-loaded are DECLARED, no SMC firmware placed; "
                 "timers unmodelled, modern input acceptance unqualified",
                 plan.address[0], plan.address[1], plan.address[2], plan.address[3]);
+=======
+/*
+ * Mapped BEFORE map_disp_trace for the same reason map_dcp_asc is: disp0
+ * reg[4] contains the /arm-io/dcp windows, and the trace plan must skip it
+ * rather than answer this peer's registers with a logging aperture's zero.
+ */
+static bool map_dcp_iop(AppleModernMachine *s, uint64_t uart,
+                        uint64_t uart_span, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernDcpIopPlan plan;
+    size_t count;
+    unsigned mode = 0;
+    SysBusDevice *sbd;
+
+    if (!apple_modern_dcp_iop_mode(s->dcp_iop, &mode)) {
+        error_setg(errp, "unknown dcp-iop mode '%s' (supported: %s)",
+                   s->dcp_iop, APPLE_MODERN_DCP_IOP_MODE_NAMES);
+        return false;
+    }
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp)) {
+        return false;
+    }
+    /*
+     * flags-only maps nothing, so it must not be refused for overlapping a
+     * window it will never claim (dcp-asc may legitimately own them then).
+     */
+    if (!apple_modern_dcp_iop_plan_build(dtree, s->components.dram_base,
+            s->components.dram_size,
+            apple_modern_dcp_iop_mode_has_peer(mode) ? exclusions : NULL,
+            apple_modern_dcp_iop_mode_has_peer(mode) ? count : 0,
+            APPLE_MODERN_DCP_IOP_EP_IOMFB, &plan, errp)) {
+        return false;
+    }
+    s->dcp_iop_plan = plan;
+    if (!apple_modern_dcp_iop_mode_has_peer(mode)) {
+        warn_report("apple-modern: opt-in dcp-iop '%s' serves ONLY the two "
+                    "declared ADT flags (pre-loaded, running) on "
+                    "/arm-io/dcp/iop-dcp-nub; NO peer device is created, so "
+                    "nothing answers the mailbox and no endpoint is "
+                    "advertised", s->dcp_iop);
+        return true;
+    }
+    s->dcp_iop_dev = apple_modern_dcp_iop_new(&plan, mode);
+    /* The QOM child name must not collide with the board property name. */
+    s->dcp_iop_dev->id = g_strdup("dcp-iop-dev");
+    object_property_add_child(OBJECT(s), "dcp-iop-dev",
+                              OBJECT(s->dcp_iop_dev));
+    sbd = SYS_BUS_DEVICE(s->dcp_iop_dev);
+    sysbus_realize_and_unref(sbd, &error_fatal);
+    sysbus_mmio_map(sbd, 0, plan.wrapper_address);
+    /*
+     * Positional IRQ mapping, in ADT "interrupts" order, exactly as t8030
+     * wires SMC, SIO and ANS.  The four lines are the AP mailbox's
+     * (IOP_NONEMPTY, IOP_EMPTY, AP_NONEMPTY, AP_EMPTY); which ADT line is
+     * which is DECLARED by that convention, not attested.
+     */
+    for (unsigned i = 0; i < APPLE_MODERN_DCP_IOP_IRQS; i++) {
+        if (plan.interrupts[i] >= s->aic_num_irqs) {
+            error_setg(errp, "/arm-io/dcp interrupt %u (%u) is outside the "
+                       "modelled AIC's %u lines", i, plan.interrupts[i],
+                       s->aic_num_irqs);
+            return false;
+        }
+        sysbus_connect_irq(sbd, i, qdev_get_gpio_in(s->aic,
+                                                    plan.interrupts[i]));
+    }
+    s->dcp_iop_mapped = true;
+    warn_report("apple-modern: opt-in dcp-iop '%s': an RTKit peer on "
+                "/arm-io/dcp reg[0] 0x%" PRIx64 "+0x%" PRIx64 " (register "
+                "file %s), role \"%s\", advertising ONE user endpoint "
+                "(user-relative %u, raw %u) so RTBuddy should publish the nub "
+                "\"%s\" that AppleDCPLinkServiceSoC matches. DECLARED: this "
+                "loader places NO DCP firmware and publishes no carveout, so "
+                "the handshake is answered by this model; no DCP message "
+                "semantics are implemented",
+                s->dcp_iop, plan.wrapper_address, plan.wrapper_size,
+                mode == APPLE_MODERN_DCP_IOP_MODE_V4 ? "v4" : "v6", plan.role,
+                plan.endpoint_user, plan.endpoint_raw, plan.nub_name);
+>>>>>>> 1647aad (apple-modern: declared, default-off RTKit peer for /arm-io/dcp (dcp-iop))
     return true;
 }
 static bool map_disp_trace(AppleModernMachine *s, uint64_t uart,
@@ -2243,6 +2343,7 @@ static void modern_init(MachineState *machine)
                     "distribution tree file is never written)",
                     s->disp0_probe, disp_count);
     }
+<<<<<<< HEAD
     if (s->modern_smc) {
         size_t count = 0;
         const AppleModernAdtOverride *flags = apple_modern_smc_overrides(&count);
@@ -2289,6 +2390,61 @@ static void modern_init(MachineState *machine)
                     "any declared dart-id; the distribution tree file is never "
                     "written)", s->adt_compat_restore,
                     override_count - before);
+=======
+    if (s->dcp_iop) {
+        unsigned dcp_iop_mode = 0;
+        if (!apple_modern_dcp_iop_mode(s->dcp_iop, &dcp_iop_mode)) {
+            error_report("apple-modern: unknown dcp-iop mode '%s' "
+                         "(supported: %s)", s->dcp_iop,
+                         APPLE_MODERN_DCP_IOP_MODE_NAMES);
+            exit(EXIT_FAILURE);
+        }
+        /*
+         * Both options own /arm-io/dcp reg[0]: dcp-asc as a recording
+         * aperture with an EMPTY mailbox and no peer, dcp-iop as a real RTKit
+         * peer.  Mapping both would put two devices on the same bytes.
+         */
+        if (s->dcp_asc && apple_modern_dcp_iop_mode_has_peer(dcp_iop_mode)) {
+            error_report("apple-modern: dcp-iop='%s' and dcp-asc both own the "
+                         "/arm-io/dcp wrapper window; enable one, not both "
+                         "(dcp-iop=flags-only creates no device and may be "
+                         "combined with dcp-asc)", s->dcp_iop);
+            exit(EXIT_FAILURE);
+        }
+        /*
+         * A peer that cannot deliver its mailbox interrupt is dead code: the
+         * RTKit HELLO would sit in the queue and XNU would never read it,
+         * because without modern-aic the AIC window is plain RAM and no
+         * interrupt is delivered at all (see map_aic).
+         */
+        if (apple_modern_dcp_iop_mode_has_peer(dcp_iop_mode) &&
+            !s->modern_aic) {
+            error_report("apple-modern: dcp-iop='%s' needs modern-aic=on; "
+                         "without a controller the RTKit mailbox interrupt is "
+                         "never delivered and the peer can never be read",
+                         s->dcp_iop);
+            exit(EXIT_FAILURE);
+        }
+        if (apple_modern_dcp_iop_mode_has_flags(dcp_iop_mode)) {
+            size_t flag_count = 0;
+            const AppleModernAdtOverride *flags =
+                apple_modern_dcp_iop_overrides(&flag_count);
+            for (size_t i = 0; i < flag_count; i++) {
+                if (override_count >= APPLE_MODERN_MAX_ADT_OVERRIDES) {
+                    error_report("apple-modern: too many ADT overrides");
+                    exit(EXIT_FAILURE);
+                }
+                overrides[override_count++] = flags[i];
+            }
+            warn_report("apple-modern: dcp-iop '%s' serves %zu DECLARED ADT "
+                        "flags on /arm-io/dcp/iop-dcp-nub (pre-loaded = 1, "
+                        "running = 1). They are NOT in the stock tree: they "
+                        "claim iBoot already loaded and started the DCP, "
+                        "which this loader does not do. All five in-tree "
+                        "RTKit devices set the same pair on their own nub",
+                        s->dcp_iop, flag_count);
+        }
+>>>>>>> 1647aad (apple-modern: declared, default-off RTKit peer for /arm-io/dcp (dcp-iop))
     }
     if (s->pmgr_voltage_states) {
         profile = apple_modern_pmgr_voltage_profile(s->pmgr_voltage_states,
@@ -2533,7 +2689,11 @@ static void modern_init(MachineState *machine)
         (s->modern_pmp_ptd && !map_pmp_ptd(s, uart, uart_span, &error)) ||
         (s->modern_cpu_dvfm && !map_cpu_dvfm(s, uart, uart_span, &error)) ||
         (s->dcp_asc && !map_dcp_asc(s, uart, uart_span, &error)) ||
+<<<<<<< HEAD
         (s->modern_smc && !map_modern_smc(s, uart, uart_span, &error)) ||
+=======
+        (s->dcp_iop && !map_dcp_iop(s, uart, uart_span, &error)) ||
+>>>>>>> 1647aad (apple-modern: declared, default-off RTKit peer for /arm-io/dcp (dcp-iop))
         (s->disp0_probe && !map_disp_trace(s, uart, uart_span, &error)) ||
         (s->modern_pmgr_storage &&
          !map_pmgr_storage(s, uart, uart_span, &error)) ||
@@ -2670,6 +2830,7 @@ static void set_disp0_probe(Object *obj, const char *value, Error **errp)
     }
 }
 
+<<<<<<< HEAD
 static char *get_adt_compat_restore(Object *obj, Error **errp)
 {
     return g_strdup(APPLE_MODERN_MACHINE(obj)->adt_compat_restore);
@@ -2684,6 +2845,21 @@ static void set_adt_compat_restore(Object *obj, const char *value, Error **errp)
     g_free(s->adt_compat_restore);
     s->adt_compat_restore = (value && *value && strcmp(value, "off")) ?
                             g_strdup(value) : NULL;
+=======
+static char *get_dcp_iop(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->dcp_iop);
+}
+
+static void set_dcp_iop(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->dcp_iop);
+        s->dcp_iop = value && value[0] && strcmp(value, "off") ?
+                     g_strdup(value) : NULL;
+    }
+>>>>>>> 1647aad (apple-modern: declared, default-off RTKit peer for /arm-io/dcp (dcp-iop))
 }
 
 static char *get_dcp_asc(Object *obj, Error **errp)
@@ -2962,6 +3138,7 @@ static void modern_finalize(Object *obj)
     g_free(s->disp0_probe);
     g_free(s->adt_compat_restore);
     g_free(s->dcp_asc);
+    g_free(s->dcp_iop);
     for (size_t i = 0; i < ASSET_COUNT; i++) {
         g_free(s->paths[i]);
         g_free((void *)s->blobs[i].data);
@@ -3022,6 +3199,7 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                   get_adt_compat_restore,
                                   set_adt_compat_restore);
     object_class_property_add_str(oc, "dcp-asc", get_dcp_asc, set_dcp_asc);
+    object_class_property_add_str(oc, "dcp-iop", get_dcp_iop, set_dcp_iop);
     object_class_property_add_str(oc, "pmgr-voltage-states",
                                   get_pmgr_voltage_states,
                                   set_pmgr_voltage_states);
