@@ -34,6 +34,7 @@
 #include "hw/arm/apple-silicon/modern-dcp-asc.h"
 #include "hw/arm/apple-silicon/modern-disp-trace.h"
 #include "hw/arm/apple-silicon/modern-compat-groups.h"
+#include "hw/arm/apple-silicon/modern-smc.h"
 #include "hw/arm/apple-silicon/modern-pmgr-storage.h"
 #include "hw/arm/apple-silicon/modern-mcc-dsid.h"
 #include "hw/arm/apple-silicon/modern-mcc-slc.h"
@@ -142,6 +143,8 @@ struct AppleModernMachine {
     char *disp0_probe;
     /* w14-compatsweep: '+'-separated ADT compatible-restore group list. */
     char *adt_compat_restore;
+    bool modern_smc;
+    AppleModernSMCPlan smc_plan;
     AppleModernDispTracePlan disp_trace_plan;
     /*
      * Declared, default-off ASC v6 wrapper apertures over the three
@@ -673,6 +676,12 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
             !append_pmgr_exclusion(exclusions, &count,
                 (AppleModernAddressRange){s->cpu_dvfm_plan.addresses[i],
                                          APPLE_MODERN_DVFM_SPAN}, errp)) {
+            return false;
+        }
+    }
+    for (size_t i = 0; i < APPLE_MODERN_SMC_WINDOWS; i++) {
+        if (s->smc_plan.size[i] && !append_pmgr_exclusion(exclusions, &count,
+                (AppleModernAddressRange){s->smc_plan.address[i], s->smc_plan.size[i]}, errp)) {
             return false;
         }
     }
@@ -1213,6 +1222,43 @@ static bool map_dcp_asc(AppleModernMachine *s, uint64_t uart,
                 "DECLARED claim that iBoot pre-loaded the DCP firmware, which "
                 "this loader does not do", s->dcp_asc,
                 mode == APPLE_MODERN_DCP_ASC_FIRMWARE_LOADED ? 1u : 0u);
+    return true;
+}
+static bool map_modern_smc(AppleModernMachine *s, uint64_t uart,
+                           uint64_t uart_span, Error **errp)
+{
+    AppleModernBlob tree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernAddressRange exclusions[APPLE_MODERN_MAX_BOARD_EXCLUSIONS];
+    AppleModernSMCPlan plan;
+    size_t count;
+    if (!pmgr_exclusions(s, uart, uart_span, exclusions, &count, errp) ||
+        !apple_modern_smc_plan_build(tree, s->components.dram_base,
+                                    s->components.dram_size,
+                                    exclusions, count, &plan, errp)) {
+        return false;
+    }
+    for (size_t i = 0; i < APPLE_MODERN_SMC_IRQS; i++) {
+        if (plan.interrupts[i] >= s->aic_num_irqs) {
+            error_setg(errp, "modern-smc IRQ %u exceeds the AIC bound", plan.interrupts[i]);
+            return false;
+        }
+    }
+    SysBusDevice *dev = apple_modern_smc_new(&plan);
+    object_property_add_child(OBJECT(s), "modern-smc-dev", OBJECT(dev));
+    sysbus_realize_and_unref(dev, &error_fatal);
+    const unsigned index[] = {0, 1, 3, 2};
+    for (size_t i = 0; i < APPLE_MODERN_SMC_WINDOWS; i++) {
+        sysbus_mmio_map(dev, index[i], plan.address[i]);
+    }
+    for (size_t i = 0; i < APPLE_MODERN_SMC_IRQS; i++) {
+        sysbus_connect_irq(dev, i, qdev_get_gpio_in(s->aic, plan.interrupts[i]));
+    }
+    s->smc_plan = plan;
+    warn_report("apple-modern: modern-smc uses legacy SMC key HLE with V6 mailbox; "
+                "wrapper/core/timers/SRAM 0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64 "; "
+                "pre-loaded/running/core-loaded are DECLARED, no SMC firmware placed; "
+                "timers unmodelled, modern input acceptance unqualified",
+                plan.address[0], plan.address[1], plan.address[2], plan.address[3]);
     return true;
 }
 static bool map_disp_trace(AppleModernMachine *s, uint64_t uart,
@@ -2197,6 +2243,22 @@ static void modern_init(MachineState *machine)
                     "distribution tree file is never written)",
                     s->disp0_probe, disp_count);
     }
+    if (s->modern_smc) {
+        size_t count = 0;
+        const AppleModernAdtOverride *flags = apple_modern_smc_overrides(&count);
+        if (!s->modern_aic) {
+            error_report("modern-smc needs modern-aic=on");
+            exit(EXIT_FAILURE);
+        }
+        if (override_count > APPLE_MODERN_MAX_ADT_OVERRIDES ||
+            count > APPLE_MODERN_MAX_ADT_OVERRIDES - override_count) {
+            error_report("modern-smc exceeds ADT override capacity");
+            exit(EXIT_FAILURE);
+        }
+        for (size_t i = 0; i < count; i++) {
+            overrides[override_count++] = flags[i];
+        }
+    }
     if (s->adt_compat_restore) {
         Error *groups_error = NULL;
         size_t before = override_count;
@@ -2471,6 +2533,7 @@ static void modern_init(MachineState *machine)
         (s->modern_pmp_ptd && !map_pmp_ptd(s, uart, uart_span, &error)) ||
         (s->modern_cpu_dvfm && !map_cpu_dvfm(s, uart, uart_span, &error)) ||
         (s->dcp_asc && !map_dcp_asc(s, uart, uart_span, &error)) ||
+        (s->modern_smc && !map_modern_smc(s, uart, uart_span, &error)) ||
         (s->disp0_probe && !map_disp_trace(s, uart, uart_span, &error)) ||
         (s->modern_pmgr_storage &&
          !map_pmgr_storage(s, uart, uart_span, &error)) ||
@@ -2753,6 +2816,7 @@ BOOL_PROPERTY(modern_mcc_dsid, modern_mcc_dsid)
 BOOL_PROPERTY(modern_mcc_slc, modern_mcc_slc)
 BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
+BOOL_PROPERTY(modern_smc, modern_smc)
 BOOL_PROPERTY(aic_record_irq_config, aic_record_irq_config)
 BOOL_PROPERTY(boot_display, boot_display)
 BOOL_PROPERTY(disp0_pipe, disp0_pipe)
@@ -3016,6 +3080,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                                      mcc_quota_reset));
     object_class_property_add_bool(oc, "aic-trace", get_aic_trace,
                                    set_aic_trace);
+    object_class_property_add_bool(oc, "modern-smc", get_modern_smc,
+                                   set_modern_smc);
     object_class_property_add_bool(oc, "modern-aic", get_modern_aic,
                                    set_modern_aic);
     object_class_property_add_bool(oc, "aic-record-irq-config",
