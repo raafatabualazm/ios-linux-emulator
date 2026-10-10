@@ -2,7 +2,7 @@
 """Owned-ROM DCP RTKit bootstrap: default mode vs declared prestart, two resets.
 No firmware executes; this qualifies the model and claimed reset state only.
 """
-import argparse, hashlib, importlib.util, json, struct, subprocess, tempfile, time
+import argparse, hashlib, importlib.util, json, re, struct, subprocess, tempfile, time
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('transport',Path(__file__).with_name('test-apple-modern-sep-transport-qemu.py'))
 t=importlib.util.module_from_spec(spec);spec.loader.exec_module(t)
@@ -33,6 +33,7 @@ class ROM(m.ROM):
    self.at(offset);self.mov(0,1);self.store(0,0x500);self.emit(m.sysreg('ESR_EL2',0,True));self.store(0,0x508);self.branch(len(self.words))
   return b''.join(struct.pack('<I',word) for word in self.words)
 def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+def mem():return int(re.search(r"MemAvailable:\s+(\d+)",Path("/proc/meminfo").read_text())[1])
 def run(a,mode):
  out=a.out/mode;out.mkdir();pre=mode=='v6-prestarted';rom=ROM(pre);content=rom.build();rp=out/'owned.rom';rp.write_bytes(content);zp=out/'zero.bin';zp.write_bytes(bytes(0x510));logp=out/'qemu.log'
  assets=[a.components/n for n in b.ASSETS];before={str(p):digest(p) for p in assets};binaryhash=digest(a.binary)
@@ -40,10 +41,11 @@ def run(a,mode):
  argv=[str(a.binary),'-M',machine,'-m','8G','-smp','1','-nodefaults','-display','none','-serial','none','-monitor','none','-device',f'loader,file={rp},addr={m.BASE},cpu-num=0,force-raw=true','-device',f'loader,file={zp},addr={m.SCRATCH},force-raw=true','-S','-qmp','stdio']
  report={'passed':False,'firmware_executed':False,'guest_driver_exercised':False,'mode':mode,'argv':argv,'binary_sha256':binaryhash,'owned_rom_sha256':digest(rp),'component_hashes_before':before,'passes':[]};process=qmp=None;start=time.monotonic()
  try:
+  assert mem()>=7000000,'Memory launch floor'
   with tempfile.TemporaryDirectory() as tmp,logp.open('xb') as log:
    process=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,bufsize=0,preexec_fn=m.child_limits)
    def guard():
-    left=60-(time.monotonic()-start);assert left>0 and logp.stat().st_size<(1<<20);return left
+    left=60-(time.monotonic()-start);assert left>0 and logp.stat().st_size<(1<<20) and mem()>=900000;return left
    qmp=t.QMP(None,guard,process)
    for iteration in range(2):
     if iteration:qmp.request('system_reset')
