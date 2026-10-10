@@ -1360,6 +1360,11 @@ static bool map_dcp_iop(AppleModernMachine *s, uint64_t uart,
             }
             return false;
         }
+        if (!address || address % 4) {
+            error_setg(errp, "dcp-iop expert control physical address must be "
+                             "nonzero and aligned to 4 bytes");
+            return false;
+        }
         if ((address >= s->components.dram_base &&
              address - s->components.dram_base < s->components.dram_size) ||
             (address < s->components.dram_base &&
