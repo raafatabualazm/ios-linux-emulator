@@ -11,10 +11,17 @@ LINE = re.compile(r'com\.apple\.xpc\.launchd\|(?P<time>\S+ \S+) '
                   r'(?: \[(?P<pid>\d+)\])?\) <[^>]+>: (?P<message>.*)')
 SPAWN = re.compile(r'(xpcproxy|launchd\(proxyless\)) spawned with pid (\d+)')
 EVENT = re.compile(r'internal event: ([A-Z_]+), code = (-?\d+)')
+DOMAIN = re.compile(r'com\.apple\.xpc\.launchd\|(?P<time>\S+ \S+) '
+                    r'\((?P<domain>system|user/\d+)\) <[^>]+>: (?P<message>.*)')
+DOMAIN_EVENTS = {'entering bootstrap mode': 'bootstrap_enter',
+                 'exiting bootstrap mode': 'bootstrap_exit',
+                 'entering ondemand mode': 'ondemand_enter',
+                 'exiting ondemand mode': 'ondemand_exit'}
 
 
 def read(path):
     jobs, boot_args, launchd_lines, panics = {}, [], 0, 0
+    domain_milestones = []
     digest = hashlib.sha256()
     with path.open('rb') as f:
         for raw in f:
@@ -23,6 +30,10 @@ def read(path):
             panics += 'panic(' in line
             if 'boot-args = ' in line:
                 boot_args.append(line.split('boot-args = ', 1)[1])
+            domain = DOMAIN.search(line)
+            if domain and domain['message'] in DOMAIN_EVENTS:
+                domain_milestones.append(dict(time=domain['time'], domain=domain['domain'],
+                    event=DOMAIN_EVENTS[domain['message']], message=domain['message']))
             match = LINE.search(line)
             if not match:
                 continue
@@ -56,6 +67,7 @@ def read(path):
                     job['diagnostics'].append(dict(time=time, pid=pid, message=message))
     return dict(log=str(path), sha256=digest.hexdigest(), launchd_lines=launchd_lines,
                 panics=panics, boot_args=boot_args, jobs=jobs,
+                domain_milestones=domain_milestones,
                 proxy_pid_is_not_execution=True, absent_witness_is_not_failure=True,
                 unique_running_jobs=sum(bool(j['running_witnesses']) for j in jobs.values()))
 

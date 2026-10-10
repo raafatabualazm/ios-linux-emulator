@@ -19,6 +19,10 @@ with tempfile.TemporaryDirectory() as tmp:
         prefix + '(system/com.apple.actual [7]) <Notice>: service state: running\r\n' +
         prefix + '(com.apple.App) <Notice>: service will always use xpcproxy, elision was disabled by boot-arg\n' +
         prefix + '(user/501/com.apple.App [8]) <Notice>: launchd(proxyless) spawned with pid 8\n' +
+        prefix + '(system) <Notice>: entering bootstrap mode\n' +
+        prefix + '(user/501) <Notice>: exiting bootstrap mode\r\r\n' +
+        prefix + '(user/501) <Notice>: exiting ondemand mode\n' +
+        prefix + '(user/501/com.apple.other) <Notice>: exiting bootstrap mode\n' +
         prefix + '(system/com.apple.other) <Error>: requestor = SpringBoard[99]\n')
     result = module.read(path)
     sb = result['jobs']['com.apple.SpringBoard']
@@ -30,4 +34,6 @@ with tempfile.TemporaryDirectory() as tmp:
     assert result['jobs']['com.apple.App']['spawns'][0]['proxy'] == 'launchd(proxyless)'
     assert result['jobs']['com.apple.App']['elision_disabled_by_boot_arg']
     assert len(sb['spawns']) == 1  # requestor text on another label is not a SpringBoard witness
-print('PASS: proxy carrier, failed INIT, CR lines, exact running, proxyless literal, unrelated requestor')
+    assert [(m['domain'], m['event']) for m in result['domain_milestones']] == [
+        ('system', 'bootstrap_enter'), ('user/501', 'bootstrap_exit'), ('user/501', 'ondemand_exit')]
+print('PASS: proxy carrier, failed INIT, CR lines, exact running, proxyless literal, unrelated requestor, domain milestones')
