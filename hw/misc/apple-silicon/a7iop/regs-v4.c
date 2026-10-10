@@ -26,6 +26,7 @@
 #include "qemu/log.h"
 #include "system/memory.h"
 #include "private.h"
+#include "trace.h"
 
 #define REG_AXI_BASE_LO (0x8)
 #define REG_AXI_BASE_HI (0x10)
@@ -77,6 +78,8 @@ static void apple_a7iop_v4_reg_write(void *opaque, hwaddr addr,
                                      const uint64_t data, unsigned size)
 {
     AppleA7IOP *s = opaque;
+
+    trace_apple_a7iop_wrapper_write(s->role, 4, addr, size, data);
 
     // qemu_log_mask(LOG_UNIMP,
     //               "A7IOP_V4(%s): Write to 0x" HWADDR_FMT_plx
@@ -173,6 +176,8 @@ static uint64_t apple_a7iop_v4_reg_read(void *opaque, hwaddr addr,
 {
     AppleA7IOP *s = opaque;
     uint64_t ret = 0;
+
+    trace_apple_a7iop_wrapper_read(s->role, 4, addr, size);
 
     switch (addr) {
     case REG_CPU_CTRL:
