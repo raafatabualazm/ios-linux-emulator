@@ -2815,6 +2815,9 @@ static char *get_disp0_probe(Object *obj, Error **errp)
 static void set_disp0_probe(Object *obj, const char *value, Error **errp)
 {
     AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (!check_mutable(s, errp)) {
+        return;
+    }
     if (value && *value && strcmp(value, "off")) {
         g_free(s->disp0_probe);
         s->disp0_probe = g_strdup(value);
