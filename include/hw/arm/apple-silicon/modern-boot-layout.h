@@ -48,6 +48,19 @@ typedef struct AppleModernBlob {
 
 typedef struct AppleModernBootInput {
     AppleModernBlob bootkc, sptm, txm, dtree, trustcache;
+    /*
+     * Optional second trust-cache module, published behind the same iBoot
+     * catalog offsets header as the first. Absent (NULL/0) keeps the
+     * single-module catalog every earlier revision produced.
+     *
+     * Why a second module exists at all: on a real device the OS cryptex is
+     * grafted by libignition inside dyld, which then loads that cryptex's own
+     * trust cache before it looks for the dyld shared cache. A board that
+     * presents the cryptex's content without grafting it has no one to load
+     * that module, so the loader publishes it instead. TXM's own diagnostic
+     * is plural -- "loaded external trust cache modules: %u/%u".
+     */
+    AppleModernBlob cryptex_trustcache;
     /* Optional decoded bytes; matching provenance is the caller's job. */
     AppleModernBlob ramdisk;
     uint64_t dram_base;
@@ -105,8 +118,15 @@ typedef struct AppleModernBootLayout {
     uint64_t framebuffer_size;
     uint64_t image_virtual_base[3];
     uint64_t image_entry_virtual[3];
-    /* Existing catalog bytes follow this ordinary iBoot offsets header. */
-    uint8_t trustcache_offsets_header[8];
+    /*
+     * Existing catalog bytes follow this ordinary iBoot offsets header:
+     * uint32 module count, then that many uint32 byte offsets from the start
+     * of the TrustCache region. One module therefore uses 8 bytes and two use
+     * 12; trustcache_header_size says which, and the trailing bytes are zero.
+     */
+    uint8_t trustcache_offsets_header[12];
+    uint32_t trustcache_header_size;
+    uint32_t trustcache_module_count;
     uint32_t dtree_node_count;
     uint32_t fileset_entry_count;
     char platform[16];

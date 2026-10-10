@@ -25,43 +25,41 @@ SOURCES = [LAYOUT, "include/hw/arm/apple-silicon/modern-boot-layout.h",
 # to get the version-2 widening wrong.
 MUTANTS = [
     ("v2-accepted-without-the-opt-in",
-     "    } else if (tc_version == 2 && in->trustcache_v2) {",
-     "    } else if (tc_version == 2) {"),
+     "    } else if (version == 2 && allow_v2) {",
+     "    } else if (version == 2) {"),
     ("v2-never-accepted",
-     "    } else if (tc_version == 2 && in->trustcache_v2) {",
+     "    } else if (version == 2 && allow_v2) {",
      "    } else if (false) {"),
     ("v2-entry-size-left-at-22",
-     "    } else if (tc_version == 2 && in->trustcache_v2) {\n"
-     "        tc_entry_size = 24;",
-     "    } else if (tc_version == 2 && in->trustcache_v2) {\n"
-     "        tc_entry_size = 22;"),
+     "    } else if (version == 2 && allow_v2) {\n"
+     "        entry_size = 24;",
+     "    } else if (version == 2 && allow_v2) {\n"
+     "        entry_size = 22;"),
     ("v1-entry-size-widened-to-24",
-     "    if (tc_version == 1) {\n        tc_entry_size = 22;",
-     "    if (tc_version == 1) {\n        tc_entry_size = 24;"),
+     "    if (version == 1) {\n        entry_size = 22;",
+     "    if (version == 1) {\n        entry_size = 24;"),
     ("count-scaled-in-32-bit-arithmetic",
-     "    if (!tc_entries || (uint64_t)tc_entries * tc_entry_size + 24 !=\n"
-     "                       in->trustcache.size) {",
-     "    if (!tc_entries || (uint32_t)(tc_entries * tc_entry_size + 24) !=\n"
-     "                       in->trustcache.size) {"),
+     "    if (!entries ||\n"
+     "        (uint64_t)entries * entry_size + 24 != tc->size) {",
+     "    if (!entries ||\n"
+     "        (uint32_t)(entries * entry_size + 24) != tc->size) {"),
     ("empty-module-accepted",
-     "    if (!tc_entries || (uint64_t)tc_entries * tc_entry_size + 24 !=",
-     "    if (false || (uint64_t)tc_entries * tc_entry_size + 24 !="),
+     "    if (!entries ||\n        (uint64_t)entries * entry_size + 24 !=",
+     "    if (false ||\n        (uint64_t)entries * entry_size + 24 !="),
     ("overlong-tail-accepted",
-     "    if (!tc_entries || (uint64_t)tc_entries * tc_entry_size + 24 !=\n"
-     "                       in->trustcache.size) {",
-     "    if (!tc_entries || (uint64_t)tc_entries * tc_entry_size + 24 >\n"
-     "                       in->trustcache.size) {"),
+     "    if (!entries ||\n"
+     "        (uint64_t)entries * entry_size + 24 != tc->size) {",
+     "    if (!entries ||\n"
+     "        (uint64_t)entries * entry_size + 24 > tc->size) {"),
     ("any-version-accepted",
-     "    if (tc_version == 1) {\n        tc_entry_size = 22;",
-     "    if (tc_version != 2) {\n        tc_entry_size = 22;"),
+     "    if (version == 1) {\n        entry_size = 22;",
+     "    if (version != 2) {\n        entry_size = 22;"),
     ("header-bound-dropped",
-     "    if (!in->trustcache.data || in->trustcache.size < 24 ||",
-     "    if (!in->trustcache.data || in->trustcache.size < 4 ||"),
+     "    if (!tc->data || tc->size < 24 ||",
+     "    if (!tc->data || tc->size < 4 ||"),
     ("oversize-bound-dropped",
-     "        in->trustcache.size > MAX_DT_SIZE) {\n"
-     "        return fail(errp, \"missing or malformed version-1 trustcache\");",
-     "        false) {\n"
-     "        return fail(errp, \"missing or malformed version-1 trustcache\");"),
+     "    if (!tc->data || tc->size < 24 || tc->size > MAX_DT_SIZE) {",
+     "    if (!tc->data || tc->size < 24 || false) {"),
 ]
 
 

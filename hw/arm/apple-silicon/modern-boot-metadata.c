@@ -608,10 +608,11 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
         if (overlap(output, sizeof(*output), components, sizeof(*components))) {
             return fail(errp, "metadata output aliases component struct");
         }
-        AppleModernBlob blobs[6] = {components->bootkc, components->sptm,
+        AppleModernBlob blobs[7] = {components->bootkc, components->sptm,
                                     components->txm, components->dtree,
-                                    components->trustcache, components->ramdisk};
-        for (size_t i = 0; i < 6; i++) {
+                                    components->trustcache, components->ramdisk,
+                                    components->cryptex_trustcache};
+        for (size_t i = 0; i < 7; i++) {
             if (overlap(output, sizeof(*output), blobs[i].data, blobs[i].size)) {
                 return fail(errp, "metadata output aliases component blob");
             }
@@ -728,15 +729,30 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     prepared.dart_id_count = tree.dart_count;
     prepared.dtree_size = tree.used;
     prepared.layout.dtree_node_count = tree.nodes;
-    prepared.trustcache_size = components->trustcache.size + 8;
+    /*
+     * The catalog the loader publishes: the offsets header the layout built,
+     * then each module's own bytes unchanged. The layout has already checked
+     * every module's geometry and set the header, so the sizes here agree with
+     * the offsets in it by construction.
+     */
+    prepared.trustcache_size = prepared.layout.trustcache_header_size +
+                               components->trustcache.size +
+                               components->cryptex_trustcache.size;
     prepared.trustcache = malloc(prepared.trustcache_size);
     if (!prepared.trustcache) {
         fail(errp, "cannot allocate bounded stock trustcache output");
         goto failed;
     }
-    memcpy(prepared.trustcache, prepared.layout.trustcache_offsets_header, 8);
-    memcpy(prepared.trustcache + 8, components->trustcache.data,
-           components->trustcache.size);
+    memcpy(prepared.trustcache, prepared.layout.trustcache_offsets_header,
+           prepared.layout.trustcache_header_size);
+    memcpy(prepared.trustcache + prepared.layout.trustcache_header_size,
+           components->trustcache.data, components->trustcache.size);
+    if (prepared.layout.trustcache_module_count == 2) {
+        memcpy(prepared.trustcache + prepared.layout.trustcache_header_size +
+               components->trustcache.size,
+               components->cryptex_trustcache.data,
+               components->cryptex_trustcache.size);
+    }
     dtree_virtual = prepared.layout.virtual_base +
                     prepared.layout.dtree_physical - prepared.layout.dram_base;
     if (prepared.layout.top_of_kernel_data - prepared.layout.dram_base >
