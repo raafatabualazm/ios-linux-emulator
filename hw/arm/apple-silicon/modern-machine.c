@@ -33,6 +33,7 @@
 #include "hw/arm/apple-silicon/modern-cpu-dvfm.h"
 #include "hw/arm/apple-silicon/modern-dcp-asc.h"
 #include "hw/arm/apple-silicon/modern-disp-trace.h"
+#include "hw/arm/apple-silicon/modern-compat-groups.h"
 #include "hw/arm/apple-silicon/modern-pmgr-storage.h"
 #include "hw/arm/apple-silicon/modern-mcc-dsid.h"
 #include "hw/arm/apple-silicon/modern-mcc-slc.h"
@@ -139,6 +140,8 @@ struct AppleModernMachine {
      * windows as logging apertures. See modern-disp-trace.h.
      */
     char *disp0_probe;
+    /* w14-compatsweep: '+'-separated ADT compatible-restore group list. */
+    char *adt_compat_restore;
     AppleModernDispTracePlan disp_trace_plan;
     /*
      * Declared, default-off ASC v6 wrapper apertures over the three
@@ -2194,6 +2197,37 @@ static void modern_init(MachineState *machine)
                     "distribution tree file is never written)",
                     s->disp0_probe, disp_count);
     }
+    if (s->adt_compat_restore) {
+        Error *groups_error = NULL;
+        size_t before = override_count;
+
+        /*
+         * w14-compatsweep. Restore the byte-exact stock "compatible" on a named
+         * group of nodes the served Darwin-derived tree strips it from. Nothing
+         * is removed, no distribution file is written, and the generator proves
+         * the groups are node-disjoint from each other and from the display
+         * nodes disp0-probe owns, so the two options cannot collide.
+         */
+        if (!apple_modern_compat_groups_resolve(s->adt_compat_restore,
+                                                overrides, &override_count,
+                                                APPLE_MODERN_MAX_ADT_OVERRIDES,
+                                                &groups_error)) {
+            error_report_err(groups_error);
+            exit(EXIT_FAILURE);
+        }
+        if (apple_modern_compat_groups_supply_dart_id(s->adt_compat_restore) &&
+            s->adt_dart_ids) {
+            error_report("apple-modern: adt-compat-restore='%s' serves its own "
+                         "declared dart-id and cannot be combined with "
+                         "adt-dart-ids=on", s->adt_compat_restore);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: adt-compat-restore '%s' restores %zu "
+                    "declared ADT property values (stock compatible bytes plus "
+                    "any declared dart-id; the distribution tree file is never "
+                    "written)", s->adt_compat_restore,
+                    override_count - before);
+    }
     if (s->pmgr_voltage_states) {
         profile = apple_modern_pmgr_voltage_profile(s->pmgr_voltage_states,
                                                     &profile_count);
@@ -2573,6 +2607,22 @@ static void set_disp0_probe(Object *obj, const char *value, Error **errp)
     }
 }
 
+static char *get_adt_compat_restore(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->adt_compat_restore);
+}
+
+static void set_adt_compat_restore(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (!check_mutable(s, errp)) {
+        return;
+    }
+    g_free(s->adt_compat_restore);
+    s->adt_compat_restore = (value && *value && strcmp(value, "off")) ?
+                            g_strdup(value) : NULL;
+}
+
 static char *get_dcp_asc(Object *obj, Error **errp)
 {
     return g_strdup(APPLE_MODERN_MACHINE(obj)->dcp_asc);
@@ -2596,7 +2646,6 @@ static void set_pmgr_voltage_states(Object *obj, const char *value, Error **errp
     AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
     if (check_mutable(s, errp)) {
         g_free(s->pmgr_voltage_states);
-    g_free(s->disp0_probe);
         s->pmgr_voltage_states = g_strdup(value);
     }
 }
@@ -2847,6 +2896,7 @@ static void modern_finalize(Object *obj)
     g_free(s->pmgr_boot_on);
     g_free(s->image_patches);
     g_free(s->disp0_probe);
+    g_free(s->adt_compat_restore);
     g_free(s->dcp_asc);
     for (size_t i = 0; i < ASSET_COUNT; i++) {
         g_free(s->paths[i]);
@@ -2904,6 +2954,9 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                   set_pmgr_boot_on);
     object_class_property_add_str(oc, "disp0-probe", get_disp0_probe,
                                   set_disp0_probe);
+    object_class_property_add_str(oc, "adt-compat-restore",
+                                  get_adt_compat_restore,
+                                  set_adt_compat_restore);
     object_class_property_add_str(oc, "dcp-asc", get_dcp_asc, set_dcp_asc);
     object_class_property_add_str(oc, "pmgr-voltage-states",
                                   get_pmgr_voltage_states,
