@@ -30,6 +30,7 @@
 #include "qemu/lockable.h"
 #include "qemu/log.h"
 #include "private.h"
+#include "trace.h"
 
 /*
  * Block-relative offsets. The mailbox region is mapped at wrapper + 0x8100,
@@ -89,6 +90,7 @@ static void apple_a7iop_v6_mailbox_reg_write(void *opaque, hwaddr addr,
     AppleA7IOPMessage *msg;
 
     s->diagnostic_mmio_writes++;
+    trace_apple_a7iop_mailbox_write(s->role, 6, addr, size, data);
     switch (addr) {
     case REG_A2I_CTRL:
         apple_a7iop_mailbox_set_iop_ctrl(s, (uint32_t)data);
@@ -157,6 +159,7 @@ static uint64_t apple_a7iop_v6_mailbox_reg_read(void *opaque, hwaddr addr,
     uint64_t ret = 0;
 
     s->diagnostic_mmio_reads++;
+    trace_apple_a7iop_mailbox_read(s->role, 6, addr, size);
     switch (addr) {
     case REG_A2I_CTRL:
         return apple_a7iop_mailbox_get_iop_ctrl(s);
