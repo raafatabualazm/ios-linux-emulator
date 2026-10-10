@@ -36,6 +36,7 @@
 #include "hw/arm/apple-silicon/modern-disp-trace.h"
 #include "hw/arm/apple-silicon/modern-compat-groups.h"
 #include "hw/arm/apple-silicon/modern-smc.h"
+#include "hw/misc/apple-silicon/buttons.h"
 #include "hw/arm/apple-silicon/modern-pmgr-storage.h"
 #include "hw/arm/apple-silicon/modern-mcc-dsid.h"
 #include "hw/arm/apple-silicon/modern-mcc-slc.h"
@@ -145,6 +146,7 @@ struct AppleModernMachine {
     /* w14-compatsweep: '+'-separated ADT compatible-restore group list. */
     char *adt_compat_restore;
     bool modern_smc;
+    bool modern_smc_buttons;
     AppleModernSMCPlan smc_plan;
     AppleModernDispTracePlan disp_trace_plan;
     /*
@@ -1272,6 +1274,15 @@ static bool map_modern_smc(AppleModernMachine *s, uint64_t uart,
         sysbus_connect_irq(dev, i, qdev_get_gpio_in(s->aic, plan.interrupts[i]));
     }
     s->smc_plan = plan;
+    if (s->modern_smc_buttons) {
+        /* Reuse the legacy input/key implementation; notification ABI is an
+         * explicit analogy until runtime packet consumption is measured. */
+        object_property_add_const_link(OBJECT(s), "smc", OBJECT(dev));
+        SysBusDevice *buttons = apple_buttons_create(NULL);
+        object_property_add_child(OBJECT(s), "modern-smc-buttons-dev",
+                                  OBJECT(buttons));
+        sysbus_realize_and_unref(buttons, &error_fatal);
+    }
     warn_report("apple-modern: modern-smc uses legacy SMC key HLE with V6 mailbox; "
                 "wrapper/core/timers/SRAM 0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64 "; "
                 "pre-loaded/running/core-loaded are DECLARED, no SMC firmware placed; "
@@ -2342,6 +2353,10 @@ static void modern_init(MachineState *machine)
                     "distribution tree file is never written)",
                     s->disp0_probe, disp_count);
     }
+    if (s->modern_smc_buttons && !s->modern_smc) {
+        error_report("modern-smc-buttons needs modern-smc=on");
+        exit(EXIT_FAILURE);
+    }
     if (s->modern_smc) {
         size_t count = 0;
         const AppleModernAdtOverride *flags = apple_modern_smc_overrides(&count);
@@ -2989,6 +3004,7 @@ BOOL_PROPERTY(modern_mcc_slc, modern_mcc_slc)
 BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
 BOOL_PROPERTY(modern_smc, modern_smc)
+BOOL_PROPERTY(modern_smc_buttons, modern_smc_buttons)
 BOOL_PROPERTY(aic_record_irq_config, aic_record_irq_config)
 BOOL_PROPERTY(boot_display, boot_display)
 BOOL_PROPERTY(disp0_pipe, disp0_pipe)
@@ -3254,6 +3270,9 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                                      mcc_quota_reset));
     object_class_property_add_bool(oc, "aic-trace", get_aic_trace,
                                    set_aic_trace);
+    object_class_property_add_bool(oc, "modern-smc-buttons",
+                                   get_modern_smc_buttons,
+                                   set_modern_smc_buttons);
     object_class_property_add_bool(oc, "modern-smc", get_modern_smc,
                                    set_modern_smc);
     object_class_property_add_bool(oc, "modern-aic", get_modern_aic,
