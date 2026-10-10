@@ -22,6 +22,7 @@
 #include "qemu/lockable.h"
 #include "qemu/log.h"
 #include "private.h"
+#include "trace.h"
 
 #if 0
 #define IOP_LOG_MSG(s, t, msg)                                                \
@@ -64,6 +65,8 @@ static void apple_a7iop_v4_mailbox_reg_write(void *opaque, hwaddr addr,
                                              const uint64_t data, unsigned size)
 {
     AppleA7IOPMailbox *s = opaque;
+
+    trace_apple_a7iop_mailbox_write(s->role, 4, addr, size, data);
     AppleA7IOPMessage *msg;
 
     switch (addr) {
@@ -126,6 +129,8 @@ static uint64_t apple_a7iop_v4_mailbox_reg_read(void *opaque, hwaddr addr,
                                                 unsigned size)
 {
     AppleA7IOPMailbox *s = opaque;
+
+    trace_apple_a7iop_mailbox_read(s->role, 4, addr, size);
     AppleA7IOPMessage *msg;
     uint64_t ret = 0;
 
