@@ -83,6 +83,8 @@ bool apple_modern_dcp_iop_mode(const char *name, unsigned *mode)
           APPLE_MODERN_DCP_IOP_MODE_FLAGS_ONLY },
         { APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED,
           APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED },
+        { APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED_QUIESCED,
+          APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED_QUIESCED },
     };
     if (!name || !mode) {
         return false;
@@ -101,7 +103,8 @@ bool apple_modern_dcp_iop_mode_has_peer(unsigned mode)
     return mode == APPLE_MODERN_DCP_IOP_MODE_V6 ||
            mode == APPLE_MODERN_DCP_IOP_MODE_V4 ||
            mode == APPLE_MODERN_DCP_IOP_MODE_V6_QUIESCED ||
-           mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED;
+           mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED ||
+           mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED_QUIESCED;
 }
 
 bool apple_modern_dcp_iop_mode_has_flags(unsigned mode)
@@ -474,7 +477,8 @@ DeviceState *apple_modern_dcp_iop_new(const AppleModernDcpIopPlan *plan,
                                                      APPLE_A7IOP_V6;
     dev = qdev_new(TYPE_APPLE_MODERN_DCP_IOP);
     s = APPLE_MODERN_DCP_IOP(dev);
-    s->prestarted = mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED;
+    s->prestarted = mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED ||
+                    mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED_QUIESCED;
     s->endpoint_user = plan->endpoint_user;
     s->endpoint_raw = plan->endpoint_raw;
     snprintf(s->nub_name, sizeof(s->nub_name), "%s", plan->nub_name);
