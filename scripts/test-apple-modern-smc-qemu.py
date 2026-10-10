@@ -40,10 +40,12 @@ class ROM(m.ROM):
   self.receive('unknown_key_refusal',(0x48<<8)|0x84,32)
   self.send((int.from_bytes(b'RGEN','big')<<32)|(1<<16)|(0x49<<8)|0x10,32)
   self.receive('rgen_after_refusal',(3<<32)|(1<<16)|(0x49<<8),32)
-  self.mov(0,DONE);self.trace('completion',DONE);self.branch(len(self.words))
+  self.finish()
   for offset in range(0x4000,0x4800,0x80):
    self.at(offset);self.mov(0,1);self.store(0,0x500);self.emit(m.sysreg('ESR_EL2',0,True));self.store(0,0x508);self.branch(len(self.words))
   return b''.join(struct.pack('<I',word) for word in self.words)
+ def finish(self):
+  self.mov(0,DONE);self.trace('completion',DONE);self.branch(len(self.words))
 def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def available():return int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:')))
 def run(a,mode):
@@ -83,6 +85,10 @@ def run(a,mode):
   if after!=before or digest(a.binary)!=binaryhash:report['passed']=False;report['error']='Input changed'
   report['elapsed_seconds']=time.monotonic()-start;(out/'report.json').write_text(json.dumps(report,indent=2)+'\n')
  return report
-p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--components',required=True,type=Path);p.add_argument('--out',required=True,type=Path);p.add_argument('--dtree',required=True,type=Path);a=p.parse_args()
-a.dtree=a.dtree.resolve();a.binary=a.binary.resolve();a.components=a.components.resolve();a.out=a.out.resolve();a.out.mkdir(exist_ok=False,parents=True)
-r=[run(a,'v6')];result={'passed':all(v['passed'] for v in r),'firmware_executed':False,'modern_endpoint_name_measured':False,'modern_input_acceptance_qualified':False,'arms':r};(a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps({'passed':result['passed'],'errors':[v.get('error') for v in r]}));raise SystemExit(0 if result['passed'] else 1)
+def main():
+ p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--components',required=True,type=Path);p.add_argument('--out',required=True,type=Path);p.add_argument('--dtree',required=True,type=Path);a=p.parse_args()
+ a.dtree=a.dtree.resolve();a.binary=a.binary.resolve();a.components=a.components.resolve();a.out=a.out.resolve();a.out.mkdir(exist_ok=False,parents=True)
+ r=[run(a,'v6')];result={'passed':all(v['passed'] for v in r),'firmware_executed':False,'modern_endpoint_name_measured':False,'modern_input_acceptance_qualified':False,'arms':r};(a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps({'passed':result['passed'],'errors':[v.get('error') for v in r]}));raise SystemExit(0 if result['passed'] else 1)
+
+if __name__ == "__main__":
+ main()
