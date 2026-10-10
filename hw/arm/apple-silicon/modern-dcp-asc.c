@@ -148,11 +148,16 @@ bool apple_modern_dcp_asc_plan_build(AppleModernBlob tree,
                                    &compatible, errp) ||
         compatible.size != sizeof("iop,ascwrap-v6") ||
         memcmp(compatible.data, "iop,ascwrap-v6", compatible.size)) {
-        if (errp && !*errp) {
-            error_setg(errp, "dcp-asc needs /arm-io/dcp compatible "
-                             "\"iop,ascwrap-v6\" in the served tree; combine "
-                             "it with a disp0-probe arm that restores it");
+        /* Replace any inner lookup error: the actionable fact is WHICH property
+         * is missing and what to combine the option with, not how the walker
+         * phrased it. */
+        if (errp && *errp) {
+            error_free(*errp);
+            *errp = NULL;
         }
+        error_setg(errp, "dcp-asc needs /arm-io/dcp compatible "
+                         "\"iop,ascwrap-v6\" in the served tree; combine it "
+                         "with a disp0-probe arm that restores it");
         return false;
     }
     if (!apple_modern_adt_property(tree, "/arm-io", "ranges", &ranges, errp) ||
