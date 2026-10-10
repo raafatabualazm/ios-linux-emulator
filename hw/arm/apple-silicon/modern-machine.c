@@ -34,6 +34,7 @@
 #include "hw/arm/apple-silicon/modern-mcc-dsid.h"
 #include "hw/arm/apple-silicon/modern-mcc-slc.h"
 #include "hw/arm/apple-silicon/modern-kc-patch.h"
+#include "hw/arm/apple-silicon/modern-image-patch.h"
 #include "hw/intc/apple-modern-aic.h"
 #include "hw/arm/apple-silicon/sep-sim.h"
 #include "hw/arm/apple-silicon/dart-t8110.h"
@@ -84,6 +85,9 @@ struct AppleModernMachine {
     bool img4_ignition_compat;
     bool trustcache_v2;
     bool md0_width_compat;
+    /* Declared, opt-in anchored image-patch set (default NULL = none). */
+    char *image_patches;
+    AppleModernImagePatchResult image_patch_result;
     bool pauth_compat;
     bool sep_trace;
     bool sep_mailbox;
@@ -1830,6 +1834,83 @@ static bool map_sep(AppleModernMachine *s, Error **errp)
     return true;
 }
 
+/*
+ * Apply the selected declared image-patch set to the board's PRIVATE in-memory
+ * image copies. Never touches a file: it snapshots each source file's stat
+ * before patching and re-stats afterwards, failing if any changed.  That is a
+ * cheap TRIPWIRE on size and timestamps, not a cryptographic seal: a same-size,
+ * timestamp-preserving overwrite would pass it.  The real guarantee is
+ * structural - the facility only ever writes the board's private in-memory copy
+ * and never opens a distribution file for writing - and the whole-machine gate's
+ * SHA-256 before/after comparison is the authoritative check.  The
+ * applied list is recorded in s->image_patch_result and each patch is
+ * announced. Returns false on any refusal, leaving the buffers untouched.
+ */
+static const AppleModernImage patchable_images[] = {
+    APPLE_MODERN_BOOTKC, APPLE_MODERN_SPTM, APPLE_MODERN_TXM,
+    APPLE_MODERN_TRUSTCACHE, APPLE_MODERN_RAMDISK,
+};
+
+/* AppleModernImage -> this board's asset slot. Indexed only by the values in
+ * patchable_images above, so there is no reachable out-of-range branch. */
+static const enum ModernAsset image_asset_map[] = {
+    [APPLE_MODERN_BOOTKC] = ASSET_BOOTKC,
+    [APPLE_MODERN_SPTM] = ASSET_SPTM,
+    [APPLE_MODERN_TXM] = ASSET_TXM,
+    [APPLE_MODERN_TRUSTCACHE] = ASSET_TC,
+    [APPLE_MODERN_RAMDISK] = ASSET_RAMDISK,
+};
+
+static bool apply_image_patches(AppleModernMachine *s, Error **errp)
+{
+    const AppleModernImagePatchSet *set =
+        apple_modern_image_patch_set(s->image_patches);
+    struct stat before[ASSET_COUNT];
+    bool have_before[ASSET_COUNT] = {0};
+
+    if (!set) {
+        error_setg(errp, "unknown image-patches set '%s' (supported: %s)",
+                   s->image_patches, apple_modern_image_patch_set_names());
+        return false;
+    }
+    /* Snapshot every present asset file so we can prove none is written. */
+    for (size_t i = 0; i < ASSET_COUNT; i++) {
+        if (s->paths[i] && !stat(s->paths[i], &before[i])) {
+            have_before[i] = true;
+        }
+    }
+    for (size_t k = 0; k < ARRAY_SIZE(patchable_images); k++) {
+        AppleModernImage image = patchable_images[k];
+        enum ModernAsset slot = image_asset_map[image];
+
+        if (!s->blobs[slot].data) {
+            continue; /* Optional image (e.g. no ramdisk) absent. */
+        }
+        if (!apple_modern_image_patch_apply_image(
+                set, image, (uint8_t *)s->blobs[slot].data,
+                s->blobs[slot].size, &s->image_patch_result, errp)) {
+            return false;
+        }
+    }
+    /* Re-verify the on-disk inputs are byte-for-byte untouched. */
+    for (size_t i = 0; i < ASSET_COUNT; i++) {
+        struct stat after;
+        if (!have_before[i]) {
+            continue;
+        }
+        if (stat(s->paths[i], &after) || after.st_size != before[i].st_size ||
+            after.st_mtim.tv_sec != before[i].st_mtim.tv_sec ||
+            after.st_mtim.tv_nsec != before[i].st_mtim.tv_nsec ||
+            after.st_ctim.tv_sec != before[i].st_ctim.tv_sec ||
+            after.st_ctim.tv_nsec != before[i].st_ctim.tv_nsec) {
+            error_setg(errp, "image-patch: source file changed on disk: %s",
+                       s->paths[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
 static void modern_init(MachineState *machine)
 {
     AppleModernMachine *s = APPLE_MODERN_MACHINE(machine);
@@ -2054,6 +2135,24 @@ static void modern_init(MachineState *machine)
                     md0.blockcount_before[0], md0.blockcount_before[1],
                     md0.blockcount_before[2], md0.blockcount_after[0],
                     md0.blockcount_after[1], md0.blockcount_after[2]);
+    if (s->image_patches) {
+        /*
+         * Declared, opt-in anchored image patches on the board's private
+         * in-memory image copies only. See modern-image-patch.h. Default board
+         * sets no set and is byte-identical to an unpatched board.
+         */
+        if (!apply_image_patches(s, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        for (size_t i = 0; i < s->image_patch_result.count; i++) {
+            const AppleModernImagePatchApplied *a =
+                &s->image_patch_result.entries[i];
+            warn_report("apple-modern: applied declared image-patch '%s' "
+                        "(set '%s'): %s [removes: %s] (declared modification, "
+                        "not Apple fidelity)", a->name, s->image_patches,
+                        a->changes, a->removes);
+        }
     }
     AppleModernAddressRange exclusion = { uart, uart_span };
     if (!apple_modern_board_regions_build(s->components.dtree,
@@ -2271,6 +2370,34 @@ static void set_pmgr_boot_on(Object *obj, const char *value, Error **errp)
     }
 }
 
+static char *get_image_patches(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->image_patches);
+}
+
+static void set_image_patches(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->image_patches);
+        /* Empty string means "no set", like the default. */
+        s->image_patches = (value && value[0]) ? g_strdup(value) : NULL;
+    }
+}
+
+/* Read-only: comma-separated names of the patches actually applied, for gates. */
+static char *get_applied_image_patches(Object *obj, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    GString *list = g_string_new(NULL);
+
+    for (size_t i = 0; i < s->image_patch_result.count; i++) {
+        g_string_append_printf(list, "%s%s", i ? "," : "",
+                               s->image_patch_result.entries[i].name);
+    }
+    return g_string_free(list, FALSE);
+}
+
 static void set_pmgr_aon_fuse_image(Object *obj, const char *value, Error **errp)
 {
     AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
@@ -2470,6 +2597,7 @@ static void modern_finalize(Object *obj)
     g_free(s->pmgr_aon_fuse_image);
     g_free(s->pmgr_voltage_states);
     g_free(s->pmgr_boot_on);
+    g_free(s->image_patches);
     for (size_t i = 0; i < ASSET_COUNT; i++) {
         g_free(s->paths[i]);
         g_free((void *)s->blobs[i].data);
@@ -2586,6 +2714,10 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "md0-width-compat",
                                    get_md0_width_compat,
                                    set_md0_width_compat);
+    object_class_property_add_str(oc, "image-patches", get_image_patches,
+                                  set_image_patches);
+    object_class_property_add_str(oc, "applied-image-patches",
+                                  get_applied_image_patches, NULL);
     object_class_property_add_bool(oc, "prepare-only", get_prepare_only, set_prepare_only);
     object_class_property_add_bool(oc, "boot-display", get_boot_display,
                                    set_boot_display);

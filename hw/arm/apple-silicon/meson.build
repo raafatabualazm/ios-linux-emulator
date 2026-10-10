@@ -27,6 +27,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'modern-mcc-slc.c',
     'modern-kc-patch.c',
     'modern-large-ramdisk.c',
+    'modern-image-patch.c',
     'modern-boot-layout.c',
     'modern-boot-metadata.c',
     'modern-boot-display.c',
