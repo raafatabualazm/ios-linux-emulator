@@ -15,6 +15,7 @@ p.add_argument('--reader', type=pathlib.Path,
                default=pathlib.Path(__file__).with_name('analyse-apple-launchd-witnesses.py'))
 p.add_argument('--max-seconds', type=int, default=3600)
 p.add_argument('--interval', type=int, default=30)
+p.add_argument('--job', action='append', default=[], help='additional exact launchd label')
 a = p.parse_args()
 if a.pid <= 0 or a.max_seconds <= 0 or not 1 <= a.interval <= 60:
     p.error('positive pid/budget and interval 1..60 required')
@@ -31,7 +32,8 @@ reader = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(reader)
 start, previous = time.monotonic(), None
 selected = ('com.apple.codex.root-remount', 'com.apple.UserEventAgent-System',
-            'com.apple.centaurid', 'com.apple.SpringBoard', 'com.apple.backboardd', 'com.apple.logd')
+            'com.apple.centaurid', 'com.apple.SpringBoard', 'com.apple.backboardd', 'com.apple.logd',
+            'com.apple.runningboardd', 'com.apple.codex.spindump', 'com.apple.codex.stackshot') + tuple(a.job)
 
 def alive():
     try:
