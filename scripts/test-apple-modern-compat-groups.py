@@ -28,7 +28,10 @@ What it qualifies:
     run once per group against the real served tree, and every restored
     property is read back out of the tree it would hand a guest and compared
     byte for byte - and eight nodes no group names are confirmed to still carry
-    no "compatible", so nothing leaks between groups.
+    no "compatible", so nothing leaks between groups. The all-ten composition
+    plus two caller entries and a genuine 128-property request also build and
+    read back; 129/SIZE_MAX counts, missing arrays and a last-entry NULL path
+    refuse. Resolver overflow refusals preserve the complete array and count.
 
 What it does NOT qualify: that restoring any of this makes a guest better. A
 driver that newly attaches and then blocks is a regression. That is measured

@@ -405,6 +405,87 @@ static AppleModernBlob component(const char *dir, const char *name)
     return (AppleModernBlob){data, size};
 }
 
+/* The integrated all-group request exceeds the former 64-slot board limit.
+ * Qualify the same production builder at the new bound and on invalid counts. */
+static void check_override_capacity(const AppleModernBootInput *components)
+{
+    static const char all[] = "hid-mtp+display-aux+display-data+gpio+spmi+pmgr+smc+aop+gfx+darts";
+    AppleModernAdtOverride list[APPLE_MODERN_MAX_ADT_OVERRIDES];
+    AppleModernAdtOverride saved[APPLE_MODERN_MAX_ADT_OVERRIDES];
+    char names[APPLE_MODERN_MAX_ADT_OVERRIDES][32];
+    const uint8_t byte = 0x5a;
+    AppleModernBootMetadataInput input = {.components = components,
+        .command_line = "-v", .command_line_length = 2,
+        .aic_iack_offset = 0x2000};
+    AppleModernBootMetadata out = {0}, zero = {0};
+    AppleModernBlob built, value;
+    Error *error = NULL;
+    size_t count = 2;
+
+    CHECK(APPLE_MODERN_MAX_ADT_OVERRIDES == 128);
+    list[0] = (AppleModernAdtOverride){"/arm-io/pmgr", "capacity-prefix0", &byte, 1};
+    list[1] = (AppleModernAdtOverride){"/arm-io/pmgr", "capacity-prefix1", &byte, 1};
+    CHECK(apple_modern_compat_groups_resolve(all, list, &count,
+                                             APPLE_MODERN_MAX_ADT_OVERRIDES, &error));
+    CHECK(error == NULL && count == 92); /* 67 exact compatibles + 23 declared ids + 2. */
+    input.overrides = list;
+    input.override_count = count;
+    if (!apple_modern_boot_metadata_build(&input, &out, &error)) {
+        fprintf(stderr, "capacity builder: %s\n", error ? error->message : "no error");
+        CHECK(false);
+    }
+    CHECK(error == NULL && out.dtree != NULL);
+    built = (AppleModernBlob){out.dtree, out.dtree_size};
+    for (size_t i = 0; i < count; i++) {
+        CHECK(apple_modern_adt_property(built, list[i].path, list[i].name, &value, &error));
+        CHECK(error == NULL && value.size == list[i].size);
+        CHECK(!memcmp(value.data, list[i].value, value.size));
+    }
+    apple_modern_boot_metadata_clear(&out);
+
+    /* Genuine maximum: 128 unique properties on a real existing unowned node. */
+    for (size_t i = 0; i < APPLE_MODERN_MAX_ADT_OVERRIDES; i++) {
+        snprintf(names[i], sizeof(names[i]), "capacity-test-%03zu", i);
+        list[i] = (AppleModernAdtOverride){"/arm-io/pmgr", names[i], &byte, 1};
+    }
+    input.override_count = APPLE_MODERN_MAX_ADT_OVERRIDES;
+    if (!apple_modern_boot_metadata_build(&input, &out, &error)) {
+        fprintf(stderr, "capacity builder: %s\n", error ? error->message : "no error");
+        CHECK(false);
+    }
+    CHECK(error == NULL);
+    built = (AppleModernBlob){out.dtree, out.dtree_size};
+    for (size_t i = 0; i < APPLE_MODERN_MAX_ADT_OVERRIDES; i++) {
+        CHECK(apple_modern_adt_property(built, list[i].path, list[i].name, &value, &error));
+        CHECK(error == NULL && value.size == 1 && value.data[0] == byte);
+    }
+    apple_modern_boot_metadata_clear(&out);
+
+    const size_t bad_counts[] = {APPLE_MODERN_MAX_ADT_OVERRIDES + 1, SIZE_MAX};
+    for (size_t i = 0; i < sizeof(bad_counts) / sizeof(bad_counts[0]); i++) {
+        input.override_count = bad_counts[i];
+        CHECK(!apple_modern_boot_metadata_build(&input, &out, &error));
+        clear_error(&error);
+        CHECK(!memcmp(&out, &zero, sizeof(out)));
+        memcpy(saved, list, sizeof(list));
+        count = bad_counts[i];
+        CHECK(!apple_modern_compat_groups_resolve("gpio", list, &count,
+                                                 APPLE_MODERN_MAX_ADT_OVERRIDES, &error));
+        clear_error(&error);
+        CHECK(count == bad_counts[i] && !memcmp(saved, list, sizeof(list)));
+    }
+    input.override_count = APPLE_MODERN_MAX_ADT_OVERRIDES;
+    input.overrides = NULL;
+    CHECK(!apple_modern_boot_metadata_build(&input, &out, &error));
+    clear_error(&error);
+    CHECK(!memcmp(&out, &zero, sizeof(out)));
+    input.overrides = list;
+    list[APPLE_MODERN_MAX_ADT_OVERRIDES - 1].path = NULL;
+    CHECK(!apple_modern_boot_metadata_build(&input, &out, &error));
+    clear_error(&error);
+    CHECK(!memcmp(&out, &zero, sizeof(out)));
+}
+
 static void check_builder(const char *components_dir, AppleModernBlob served)
 {
     static const char *const untouched[] = {
@@ -471,6 +552,7 @@ static void check_builder(const char *components_dir, AppleModernBlob served)
         }
         apple_modern_boot_metadata_clear(&out);
     }
+    check_override_capacity(&components);
     free((void *)components.bootkc.data);
     free((void *)components.sptm.data);
     free((void *)components.txm.data);
