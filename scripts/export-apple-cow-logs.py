@@ -112,6 +112,8 @@ try:
         report.update(decoded_records=records, process_counts=dict(counts), ca_candidate_records=candidates,
                       decode_qualification='Parsed records only; retain warnings and partial/missing-message limitations',
                       credential_qualification='Simpledump EUID zero and missing-catalog zero are placeholders; require catalog/process provenance for UID claims')
+        if completed.returncode != 0:
+            report['error'] = 'decoder failed; any retained records are partial and unqualified'
 except Exception as e:
     report['error'] = str(e)
 finally:

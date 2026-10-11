@@ -5,6 +5,7 @@ Read-only guest observation: no QMP, signals, writes to images or guest launch.
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -107,7 +108,7 @@ def main():
         raise SystemExit('actual image/binary differ from declared pins')
     observer_pins = {'reader': '0d98c728cd5cfe10ae0360108eca658efc60c36524196cf6dc09ccd6ae96d043',
                      'watcher': 'f4f0a3925dbd2966d7c436a047872afa85b8ecfb84ba75aa89fcc6c0406e71ee',
-                     'export_tool': '58b4ec1b282d4e47024e611f457b87809b1acf7769d67577c7800f4d0ffd937d'}
+                     'export_tool': '712eecb8ac77c14eedb6ff29622f48ecc7fbb08bf847b698d4c9fe53007c6e1c'}
     for name, expected in observer_pins.items():
         if digest(getattr(a, name)) != expected:
             raise SystemExit('observer tool differs from qualified pin: ' + name)
@@ -149,6 +150,12 @@ def main():
         result = json.loads((a.run/'result.json').read_text())
         if result.get('qemu_pid') != owned['pid']:
             codes['error'] = 'final result PID differs from live binding'
+        else:
+            spec = importlib.util.spec_from_file_location('launch_reader', a.reader)
+            reader = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(reader)
+            final = reader.read(a.run/'serial.log')
+            (a.out/'final-witnesses.json').write_text(json.dumps(final, indent=2)+'\n')
     (a.out/'orchestration-result.json').write_text(json.dumps(codes, indent=2)+'\n')
     if any(v != 0 for v in codes.values()):
         raise SystemExit('observer/export qualification failed; inspect retained reports')
