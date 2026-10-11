@@ -10,7 +10,8 @@ typedef struct AppleModernBootVideo {
     uint64_t base_address, display, row_bytes, width, height, depth;
 } AppleModernBootVideo;
 
-#define APPLE_MODERN_MAX_ADT_OVERRIDES 64
+/* Ten compatibility groups need 90 rows, plus bounded board profiles. */
+#define APPLE_MODERN_MAX_ADT_OVERRIDES 128
 #define APPLE_MODERN_MAX_ADT_OVERRIDE_BYTES 4096
 
 /*

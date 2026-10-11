@@ -164,7 +164,7 @@ bool apple_modern_compat_groups_resolve(const char *list,
     }
     if (*count > capacity || total > capacity - *count) {
         error_setg(errp, "adt-compat-restore: '%s' needs %zu ADT overrides and "
-                   "only %zu of %zu are free", list, total, capacity - *count,
+                   "only %zu of %zu are free", list, total, *count > capacity ? 0 : capacity - *count,
                    capacity);
         return false;
     }
