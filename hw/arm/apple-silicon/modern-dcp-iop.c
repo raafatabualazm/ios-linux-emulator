@@ -545,12 +545,11 @@ static void dcp_iop_boot_done(void *opaque)
 }
 
 /*
- * Observability for the one thing the whole arm turns on: whether the guest
- * ever writes CPU_CTRL RUN on the wrapper block.  The a7iop layer calls these
- * from apple_a7iop_cpu_start(), which is reached only from that write, and the
- * RTKit layer then sends its HELLO.  If neither line appears, the guest never
- * started the coprocessor and no endpoint could ever be advertised -- which is
- * a different failure from a handshake that starts and stalls.
+ * This witnesses the model's start callback, not necessarily a guest wrapper
+ * write. The inherited setter, an RTKit power request, declared reset prestart
+ * or declared external expert-control bridge can reach it. Handled MMIO and
+ * management trace events distinguish those paths; the start count alone does
+ * not show that the guest received HELLO or negotiated any user endpoint.
  */
 static void dcp_iop_started(void *opaque)
 {
