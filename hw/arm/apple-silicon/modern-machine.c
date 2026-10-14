@@ -169,7 +169,7 @@ struct AppleModernMachine {
     char *dcp_iop;
     /*
      * v6-resumed display-attach callbacks ('+'-separated subset of
-     * D576/D577/D593/D594, default none) and when to send them
+     * D575/D600, default none) and when to send them
      * ("normal-mode" = nested in NormalModeEnable, "a453" = nested in the
      * first get_display_size after it).  See modern-dcp-iop.c.
      */
@@ -3639,7 +3639,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                   set_dcp_attach_cbs);
     object_class_property_set_description(oc, "dcp-attach-cbs",
         "v6-resumed display-attach callbacks to send, '+'-separated subset of "
-        "D576+D577+D593+D594 (declared payloads; default none)");
+        "D575 (hotPlug_notify_gated) + D600 (setSystemConsoleMode_gated); "
+        "default none");
     object_class_property_add_str(oc, "dcp-attach-trigger",
                                   get_dcp_attach_trigger,
                                   set_dcp_attach_trigger);

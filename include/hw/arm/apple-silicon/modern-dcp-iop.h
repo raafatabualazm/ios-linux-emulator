@@ -232,8 +232,9 @@ void apple_modern_dcp_iop_set_dma(DeviceState *dev, AddressSpace *dcp_dma_as,
                                   AddressSpace *disp0_dma_as);
 /*
  * v6-resumed display-attach callbacks: cbs is a '+'-separated subset of
- * D576/D577/D593/D594 (NULL = none); sent nested in NormalModeEnable, or in the
- * first A453 after it when after_a453.  Declared payloads, see the .c file.
+ * D575 (hotPlug_notify_gated) and D600 (setSystemConsoleMode_gated), NULL =
+ * none; sent nested in NormalModeEnable, or in the first A453 after it when
+ * after_a453.  Layouts recovered from the BootKC, see the .c file.
  */
 bool apple_modern_dcp_iop_attach_valid(const char *cbs, Error **errp);
 void apple_modern_dcp_iop_set_attach(DeviceState *dev, const char *cbs,

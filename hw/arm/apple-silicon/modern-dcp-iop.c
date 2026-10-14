@@ -732,45 +732,24 @@ static AddressSpace *dcp_iop_select_dma_as(AppleModernDcpIop *s, uint64_t dva,
     return NULL;
 }
 
-static void dcp_iop_fill_hotplug_payload(uint8_t *buf, uint32_t width, uint32_t height)
-{
-    memset(buf, 0, 0x54);
-    /* arg1: uint connected = 1 */
-    stl_le_p(buf, 1);
-    /* arg2: TiledDisplayInfo (0x50 bytes starting at buf + 4) */
-    uint8_t *tiled = buf + 4;
-    tiled[0] = 'A';
-    tiled[1] = 'A';
-    tiled[2] = 'P';
-    tiled[3] = 0;
-    stw_le_p(tiled + 4, 1);  /* product code */
-    stw_le_p(tiled + 6, 0);
-    stl_le_p(tiled + 8, 1);  /* serial number */
-    stl_le_p(tiled + 12, 1); /* capabilities: single-tile valid */
-    stl_le_p(tiled + 16, 0);
-    /* tile geometry: {tile_w, tile_h, tile_x, tile_y} */
-    stw_le_p(tiled + 20, width);
-    stw_le_p(tiled + 22, height);
-    stw_le_p(tiled + 24, 0);
-    stw_le_p(tiled + 26, 0);
-    /* total dimensions: {total_w, total_h} */
-    stl_le_p(tiled + 28, width);
-    stl_le_p(tiled + 32, height);
-    /* timing: refresh rate 60 Hz */
-    stl_le_p(tiled + 36, 60);
-    stl_le_p(tiled + 40, 0);
-}
-
 /*
  * Display-attach callbacks (machine options dcp-attach-cbs and
- * dcp-attach-trigger).  Antigravity's v17 sent D576, D577, D593 and D594
- * unconditionally after NormalModeEnable; full-system (features-20261014/
- * claude-gui/v1-fullsystem-1200s) the AP accepted D576 and D577 and then
- * panicked on D593 ("callback failed with: 0x5" @link_protocol_priv.h:994).
- * Which callbacks are sent, and when, is now explicit and defaults to none.
- * The payload layouts are declared, not recovered from the kernel.
+ * dcp-attach-trigger), default none.  Tags and layouts are recovered from the
+ * pinned BootKC a36b9241 (evidence features-20261014/claude-gui/re/README.md):
+ * the AP dispatcher at unslid 0xfffffff00a1693ec calls the handler for the
+ * record's tag; each handler enforces a minimum in/out length and any non-zero
+ * return panics ("callback failed with: 0x%x" @link_protocol_priv.h:994).
+ *  - D575 IOMobileFramebufferAP::hotPlug_notify_gated(uint64_t state,
+ *    IOMFB_TiledDisplayInfo *, bool): in >= 0x58, out >= 0x4c.  in+0x00 state,
+ *    +0x08..+0x52 TiledDisplayInfo, +0x53 bool, +0x54 pointer-null flag.
+ *    Sent with state 1 and the TiledDisplayInfo pointer null (its field layout
+ *    is not recovered), bool 0.  Pending until a client registers for HPD.
+ *  - D600 setSystemConsoleMode_gated(bool): in >= 4, bool in byte 0; sent 0.
+ * Antigravity's v17 sent D576/D577/D593/D594 (Mac numbering); in this kernel
+ * those are other callbacks (D593 needs 8 bytes and panicked with 4, see
+ * claude-gui/v1-fullsystem-1200s), so they are not offered.
  */
-static const char *const dcp_attach_tags[] = { "D576", "D577", "D593", "D594" };
+static const char *const dcp_attach_tags[] = { "D575", "D600" };
 
 static const char *dcp_attach_tag(const char *name)
 {
@@ -793,7 +772,7 @@ bool apple_modern_dcp_iop_attach_valid(const char *list, Error **errp)
     for (char **t = tags; *t; t++) {
         if (!dcp_attach_tag(*t)) {
             error_setg(errp, "dcp-attach-cbs: unknown callback '%s' (supported: "
-                       "D576+D577+D593+D594, any subset and order)", *t);
+                       "D575+D600, any subset and order)", *t);
             return false;
         }
     }
@@ -811,22 +790,15 @@ static void dcp_iop_append_attach_cbs(AppleModernDcpIop *s)
 
         memset(cb, 0, sizeof(*cb));
         cb->tag = tag;
-        if (!strcmp(tag, "D576")) {
-            cb->in_len = 0x54;
-            dcp_iop_fill_hotplug_payload(cb->payload, 1024, 768);
-            cb->payload_len = 0x54;
-        } else if (!strcmp(tag, "D577")) {
-            cb->in_len = 8;
-            stl_le_p(cb->payload, 1);
-            stl_le_p(cb->payload + 4, 1);
-            cb->payload_len = 8;
-        } else if (!strcmp(tag, "D593")) {
-            cb->in_len = 4;
-            stl_le_p(cb->payload, 1);
-            cb->payload_len = 4;
+        if (!strcmp(tag, "D575")) {
+            cb->in_len = 0x58;
+            cb->out_len = 0x4c;
+            stq_le_p(cb->payload, 1);   /* HPD state: attached */
+            cb->payload[0x53] = 0;      /* bool argument */
+            cb->payload[0x54] = 1;      /* TiledDisplayInfo pointer is null */
+            cb->payload_len = 0x58;
         } else {
-            cb->in_len = 4;
-            stl_le_p(cb->payload, 0);
+            cb->in_len = 4;             /* D600: console mode off */
             cb->payload_len = 4;
         }
         s->cb_count++;
