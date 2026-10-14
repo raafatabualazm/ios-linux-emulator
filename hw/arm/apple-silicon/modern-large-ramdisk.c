@@ -161,3 +161,133 @@ void apple_modern_large_ramdisk_unmap(AppleModernLargeRamdisk *map)
     }
     memset(map, 0, sizeof(*map));
 }
+
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+/* Decode an even-length hex token into out[]; returns the byte count or -1. */
+static long hex_decode(const char *token, uint8_t *out, size_t cap)
+{
+    size_t len = strlen(token);
+
+    if (!len || (len & 1) || len / 2 > cap) {
+        return -1;
+    }
+    for (size_t i = 0; i < len / 2; i++) {
+        int hi = hex_nibble(token[2 * i]);
+        int lo = hex_nibble(token[2 * i + 1]);
+
+        if (hi < 0 || lo < 0) {
+            return -1;
+        }
+        out[i] = (uint8_t)(hi << 4 | lo);
+    }
+    return (long)(len / 2);
+}
+
+bool apple_modern_large_ramdisk_patch(AppleModernLargeRamdisk *map,
+                                      const char *path, unsigned *applied,
+                                      Error **errp)
+{
+    uint8_t old_bytes[APPLE_MODERN_RAMDISK_PATCH_MAX];
+    uint8_t new_bytes[APPLE_MODERN_RAMDISK_PATCH_MAX];
+    char line[4 * APPLE_MODERN_RAMDISK_PATCH_MAX + 256];
+    unsigned count = 0, lineno = 0;
+    FILE *file;
+
+    *applied = 0;
+    if (!map || !map->host || !path) {
+        error_setg(errp, "ramdisk patches need a mapped large ramdisk");
+        return false;
+    }
+    file = fopen(path, "r");
+    if (!file) {
+        error_setg(errp, "cannot open ramdisk patch list %s: %s", path,
+                   strerror(errno));
+        return false;
+    }
+    /* Verify every line before writing any, so a bad list changes nothing. */
+    for (int pass = 0; pass < 2; pass++) {
+        rewind(file);
+        lineno = 0;
+        count = 0;
+        while (fgets(line, sizeof(line), file)) {
+            char offset_tok[32], old_tok[2 * APPLE_MODERN_RAMDISK_PATCH_MAX + 2];
+            char new_tok[2 * APPLE_MODERN_RAMDISK_PATCH_MAX + 2];
+            char *hash = strchr(line, '#');
+            unsigned long long offset;
+            long old_len, new_len;
+            char *end;
+
+            lineno++;
+            if (!strchr(line, '\n') && !feof(file)) {
+                error_setg(errp, "%s:%u: line too long", path, lineno);
+                goto fail;
+            }
+            if (hash) {
+                *hash = '\0';
+            }
+            if (sscanf(line, "%31s", offset_tok) != 1) {
+                continue;  /* blank or comment-only line */
+            }
+            if (sscanf(line, "%31s %1025s %1025s", offset_tok, old_tok,
+                       new_tok) != 3) {
+                error_setg(errp, "%s:%u: expected <offset> <old-hex> <new-hex>",
+                           path, lineno);
+                goto fail;
+            }
+            errno = 0;
+            offset = strtoull(offset_tok, &end, 0);
+            old_len = hex_decode(old_tok, old_bytes, sizeof(old_bytes));
+            new_len = hex_decode(new_tok, new_bytes, sizeof(new_bytes));
+            if (errno || *end || old_len < 0 || new_len != old_len) {
+                error_setg(errp, "%s:%u: bad offset or hex (old and new must be "
+                           "the same length, at most %u bytes)", path, lineno,
+                           APPLE_MODERN_RAMDISK_PATCH_MAX);
+                goto fail;
+            }
+            if (offset > map->file_size || (uint64_t)old_len > map->file_size - offset) {
+                error_setg(errp, "%s:%u: 0x%llx+%ld is outside the %" PRIu64
+                           "-byte ramdisk", path, lineno, offset, old_len,
+                           map->file_size);
+                goto fail;
+            }
+            if (pass == 0 && memcmp(map->host + offset, old_bytes, old_len) &&
+                memcmp(map->host + offset, new_bytes, old_len)) {
+                error_setg(errp, "%s:%u: bytes at 0x%llx do not match the "
+                           "expected old value", path, lineno, offset);
+                goto fail;
+            }
+            if (++count > APPLE_MODERN_RAMDISK_PATCH_LINES) {
+                error_setg(errp, "%s: more than %u patches", path,
+                           APPLE_MODERN_RAMDISK_PATCH_LINES);
+                goto fail;
+            }
+            if (pass == 1) {
+                memcpy(map->host + offset, new_bytes, old_len);
+            }
+        }
+        if (ferror(file)) {
+            error_setg(errp, "error reading %s", path);
+            goto fail;
+        }
+    }
+    fclose(file);
+    *applied = count;
+    return true;
+
+fail:
+    fclose(file);
+    return false;
+}

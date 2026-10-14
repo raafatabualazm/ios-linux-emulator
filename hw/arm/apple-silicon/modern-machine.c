@@ -87,6 +87,8 @@ struct AppleModernMachine {
      */
     bool large_ramdisk;
     AppleModernLargeRamdisk large_ramdisk_file;
+    /* Optional list of declared in-memory edits to the large ramdisk. */
+    char *ramdisk_patches;
     MemoryRegion large_ramdisk_mr;
     MemoryRegion cpu_register_ram[APPLE_MODERN_CPU_REGISTER_WINDOWS];
     MemoryRegion aic_ram, sep_ram;
@@ -2574,11 +2576,29 @@ static void modern_init(MachineState *machine)
                                   s->display_stride : 0,
         .trustcache_v2 = s->trustcache_v2,
     };
+    if (s->ramdisk_patches && !s->large_ramdisk) {
+        error_report("apple-modern: ramdisk-patches needs large-ramdisk=on");
+        exit(EXIT_FAILURE);
+    }
     if (s->large_ramdisk) {
         if (!apple_modern_large_ramdisk_map(s->paths[ASSET_RAMDISK],
                                             &s->large_ramdisk_file, &error)) {
             error_report_err(error);
             exit(EXIT_FAILURE);
+        }
+        if (s->ramdisk_patches) {
+            unsigned applied;
+
+            if (!apple_modern_large_ramdisk_patch(&s->large_ramdisk_file,
+                                                  s->ramdisk_patches, &applied,
+                                                  &error)) {
+                error_report_err(error);
+                exit(EXIT_FAILURE);
+            }
+            warn_report("apple-modern: opt-in ramdisk-patches applied %u "
+                        "declared in-memory edit(s) from %s to the private "
+                        "ramdisk mapping (the image file is unchanged)",
+                        applied, s->ramdisk_patches);
         }
         s->components.ramdisk = (AppleModernBlob){
             s->large_ramdisk_file.host, s->large_ramdisk_file.file_size };
@@ -3247,6 +3267,21 @@ static void set_adt_compat_restore(Object *obj, const char *value, Error **errp)
                             g_strdup(value) : NULL;
 }
 
+static char *get_ramdisk_patches(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->ramdisk_patches);
+}
+
+static void set_ramdisk_patches(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->ramdisk_patches);
+        s->ramdisk_patches = value && value[0] && strcmp(value, "off") ?
+                             g_strdup(value) : NULL;
+    }
+}
+
 static char *get_dcp_attach_cbs(Object *obj, Error **errp)
 {
     return g_strdup(APPLE_MODERN_MACHINE(obj)->dcp_attach_cbs);
@@ -3574,6 +3609,7 @@ static void modern_finalize(Object *obj)
     g_free(s->dcp_iop);
     g_free(s->dcp_attach_cbs);
     g_free(s->dcp_attach_trigger);
+    g_free(s->ramdisk_patches);
     for (size_t i = 0; i < ASSET_COUNT; i++) {
         g_free(s->paths[i]);
         g_free((void *)s->blobs[i].data);
@@ -3635,6 +3671,12 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                   set_adt_compat_restore);
     object_class_property_add_str(oc, "dcp-asc", get_dcp_asc, set_dcp_asc);
     object_class_property_add_str(oc, "dcp-iop", get_dcp_iop, set_dcp_iop);
+    object_class_property_add_str(oc, "ramdisk-patches", get_ramdisk_patches,
+                                  set_ramdisk_patches);
+    object_class_property_set_description(oc, "ramdisk-patches",
+        "path of a list of declared same-size edits ('<offset> <old-hex> "
+        "<new-hex>' per line, all verified first) applied to the private "
+        "large-ramdisk mapping; the image file is never written");
     object_class_property_add_str(oc, "dcp-attach-cbs", get_dcp_attach_cbs,
                                   set_dcp_attach_cbs);
     object_class_property_set_description(oc, "dcp-attach-cbs",
