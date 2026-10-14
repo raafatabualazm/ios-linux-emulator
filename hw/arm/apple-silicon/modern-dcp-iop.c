@@ -661,6 +661,10 @@ struct AppleModernDcpIop {
     unsigned cb_index;
     unsigned cb_count;
     bool normal_mode_seen;
+    /* Display-attach callbacks: '+'-separated tags, NULL = none (see below). */
+    char *attach_cbs;
+    bool attach_after_a453;
+    bool attach_sent;
     struct {
         const char *tag;
         uint32_t in_len;
@@ -755,6 +759,78 @@ static void dcp_iop_fill_hotplug_payload(uint8_t *buf, uint32_t width, uint32_t 
     /* timing: refresh rate 60 Hz */
     stl_le_p(tiled + 36, 60);
     stl_le_p(tiled + 40, 0);
+}
+
+/*
+ * Display-attach callbacks (machine options dcp-attach-cbs and
+ * dcp-attach-trigger).  Antigravity's v17 sent D576, D577, D593 and D594
+ * unconditionally after NormalModeEnable; full-system (features-20261014/
+ * claude-gui/v1-fullsystem-1200s) the AP accepted D576 and D577 and then
+ * panicked on D593 ("callback failed with: 0x5" @link_protocol_priv.h:994).
+ * Which callbacks are sent, and when, is now explicit and defaults to none.
+ * The payload layouts are declared, not recovered from the kernel.
+ */
+static const char *const dcp_attach_tags[] = { "D576", "D577", "D593", "D594" };
+
+static const char *dcp_attach_tag(const char *name)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(dcp_attach_tags); i++) {
+        if (!strcmp(name, dcp_attach_tags[i])) {
+            return dcp_attach_tags[i];
+        }
+    }
+    return NULL;
+}
+
+bool apple_modern_dcp_iop_attach_valid(const char *list, Error **errp)
+{
+    g_auto(GStrv) tags = g_strsplit(list, "+", -1);
+
+    if (!tags[0]) {
+        error_setg(errp, "dcp-attach-cbs is empty");
+        return false;
+    }
+    for (char **t = tags; *t; t++) {
+        if (!dcp_attach_tag(*t)) {
+            error_setg(errp, "dcp-attach-cbs: unknown callback '%s' (supported: "
+                       "D576+D577+D593+D594, any subset and order)", *t);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Append the selected attach callbacks to active_cbs in the requested order. */
+static void dcp_iop_append_attach_cbs(AppleModernDcpIop *s)
+{
+    g_auto(GStrv) tags = g_strsplit(s->attach_cbs, "+", -1);
+
+    for (char **t = tags; *t && s->cb_count < ARRAY_SIZE(s->active_cbs); t++) {
+        const char *tag = dcp_attach_tag(*t);
+        typeof(s->active_cbs[0]) *cb = &s->active_cbs[s->cb_count];
+
+        memset(cb, 0, sizeof(*cb));
+        cb->tag = tag;
+        if (!strcmp(tag, "D576")) {
+            cb->in_len = 0x54;
+            dcp_iop_fill_hotplug_payload(cb->payload, 1024, 768);
+            cb->payload_len = 0x54;
+        } else if (!strcmp(tag, "D577")) {
+            cb->in_len = 8;
+            stl_le_p(cb->payload, 1);
+            stl_le_p(cb->payload + 4, 1);
+            cb->payload_len = 8;
+        } else if (!strcmp(tag, "D593")) {
+            cb->in_len = 4;
+            stl_le_p(cb->payload, 1);
+            cb->payload_len = 4;
+        } else {
+            cb->in_len = 4;
+            stl_le_p(cb->payload, 0);
+            cb->payload_len = 4;
+        }
+        s->cb_count++;
+    }
 }
 
 static void dcp_iop_send_next_startup_cb(AppleModernDcpIop *s)
@@ -1084,6 +1160,24 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                     g_free(zeros);
                 }
 
+                if (s->attach_cbs && s->attach_after_a453 && !s->attach_sent &&
+                    s->normal_mode_seen && !s->a401_pending &&
+                    !strcmp(tag_str, "A453")) {
+                    memset(s->active_cbs, 0, sizeof(s->active_cbs));
+                    s->cb_count = 0;
+                    dcp_iop_append_attach_cbs(s);
+                    s->attach_sent = true;
+                    warn_report("apple-modern: dcp-iop v6-resumed attach callbacks "
+                                "[%s] nested in RPC #%" PRIu64 " A453 (after "
+                                "NormalModeEnable)", s->attach_cbs, s->messages);
+                    s->a401_pending = true;
+                    s->a401_ep = ep;
+                    s->pending_rpc_ctx = ctx;
+                    s->cb_index = 0;
+                    dcp_iop_send_next_startup_cb(s);
+                    return;
+                }
+
                 if (ctx == 2 && !strcmp(tag_str, "A401")) {
                     s->a401_pending = true;
                     s->a401_ep = ep;
@@ -1128,34 +1222,11 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                         s->active_cbs[1].prop_key = "NormalModeActive";
                         s->active_cbs[1].prop_val32 = prop_val ? 1u : 0u;
                         s->cb_count = 2;
-                        if (prop_val != 0) {
-                            /* NormalModeEnable = 1: emit hotplug attach, powerstate, backlight, and console mode */
-                            s->active_cbs[2].tag = "D576";
-                            s->active_cbs[2].in_len = 0x54;
-                            s->active_cbs[2].out_len = 0;
-                            dcp_iop_fill_hotplug_payload(s->active_cbs[2].payload, 1024, 768);
-                            s->active_cbs[2].payload_len = 0x54;
-
-                            s->active_cbs[3].tag = "D577";
-                            s->active_cbs[3].in_len = 8;
-                            s->active_cbs[3].out_len = 0;
-                            stl_le_p(s->active_cbs[3].payload, 1);
-                            stl_le_p(s->active_cbs[3].payload + 4, 1);
-                            s->active_cbs[3].payload_len = 8;
-
-                            s->active_cbs[4].tag = "D593";
-                            s->active_cbs[4].in_len = 4;
-                            s->active_cbs[4].out_len = 0;
-                            stl_le_p(s->active_cbs[4].payload, 1);
-                            s->active_cbs[4].payload_len = 4;
-
-                            s->active_cbs[5].tag = "D594";
-                            s->active_cbs[5].in_len = 4;
-                            s->active_cbs[5].out_len = 0;
-                            stl_le_p(s->active_cbs[5].payload, 0);
-                            s->active_cbs[5].payload_len = 4;
-
-                            s->cb_count = 6;
+                        if (prop_val != 0 && s->attach_cbs &&
+                            !s->attach_after_a453) {
+                            /* NormalModeEnable = 1: selected attach callbacks */
+                            dcp_iop_append_attach_cbs(s);
+                            s->attach_sent = true;
                         }
                     }
                     s->a401_pending = true;
@@ -1429,6 +1500,16 @@ void apple_modern_dcp_iop_set_dma(DeviceState *dev, AddressSpace *dcp_dma_as,
     s->disp0_dma_as = disp0_dma_as;
 }
 
+void apple_modern_dcp_iop_set_attach(DeviceState *dev, const char *cbs,
+                                     bool after_a453)
+{
+    AppleModernDcpIop *s = APPLE_MODERN_DCP_IOP(dev);
+
+    g_free(s->attach_cbs);
+    s->attach_cbs = cbs && *cbs ? g_strdup(cbs) : NULL;
+    s->attach_after_a453 = after_a453;
+}
+
 void apple_modern_dcp_iop_set_scanout(DeviceState *dev, uint64_t scanout_pa,
                                       uint64_t scanout_size)
 {
@@ -1468,6 +1549,7 @@ static void dcp_iop_reset_hold(Object *obj, ResetType type)
     s->a401_ep = 0;
     s->cb_index = 0;
     s->normal_mode_seen = false;
+    s->attach_sent = false;
 }
 
 static void dcp_iop_reset_exit(Object *obj, ResetType type)

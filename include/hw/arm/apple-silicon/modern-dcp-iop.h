@@ -230,6 +230,14 @@ DeviceState *apple_modern_dcp_iop_new(const AppleModernDcpIopPlan *plan,
 /* Wire the DCP and disp0 DART DMA address spaces for v6-resumed shared-memory RPC. */
 void apple_modern_dcp_iop_set_dma(DeviceState *dev, AddressSpace *dcp_dma_as,
                                   AddressSpace *disp0_dma_as);
+/*
+ * v6-resumed display-attach callbacks: cbs is a '+'-separated subset of
+ * D576/D577/D593/D594 (NULL = none); sent nested in NormalModeEnable, or in the
+ * first A453 after it when after_a453.  Declared payloads, see the .c file.
+ */
+bool apple_modern_dcp_iop_attach_valid(const char *cbs, Error **errp);
+void apple_modern_dcp_iop_set_attach(DeviceState *dev, const char *cbs,
+                                     bool after_a453);
 /* Wire the boot-display physical framebuffer range for v6-resumed swap scanout. */
 void apple_modern_dcp_iop_set_scanout(DeviceState *dev, uint64_t scanout_pa,
                                       uint64_t scanout_size);

@@ -167,6 +167,14 @@ struct AppleModernMachine {
      * number and for the two declared ADT flags.
      */
     char *dcp_iop;
+    /*
+     * v6-resumed display-attach callbacks ('+'-separated subset of
+     * D576/D577/D593/D594, default none) and when to send them
+     * ("normal-mode" = nested in NormalModeEnable, "a453" = nested in the
+     * first get_display_size after it).  See modern-dcp-iop.c.
+     */
+    char *dcp_attach_cbs;
+    char *dcp_attach_trigger;
     AppleModernDcpIopPlan dcp_iop_plan;
     DeviceState *dcp_iop_dev;
     bool dcp_iop_mapped;
@@ -1523,6 +1531,26 @@ static bool map_dcp_iop(AppleModernMachine *s, uint64_t uart,
     unsigned mode = 0;
     SysBusDevice *sbd;
 
+    if ((s->dcp_attach_cbs || s->dcp_attach_trigger) &&
+        (!apple_modern_dcp_iop_mode(s->dcp_iop, &mode) ||
+         mode != APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED)) {
+        error_setg(errp, "dcp-attach-cbs/dcp-attach-trigger need "
+                   "dcp-iop=v6-resumed");
+        return false;
+    }
+    if (s->dcp_attach_trigger && !s->dcp_attach_cbs) {
+        error_setg(errp, "dcp-attach-trigger needs dcp-attach-cbs");
+        return false;
+    }
+    if (s->dcp_attach_trigger && strcmp(s->dcp_attach_trigger, "normal-mode") &&
+        strcmp(s->dcp_attach_trigger, "a453")) {
+        error_setg(errp, "dcp-attach-trigger must be normal-mode or a453");
+        return false;
+    }
+    if (s->dcp_attach_cbs &&
+        !apple_modern_dcp_iop_attach_valid(s->dcp_attach_cbs, errp)) {
+        return false;
+    }
     if (!apple_modern_dcp_iop_mode(s->dcp_iop, &mode)) {
         error_setg(errp, "unknown dcp-iop mode '%s' (supported: %s)",
                    s->dcp_iop, APPLE_MODERN_DCP_IOP_MODE_NAMES);
@@ -1596,6 +1624,16 @@ static bool map_dcp_iop(AppleModernMachine *s, uint64_t uart,
         apple_modern_dcp_iop_set_scanout(s->dcp_iop_dev,
                                          s->metadata.layout.framebuffer_physical,
                                          s->metadata.layout.framebuffer_size);
+        if (s->dcp_attach_cbs) {
+            apple_modern_dcp_iop_set_attach(s->dcp_iop_dev, s->dcp_attach_cbs,
+                                            s->dcp_attach_trigger &&
+                                            !strcmp(s->dcp_attach_trigger,
+                                                    "a453"));
+            warn_report("apple-modern: dcp-iop v6-resumed attach callbacks "
+                        "[%s] armed, trigger %s", s->dcp_attach_cbs,
+                        s->dcp_attach_trigger ? s->dcp_attach_trigger :
+                                                "normal-mode");
+        }
     }
     /*
      * Positional IRQ mapping, in ADT "interrupts" order, exactly as t8030
@@ -3052,7 +3090,8 @@ static void modern_init(MachineState *machine)
         (s->modern_cpu_dvfm && !map_cpu_dvfm(s, uart, uart_span, &error)) ||
         (s->dcp_asc && !map_dcp_asc(s, uart, uart_span, &error)) ||
         (s->modern_smc && !map_modern_smc(s, uart, uart_span, &error)) ||
-        (s->dcp_iop && !map_dcp_iop(s, uart, uart_span, &error)) ||
+        ((s->dcp_iop || s->dcp_attach_cbs || s->dcp_attach_trigger) &&
+         !map_dcp_iop(s, uart, uart_span, &error)) ||
         (s->disp0_probe && !map_disp_trace(s, uart, uart_span, &error)) ||
         (s->modern_pmgr_storage &&
          !map_pmgr_storage(s, uart, uart_span, &error)) ||
@@ -3206,6 +3245,35 @@ static void set_adt_compat_restore(Object *obj, const char *value, Error **errp)
     g_free(s->adt_compat_restore);
     s->adt_compat_restore = (value && *value && strcmp(value, "off")) ?
                             g_strdup(value) : NULL;
+}
+
+static char *get_dcp_attach_cbs(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->dcp_attach_cbs);
+}
+
+static void set_dcp_attach_cbs(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->dcp_attach_cbs);
+        s->dcp_attach_cbs = value && value[0] && strcmp(value, "off") ?
+                            g_strdup(value) : NULL;
+    }
+}
+
+static char *get_dcp_attach_trigger(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->dcp_attach_trigger);
+}
+
+static void set_dcp_attach_trigger(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->dcp_attach_trigger);
+        s->dcp_attach_trigger = value && value[0] ? g_strdup(value) : NULL;
+    }
 }
 
 static char *get_dcp_iop(Object *obj, Error **errp)
@@ -3504,6 +3572,8 @@ static void modern_finalize(Object *obj)
     g_free(s->adt_compat_restore);
     g_free(s->dcp_asc);
     g_free(s->dcp_iop);
+    g_free(s->dcp_attach_cbs);
+    g_free(s->dcp_attach_trigger);
     for (size_t i = 0; i < ASSET_COUNT; i++) {
         g_free(s->paths[i]);
         g_free((void *)s->blobs[i].data);
@@ -3565,6 +3635,17 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                   set_adt_compat_restore);
     object_class_property_add_str(oc, "dcp-asc", get_dcp_asc, set_dcp_asc);
     object_class_property_add_str(oc, "dcp-iop", get_dcp_iop, set_dcp_iop);
+    object_class_property_add_str(oc, "dcp-attach-cbs", get_dcp_attach_cbs,
+                                  set_dcp_attach_cbs);
+    object_class_property_set_description(oc, "dcp-attach-cbs",
+        "v6-resumed display-attach callbacks to send, '+'-separated subset of "
+        "D576+D577+D593+D594 (declared payloads; default none)");
+    object_class_property_add_str(oc, "dcp-attach-trigger",
+                                  get_dcp_attach_trigger,
+                                  set_dcp_attach_trigger);
+    object_class_property_set_description(oc, "dcp-attach-trigger",
+        "when to send dcp-attach-cbs: normal-mode (nested in NormalModeEnable, "
+        "default) or a453 (nested in the first get_display_size after it)");
     object_class_property_add_str(oc, "pmgr-voltage-states",
                                   get_pmgr_voltage_states,
                                   set_pmgr_voltage_states);
