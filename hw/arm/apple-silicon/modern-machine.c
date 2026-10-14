@@ -1337,6 +1337,12 @@ static bool map_modern_mtp_input(AppleModernMachine *s, Error **errp)
     uint64_t address, size;
     SysBusDevice *sbd;
 
+    if (!s->modern_aic) {
+        error_setg(errp, "modern-mtp-input needs modern-aic=on (the touch-path "
+                   "IRQs 1128-1137 are beyond the legacy AIC)");
+        return false;
+    }
+
     if (!apple_modern_adt_property(tree, "/arm-io/mtp-gpio", "reg", &reg, errp) ||
         !apple_modern_adt_property(tree, "/arm-io/mtp-gpio", "interrupts",
                                    &ints, errp) ||
@@ -1387,7 +1393,7 @@ static bool map_modern_mtp_input(AppleModernMachine *s, Error **errp)
     if (reg.size != 16 * APPLE_MODERN_DOCKCHANNEL_WINDOWS || ints.size != 4 ||
         fifo.size != 4 || channel.size != 4 || !ldl_le_p(fifo.data) ||
         ldl_le_p(fifo.data) > APPLE_MODERN_DOCKCHANNEL_FIFO_MAX ||
-        ldl_le_p(channel.data) >= 15 || ldl_le_p(ints.data) >= s->aic_num_irqs) {
+        ldl_le_p(channel.data) >= 7 || ldl_le_p(ints.data) >= s->aic_num_irqs) {
         error_setg(errp, "modern-mtp-input: unexpected /arm-io/dockchannel-mtp schema");
         return false;
     }
@@ -1416,8 +1422,9 @@ static bool map_modern_mtp_input(AppleModernMachine *s, Error **errp)
     warn_report("apple-modern: modern-mtp-input maps /arm-io/mtp-gpio (Apple GPIO "
                 "model, %u pins, %u groups) at 0x%" PRIx64 " and a declared "
                 "/arm-io/dockchannel-mtp FIFO (fifo-size 0x%x, channel %u, IRQ %u) "
-                "at 0x%" PRIx64 "; DockChannel semantics are an Asahi analogy, no MTP "
-                "firmware or HID peer runs, touch acceptance unqualified",
+                "at 0x%" PRIx64 "; DockChannel semantics from the AppleDockChannel "
+                "driver, no MTP firmware or HID peer runs, touch acceptance "
+                "unqualified",
                 ldl_le_p(pins.data), ldl_le_p(groups.data), gpio_address,
                 ldl_le_p(fifo.data), ldl_le_p(channel.data), ldl_le_p(ints.data),
                 windows[APPLE_MODERN_DOCKCHANNEL_WIN_GLOBAL]);

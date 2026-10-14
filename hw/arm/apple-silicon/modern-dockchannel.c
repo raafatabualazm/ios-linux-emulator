@@ -1,6 +1,6 @@
 /*
- * Declared, default-off DockChannel FIFO for /arm-io/dockchannel-mtp
- * (apple-modern machine option modern-mtp-input).
+ * DockChannel FIFO for /arm-io/dockchannel-mtp (apple-modern machine option
+ * modern-mtp-input, default off).
  *
  * Why it exists: with the stock hid-mtp compatible values restored,
  * AppleDockChannel::start reads window 0 + 0x4 of this block before anything
@@ -10,26 +10,32 @@
  * 0xfffffff008aa2194 in com.apple.driver.AppleDockChannel, BootKC a36b9241,
  * register X9 -> GPA 0x314b00000).
  *
- * Declared register semantics.  Everything below is an explicit ANALOGY, not
- * measured Apple behaviour:
- *  - IRQ, config and data windows follow Asahi Linux's DockChannel FIFO driver
- *    (drivers/soc/apple/dockchannel.c, "apple,t8112-dockchannel"): IRQ_MASK
- *    0x0 / IRQ_FLAG 0x4; config TX_THRESH 0x0 / RX_THRESH 0x4; data TX8..TX32
- *    0x4..0x10, TX_FREE 0x14, RX8..RX32 0x1c..0x28, RX_COUNT 0x2c.  The T8140
- *    ADT window offsets (+0x14000 irq, +0x28000/+0x2c000 remote config/data,
- *    +0x30000/+0x34000 config/data) match that binding's layout.
- *  - Window 0 is not in Asahi's binding.  AppleDockChannel::start extracts
- *    bits [7:4] of +0x4 and requires ADT channel-number <= that field, logging
- *    "AppleDockChannel::start: Invalid channel-number" otherwise (same BootKC
- *    function).  The model reports channel-number + 1 there.
+ * Register semantics are taken from the AP driver itself
+ * (com.apple.driver.AppleDockChannel in BootKC a36b9241, unslid addresses;
+ * annotated disassembly in evidence/features-20261014/claude-input/dis/):
+ *  - start (0xfffffff008aa1d2c) maps ADT reg[0..5] as global, dock agent AP
+ *    (interrupt), device config, device data, dock config and dock data.  It
+ *    requires ADT channel-number <= bits [7:4] of global+0x4 ("Invalid
+ *    channel-number"); the model reports channel-number + 1 there.
+ *  - TX (0xfffffff008aa27f0): free = device-data+0x14 & dock-wstat-mask; whole
+ *    words go to +0x10, a 1-3 byte tail to +0x4/+0x8/+0xc in the low bits.
+ *  - RX (0xfffffff008aa2938, 0xfffffff008aa2bc0): available bytes =
+ *    device-data+0x2c & 0xffff; each byte is device-data+0x1c >> 8.
+ *  - Async read (0xfffffff008aa29fc): device-config+0x4 = requested length,
+ *    agent+0x4 = 8 << (4 * channel) (clear), agent+0x0 |= the same bit
+ *    (unmask); cancel (0xfffffff008aa2adc) masks, clears, zeroes +0x4 and may
+ *    write 1 to device-config+0x10 / dock-config+0x10.
+ * Inferred, not observed in that driver: the receive interrupt is level-like
+ * (it latches again while device-data+0x2c >= device-config+0x4 after a
+ * clear), bit 2 of the channel nibble is "transmit space", RX16/RX24 follow
+ * RX8's byte-in-[31:8], count-in-[7:0] layout and RX32 returns four bytes,
+ * +0x10 of either config window drops that side's queued bytes.  Asahi Linux
+ * (drivers/soc/apple/dockchannel.c) uses the same layout on t8112.
  *
- * No MTP firmware or remote peer exists.  Transmitted bytes are only counted
- * and logged; TX_FREE always reports the whole FIFO; the receive FIFO is empty
- * unless apple_modern_dockchannel_push_rx() fills it; IRQ_FLAG reports nothing
- * pending, so the interrupt never fires while the receive FIFO is empty.
- * Unknown offsets read as zero and ignore writes.  The first access to every
- * (window, offset, direction) is logged so the driver's real register usage can
- * be measured before any of this is promoted beyond "declared".
+ * The far end is pluggable: apple_modern_dockchannel_set_peer() receives every
+ * byte the AP transmits, apple_modern_dockchannel_push_rx() queues bytes for
+ * the AP.  Without a peer, transmitted bytes are only counted and logged.  The
+ * first access to every (window, offset, direction) is logged.
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -40,15 +46,17 @@
 #include "hw/irq.h"
 #include "hw/arm/apple-silicon/modern-dockchannel.h"
 
-#define IRQ_MASK 0x0
-#define IRQ_FLAG 0x4
+#define AGENT_IRQ_MASK 0x0
+#define AGENT_IRQ_FLAG 0x4
 #define CFG_TX_THRESH 0x0
 #define CFG_RX_THRESH 0x4
+#define CFG_FLUSH 0x10
 #define DATA_TX8 0x4
 #define DATA_TX16 0x8
 #define DATA_TX24 0xc
 #define DATA_TX32 0x10
 #define DATA_TX_FREE 0x14
+#define DATA_RX_READY 0x18
 #define DATA_RX8 0x1c
 #define DATA_RX16 0x20
 #define DATA_RX24 0x24
@@ -61,23 +69,35 @@
 #define TX_LOG_WRITES 512
 
 static const char *const window_names[APPLE_MODERN_DOCKCHANNEL_WINDOWS] = {
-    "global", "irq", "config", "data", "rmt-config", "rmt-data",
+    "global", "agent", "dev-config", "dev-data", "dock-config", "dock-data",
 };
 
-/* Declared: receive-pending bit for this channel (unverified, see header). */
-static uint32_t rx_flag(AppleModernDockChannelState *s)
+/* Per-channel interrupt nibble: bit 2 transmit space, bit 3 receive data. */
+static uint32_t tx_bit(AppleModernDockChannelState *s)
 {
-    return BIT(2 * s->channel + 1);
+    return 4u << (4 * s->channel);
 }
 
-static uint32_t pending(AppleModernDockChannelState *s)
+static uint32_t rx_bit(AppleModernDockChannelState *s)
 {
-    return s->rx_count ? rx_flag(s) : 0;
+    return 8u << (4 * s->channel);
 }
 
+static uint32_t conditions(AppleModernDockChannelState *s)
+{
+    uint32_t bits = tx_bit(s);  /* the peer drains TX at once: always space */
+
+    if (s->rx_count && s->rx_count >= s->rx_thresh) {
+        bits |= rx_bit(s);
+    }
+    return bits;
+}
+
+/* Latch every condition that holds, then drive the line from flag & mask. */
 static void update_irq(AppleModernDockChannelState *s)
 {
-    qemu_set_irq(s->irq, (pending(s) & s->irq_mask) != 0);
+    s->irq_flag |= conditions(s);
+    qemu_set_irq(s->irq, (s->irq_flag & s->irq_mask) != 0);
 }
 
 static void log_first(AppleModernDockChannelState *s, unsigned win, hwaddr off,
@@ -94,31 +114,52 @@ static void log_first(AppleModernDockChannelState *s, unsigned win, hwaddr off,
                 window_names[win], off, size, write ? "<-" : "->", value);
 }
 
-static void tx_push(AppleModernDockChannelState *s, uint64_t value, unsigned n)
+static void tx_push(AppleModernDockChannelState *s, uint32_t value, unsigned n)
 {
-    char bytes[2 * 4 + 1] = "";
+    uint8_t bytes[4];
+    char hex[2 * 4 + 1] = "";
 
-    s->tx_total += n;
-    if (s->tx_logged >= TX_LOG_WRITES) {
-        return;
-    }
-    s->tx_logged++;
     for (unsigned i = 0; i < n; i++) {
-        snprintf(bytes + 2 * i, 3, "%02x", (unsigned)((value >> (8 * i)) & 0xff));
+        bytes[i] = value >> (8 * i);
+        snprintf(hex + 2 * i, 3, "%02x", bytes[i]);
     }
-    warn_report("apple-modern: dockchannel-mtp TX#%u %s (total %" PRIu64 " bytes)%s",
-                s->tx_logged, bytes, s->tx_total,
-                s->tx_logged == TX_LOG_WRITES ? "; further TX writes are counted only" : "");
+    s->tx_total += n;
+    if (s->tx_logged < TX_LOG_WRITES) {
+        s->tx_logged++;
+        warn_report("apple-modern: dockchannel-mtp TX#%u %s (total %" PRIu64
+                    " bytes)%s", s->tx_logged, hex, s->tx_total,
+                    s->tx_logged == TX_LOG_WRITES ?
+                    "; further TX writes are counted only" : "");
+    }
+    if (s->peer_tx) {
+        s->peer_tx(s->peer_opaque, bytes, n);
+    }
 }
 
-static uint32_t rx_pop(AppleModernDockChannelState *s, unsigned n)
+static uint8_t rx_take(AppleModernDockChannelState *s)
+{
+    uint8_t byte = s->rx[s->rx_head];
+
+    s->rx_head = (s->rx_head + 1) % APPLE_MODERN_DOCKCHANNEL_FIFO_MAX;
+    s->rx_count--;
+    return byte;
+}
+
+/* RX8/16/24: bytes in [31:8], count in [7:0].  RX32: four bytes. */
+static uint32_t rx_read(AppleModernDockChannelState *s, unsigned n)
 {
     uint32_t value = 0;
+    unsigned got = 0;
 
-    for (unsigned i = 0; i < n && s->rx_count; i++) {
-        value |= (uint32_t)s->rx[s->rx_head] << (8 * i);
-        s->rx_head = (s->rx_head + 1) % APPLE_MODERN_DOCKCHANNEL_FIFO_MAX;
-        s->rx_count--;
+    if (n == 4) {
+        for (; got < 4 && s->rx_count; got++) {
+            value |= (uint32_t)rx_take(s) << (8 * got);
+        }
+    } else {
+        for (; got < n && s->rx_count; got++) {
+            value |= (uint32_t)rx_take(s) << (8 * (got + 1));
+        }
+        value |= got;
     }
     update_irq(s);
     return value;
@@ -136,23 +177,27 @@ static uint64_t dockchannel_read(void *opaque, hwaddr off, unsigned size)
             value = (uint64_t)(s->channel + 1) << GLOBAL_CAPS_CHANNELS_SHIFT;
         }
         break;
-    case APPLE_MODERN_DOCKCHANNEL_WIN_IRQ:
-        value = off == IRQ_MASK ? s->irq_mask : off == IRQ_FLAG ? pending(s) : 0;
+    case APPLE_MODERN_DOCKCHANNEL_WIN_AGENT:
+        value = off == AGENT_IRQ_MASK ? s->irq_mask :
+                off == AGENT_IRQ_FLAG ? s->irq_flag : 0;
         break;
-    case APPLE_MODERN_DOCKCHANNEL_WIN_CONFIG:
+    case APPLE_MODERN_DOCKCHANNEL_WIN_DEV_CONFIG:
         value = off == CFG_TX_THRESH ? s->tx_thresh :
                 off == CFG_RX_THRESH ? s->rx_thresh : 0;
         break;
-    case APPLE_MODERN_DOCKCHANNEL_WIN_DATA:
+    case APPLE_MODERN_DOCKCHANNEL_WIN_DEV_DATA:
         switch (off) {
         case DATA_TX_FREE:
             value = s->fifo_size;
+            break;
+        case DATA_RX_READY:
+            value = MIN(s->rx_count, 0x7f);
             break;
         case DATA_RX8:
         case DATA_RX16:
         case DATA_RX24:
         case DATA_RX32:
-            value = rx_pop(s, (off - DATA_RX8) / 4 + 1);
+            value = rx_read(s, (off - DATA_RX8) / 4 + 1);
             break;
         case DATA_RX_COUNT:
             value = s->rx_count;
@@ -172,21 +217,29 @@ static void dockchannel_write(void *opaque, hwaddr off, uint64_t value,
 
     log_first(s, w->index, off, true, value, size);
     switch (w->index) {
-    case APPLE_MODERN_DOCKCHANNEL_WIN_IRQ:
-        if (off == IRQ_MASK) {
+    case APPLE_MODERN_DOCKCHANNEL_WIN_AGENT:
+        if (off == AGENT_IRQ_MASK) {
             s->irq_mask = value;
+        } else if (off == AGENT_IRQ_FLAG) {
+            s->irq_flag &= ~(uint32_t)value;  /* write-1-to-clear */
         }
-        /* IRQ_FLAG: pending state is derived from the FIFO, nothing to clear. */
         update_irq(s);
         break;
-    case APPLE_MODERN_DOCKCHANNEL_WIN_CONFIG:
+    case APPLE_MODERN_DOCKCHANNEL_WIN_DEV_CONFIG:
         if (off == CFG_TX_THRESH) {
             s->tx_thresh = value;
         } else if (off == CFG_RX_THRESH) {
             s->rx_thresh = value;
+            update_irq(s);
+        } else if (off == CFG_FLUSH && (value & 1) && s->rx_count) {
+            warn_report("apple-modern: dockchannel-mtp device-side flush drops "
+                        "%u queued RX bytes", s->rx_count);
+            s->rx_head = 0;
+            s->rx_count = 0;
+            update_irq(s);
         }
         break;
-    case APPLE_MODERN_DOCKCHANNEL_WIN_DATA:
+    case APPLE_MODERN_DOCKCHANNEL_WIN_DEV_DATA:
         if (off >= DATA_TX8 && off <= DATA_TX32 && !(off & 3)) {
             tx_push(s, value, (off - DATA_TX8) / 4 + 1);
         }
@@ -219,11 +272,25 @@ bool apple_modern_dockchannel_push_rx(AppleModernDockChannelState *s,
     return true;
 }
 
+uint32_t apple_modern_dockchannel_rx_space(AppleModernDockChannelState *s)
+{
+    return s->fifo_size - s->rx_count;
+}
+
+void apple_modern_dockchannel_set_peer(AppleModernDockChannelState *s,
+                                       AppleModernDockChannelPeerTx tx,
+                                       void *opaque)
+{
+    s->peer_tx = tx;
+    s->peer_opaque = opaque;
+}
+
 static void dockchannel_reset(DeviceState *dev)
 {
     AppleModernDockChannelState *s = APPLE_MODERN_DOCKCHANNEL(dev);
 
     s->irq_mask = 0;
+    s->irq_flag = 0;
     s->tx_thresh = 0;
     s->rx_thresh = 0;
     s->rx_head = 0;
@@ -238,7 +305,7 @@ SysBusDevice *apple_modern_dockchannel_new(uint32_t fifo_size, uint32_t channel)
     AppleModernDockChannelState *s = APPLE_MODERN_DOCKCHANNEL(dev);
 
     assert(fifo_size && fifo_size <= APPLE_MODERN_DOCKCHANNEL_FIFO_MAX);
-    assert(channel < 15);
+    assert(channel < 7);  /* irq nibble and caps field must fit */
     s->fifo_size = fifo_size;
     s->channel = channel;
     for (unsigned i = 0; i < APPLE_MODERN_DOCKCHANNEL_WINDOWS; i++) {
@@ -257,7 +324,7 @@ static void dockchannel_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->desc = "Apple DockChannel FIFO (declared, modern-mtp-input)";
+    dc->desc = "Apple DockChannel FIFO (modern-mtp-input)";
     dc->user_creatable = false;
     device_class_set_legacy_reset(dc, dockchannel_reset);
 }
