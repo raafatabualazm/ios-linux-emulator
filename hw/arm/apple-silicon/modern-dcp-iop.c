@@ -21,6 +21,7 @@
 #include "qemu/error-report.h"
 #include "hw/qdev-properties.h"
 #include "hw/misc/apple-silicon/a7iop/rtkit.h"
+#include "system/dma.h"
 #endif
 #include "hw/arm/apple-silicon/modern-dcp-iop.h"
 
@@ -56,6 +57,12 @@ static size_t bounded_length(const char *text, size_t limit)
 }
 
 static const uint8_t flag_one[4] = { 1, 0, 0, 0 };
+static const uint8_t segment_base_le[8] = {
+    0x00, 0x00, 0xf0, 0x0d, 0x03, 0x00, 0x00, 0x00 /* 0x30df00000 */
+};
+static const uint8_t segment_size_le[8] = {
+    0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 /* 0x100000 */
+};
 
 #define APPLE_MODERN_DCP_IOP_OVERRIDE_COUNT 2
 static const AppleModernAdtOverride
@@ -64,12 +71,30 @@ static const AppleModernAdtOverride
     { "/arm-io/dcp/iop-dcp-nub", "running", flag_one, sizeof(flag_one) },
 };
 
+#define APPLE_MODERN_DCP_IOP_SEGMENT_OVERRIDE_COUNT 2
+static const AppleModernAdtOverride
+    dcp_iop_segment_flags[APPLE_MODERN_DCP_IOP_SEGMENT_OVERRIDE_COUNT] = {
+    { "/arm-io/dcp/iop-dcp-nub", "region-base",
+      segment_base_le, sizeof(segment_base_le) },
+    { "/arm-io/dcp/iop-dcp-nub", "region-size",
+      segment_size_le, sizeof(segment_size_le) },
+};
+
 const AppleModernAdtOverride *apple_modern_dcp_iop_overrides(size_t *count)
 {
     if (count) {
         *count = APPLE_MODERN_DCP_IOP_OVERRIDE_COUNT;
     }
     return dcp_iop_flags;
+}
+
+const AppleModernAdtOverride *
+apple_modern_dcp_iop_segment_overrides(size_t *count)
+{
+    if (count) {
+        *count = APPLE_MODERN_DCP_IOP_SEGMENT_OVERRIDE_COUNT;
+    }
+    return dcp_iop_segment_flags;
 }
 
 bool apple_modern_dcp_iop_mode(const char *name, unsigned *mode)
@@ -87,6 +112,8 @@ bool apple_modern_dcp_iop_mode(const char *name, unsigned *mode)
           APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED_QUIESCED },
         { APPLE_MODERN_DCP_IOP_NAME_V6_EXPERT_START,
           APPLE_MODERN_DCP_IOP_MODE_V6_EXPERT_START },
+        { APPLE_MODERN_DCP_IOP_NAME_V6_RESUMED,
+          APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED },
     };
     if (!name || !mode) {
         return false;
@@ -107,7 +134,8 @@ bool apple_modern_dcp_iop_mode_has_peer(unsigned mode)
            mode == APPLE_MODERN_DCP_IOP_MODE_V6_QUIESCED ||
            mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED ||
            mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED_QUIESCED ||
-           mode == APPLE_MODERN_DCP_IOP_MODE_V6_EXPERT_START;
+           mode == APPLE_MODERN_DCP_IOP_MODE_V6_EXPERT_START ||
+           mode == APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED;
 }
 
 bool apple_modern_dcp_iop_mode_has_flags(unsigned mode)
@@ -115,7 +143,13 @@ bool apple_modern_dcp_iop_mode_has_flags(unsigned mode)
     return mode == APPLE_MODERN_DCP_IOP_MODE_V6 ||
            mode == APPLE_MODERN_DCP_IOP_MODE_V4 ||
            mode == APPLE_MODERN_DCP_IOP_MODE_FLAGS_ONLY ||
-           mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED;
+           mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED ||
+           mode == APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED;
+}
+
+bool apple_modern_dcp_iop_mode_has_segment_map(unsigned mode)
+{
+    return mode == APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED;
 }
 
 bool apple_modern_dcp_iop_endpoint_name(const char *role, unsigned raw,
@@ -486,6 +520,109 @@ bool apple_modern_dcp_iop_expert_plan_build(AppleModernBlob tree,
     return true;
 }
 
+bool apple_modern_dcp_iop_resumed_plan_build(AppleModernBlob tree,
+    uint64_t dram_base, uint64_t dram_size,
+    const AppleModernAddressRange *exclusions, size_t exclusion_count,
+    AppleModernDcpIopPlan *plan, Error **errp)
+{
+    AppleModernBlob reg, ranges;
+    uint64_t bus, size, core_address = 0;
+    unsigned matches = 0;
+
+    if (!plan || aliases(plan, sizeof(*plan), tree.data, tree.size) ||
+        exclusion_count > APPLE_MODERN_MAX_BOARD_EXCLUSIONS ||
+        (exclusion_count && !exclusions) ||
+        (exclusions && aliases(plan, sizeof(*plan), exclusions,
+                               exclusion_count * sizeof(*exclusions)))) {
+        error_setg(errp, "dcp-iop resumed output aliases input or exclusions "
+                         "are invalid");
+        return false;
+    }
+    plan->core_address = 0;
+    plan->core_size = 0;
+    plan->segment_address = 0;
+    plan->segment_size = 0;
+    if (!apple_modern_dcp_iop_expert_plan_build(tree, dram_base, dram_size,
+                                                exclusions, exclusion_count,
+                                                plan, errp)) {
+        return false;
+    }
+    if (!apple_modern_adt_property(tree, "/arm-io/dcp", "reg", &reg, errp) ||
+        reg.size < 32 || reg.size % 16 ||
+        !apple_modern_adt_property(tree, "/arm-io", "ranges", &ranges, errp) ||
+        !ranges.size || ranges.size % 24) {
+        plan->expert_control_address = 0;
+        plan->expert_control_on = 0;
+        plan->expert_control_off = 0;
+        if (errp && !*errp) {
+            error_setg(errp, "dcp-iop resumed requires /arm-io/dcp reg[1]");
+        }
+        return false;
+    }
+    bus = little(reg.data + 16, 8);
+    size = little(reg.data + 24, 8);
+    if (size != APPLE_MODERN_DCP_IOP_CORE_SIZE || size > UINT64_MAX - bus) {
+        plan->expert_control_address = 0;
+        plan->expert_control_on = 0;
+        plan->expert_control_off = 0;
+        error_setg(errp, "/arm-io/dcp reg[1] size 0x%llx is not the attested "
+                   "0x%llx", (unsigned long long)size,
+                   (unsigned long long)APPLE_MODERN_DCP_IOP_CORE_SIZE);
+        return false;
+    }
+    for (size_t i = 0; i < ranges.size; i += 24) {
+        uint64_t child = little(ranges.data + i, 8);
+        uint64_t parent = little(ranges.data + i + 8, 8);
+        uint64_t span = little(ranges.data + i + 16, 8);
+        if (bus >= child && bus - child < span &&
+            size <= span - (bus - child)) {
+            core_address = parent + (bus - child);
+            matches++;
+        }
+    }
+    if (matches != 1 ||
+        overlaps(core_address, size, dram_base, dram_size) ||
+        overlaps(core_address, size, plan->wrapper_address,
+                 plan->wrapper_size) ||
+        overlaps(core_address, size, plan->expert_control_address, 4) ||
+        overlaps(APPLE_MODERN_DCP_IOP_SEGMENT_BASE,
+                 APPLE_MODERN_DCP_IOP_SEGMENT_SIZE, dram_base, dram_size) ||
+        overlaps(APPLE_MODERN_DCP_IOP_SEGMENT_BASE,
+                 APPLE_MODERN_DCP_IOP_SEGMENT_SIZE, plan->wrapper_address,
+                 plan->wrapper_size) ||
+        overlaps(APPLE_MODERN_DCP_IOP_SEGMENT_BASE,
+                 APPLE_MODERN_DCP_IOP_SEGMENT_SIZE,
+                 plan->expert_control_address, 4) ||
+        overlaps(APPLE_MODERN_DCP_IOP_SEGMENT_BASE,
+                 APPLE_MODERN_DCP_IOP_SEGMENT_SIZE, core_address, size)) {
+        plan->expert_control_address = 0;
+        plan->expert_control_on = 0;
+        plan->expert_control_off = 0;
+        error_setg(errp, "dcp-iop resumed core/segment window translation or "
+                         "overlap failed");
+        return false;
+    }
+    for (size_t i = 0; i < exclusion_count; i++) {
+        if (overlaps(core_address, size, exclusions[i].physical_address,
+                     exclusions[i].size) ||
+            overlaps(APPLE_MODERN_DCP_IOP_SEGMENT_BASE,
+                     APPLE_MODERN_DCP_IOP_SEGMENT_SIZE,
+                     exclusions[i].physical_address, exclusions[i].size)) {
+            plan->expert_control_address = 0;
+            plan->expert_control_on = 0;
+            plan->expert_control_off = 0;
+            error_setg(errp, "dcp-iop resumed core/segment overlaps another "
+                             "device");
+            return false;
+        }
+    }
+    plan->core_address = core_address;
+    plan->core_size = size;
+    plan->segment_address = APPLE_MODERN_DCP_IOP_SEGMENT_BASE;
+    plan->segment_size = APPLE_MODERN_DCP_IOP_SEGMENT_SIZE;
+    return true;
+}
+
 #ifndef APPLE_MODERN_LAYOUT_STANDALONE
 
 struct AppleModernDcpIopClass {
@@ -503,34 +640,569 @@ struct AppleModernDcpIop {
     uint64_t cpu_wakeups;
     bool rollcall_done;
     bool prestarted;
+    bool dual_endpoints;
     bool reset_start;
     bool expert_start;
     MemoryRegion expert_control;
+    MemoryRegion core_regs;
+    MemoryRegion segment_sram;
     uint32_t expert_control_value;
     uint32_t expert_control_on;
     uint32_t expert_control_off;
+    AddressSpace *dcp_dma_as;
+    AddressSpace *disp0_dma_as;
+    uint64_t scanout_pa;
+    uint64_t scanout_size;
+    uint32_t next_swap_id;
+    uint64_t shmem_dva;
+    bool a401_pending;
+    uint8_t a401_ep;
+    uint8_t pending_rpc_ctx;
+    unsigned cb_index;
+    unsigned cb_count;
+    bool normal_mode_seen;
+    struct {
+        const char *tag;
+        uint32_t in_len;
+        uint32_t out_len;
+        uint32_t prop_id;
+        const char *prop_key;
+        uint32_t prop_val32;
+        uint64_t prop_val64;
+        uint8_t payload[128];
+        uint32_t payload_len;
+    } active_cbs[16];
 };
+
+typedef struct QEMU_PACKED {
+    char tag[4];
+    uint32_t in_len;
+    uint32_t out_len;
+} DcpRpcPacketHeader;
+
+typedef struct {
+    const char *tag;
+    uint32_t in_len;
+    uint32_t out_len;
+    uint32_t prop_id;
+    const char *prop_key;
+    uint32_t prop_val32;
+    uint64_t prop_val64;
+} DcpStartupCb;
+
+static const DcpStartupCb dcp_v6_resumed_startup_cbs[] = {
+    { .tag = "D107", .in_len = 0,    .out_len = 4 }, /* create_provider_service */
+    { .tag = "D108", .in_len = 0,    .out_len = 4 }, /* create_product_service */
+    { .tag = "D109", .in_len = 0,    .out_len = 4 }, /* create_PMU_service */
+    { .tag = "D110", .in_len = 0,    .out_len = 4 }, /* create_iomfb_service */
+    /* D300: IOMFB::PropRelay::publish(RuntimeProperty id=124 enableNormalMode) */
+    { .tag = "D300", .in_len = 0x10, .out_len = 0,
+      .prop_id = 124, .prop_val32 = 1, .prop_val64 = 1 },
+    /* D104: UnifiedPipeline2::set_boolean_property("NormalModeActive", true) */
+    { .tag = "D104", .in_len = 0x44, .out_len = 0,
+      .prop_key = "NormalModeActive", .prop_val32 = 1 },
+    /* D102: UnifiedPipeline2::set_number_property("color-accuracy-index", 0) */
+    { .tag = "D102", .in_len = 0x44, .out_len = 0,
+      .prop_key = "color-accuracy-index", .prop_val32 = 0 },
+    { .tag = "D000", .in_len = 0,    .out_len = 4 }, /* did_boot_signal */
+    { .tag = "D001", .in_len = 0,    .out_len = 4 }, /* did_power_on_signal */
+    { .tag = "D120", .in_len = 0,    .out_len = 4 }, /* start_hardware_boot */
+};
+
+static AddressSpace *dcp_iop_select_dma_as(AppleModernDcpIop *s, uint64_t dva,
+                                           void *buf, size_t len,
+                                           const char **which,
+                                           uint64_t *resolved_dva)
+{
+    uint64_t trunc36 = dva & UINT64_C(0xfffffffff);
+
+    if (s->dcp_dma_as &&
+        dma_memory_read(s->dcp_dma_as, trunc36, buf, len,
+                        MEMTXATTRS_UNSPECIFIED) == MEMTX_OK) {
+        *which = "dart-dcp(trunc36)";
+        *resolved_dva = trunc36;
+        return s->dcp_dma_as;
+    }
+    *which = "none";
+    *resolved_dva = dva;
+    return NULL;
+}
+
+static void dcp_iop_fill_hotplug_payload(uint8_t *buf, uint32_t width, uint32_t height)
+{
+    memset(buf, 0, 0x54);
+    /* arg1: uint connected = 1 */
+    stl_le_p(buf, 1);
+    /* arg2: TiledDisplayInfo (0x50 bytes starting at buf + 4) */
+    uint8_t *tiled = buf + 4;
+    tiled[0] = 'A';
+    tiled[1] = 'A';
+    tiled[2] = 'P';
+    tiled[3] = 0;
+    stw_le_p(tiled + 4, 1);  /* product code */
+    stw_le_p(tiled + 6, 0);
+    stl_le_p(tiled + 8, 1);  /* serial number */
+    stl_le_p(tiled + 12, 1); /* capabilities: single-tile valid */
+    stl_le_p(tiled + 16, 0);
+    /* tile geometry: {tile_w, tile_h, tile_x, tile_y} */
+    stw_le_p(tiled + 20, width);
+    stw_le_p(tiled + 22, height);
+    stw_le_p(tiled + 24, 0);
+    stw_le_p(tiled + 26, 0);
+    /* total dimensions: {total_w, total_h} */
+    stl_le_p(tiled + 28, width);
+    stl_le_p(tiled + 32, height);
+    /* timing: refresh rate 60 Hz */
+    stl_le_p(tiled + 36, 60);
+    stl_le_p(tiled + 40, 0);
+}
+
+static void dcp_iop_send_next_startup_cb(AppleModernDcpIop *s)
+{
+    while (s->cb_index < s->cb_count) {
+        const char *tag = s->active_cbs[s->cb_index].tag;
+        uint32_t in_len = s->active_cbs[s->cb_index].in_len;
+        uint32_t out_len = s->active_cbs[s->cb_index].out_len;
+        uint32_t prop_id = s->active_cbs[s->cb_index].prop_id;
+        const char *prop_key = s->active_cbs[s->cb_index].prop_key;
+        uint32_t prop_val32 = s->active_cbs[s->cb_index].prop_val32;
+        uint64_t prop_val64 = s->active_cbs[s->cb_index].prop_val64;
+        uint64_t raw_cb_dva = s->shmem_dva + 0x60000;
+        uint64_t cb_dva = raw_cb_dva;
+        const char *which = "none";
+        uint8_t pkt_buf[256] = { 0 };
+        DcpRpcPacketHeader hdr = {
+            .tag = { tag[3], tag[2], tag[1], tag[0] },
+            .in_len = in_len,
+            .out_len = out_len,
+        };
+        uint32_t total_len = sizeof(hdr) + in_len + out_len;
+        uint8_t probe[4] = { 0 };
+        AddressSpace *as = dcp_iop_select_dma_as(s, raw_cb_dva, probe,
+                                                 sizeof(probe), &which,
+                                                 &cb_dva);
+        if (!as || total_len > sizeof(pkt_buf)) {
+            warn_report("apple-modern: dcp-iop v6-resumed CB #%u ('%s') DMA "
+                        "lookup failed at 0x%" PRIx64,
+                        s->cb_index, tag, raw_cb_dva);
+            break;
+        }
+        memcpy(pkt_buf, &hdr, sizeof(hdr));
+        if (s->active_cbs[s->cb_index].payload_len > 0) {
+            memcpy(pkt_buf + sizeof(hdr),
+                   s->active_cbs[s->cb_index].payload,
+                   s->active_cbs[s->cb_index].payload_len);
+        } else if (prop_key && in_len == 0x44) {
+            strncpy((char *)(pkt_buf + sizeof(hdr)), prop_key, 0x3f);
+            stl_le_p(pkt_buf + sizeof(hdr) + 0x40, prop_val32);
+        } else if (in_len == 0x10) {
+            stl_le_p(pkt_buf + sizeof(hdr) + 0x0, prop_id);
+            stl_le_p(pkt_buf + sizeof(hdr) + 0x4, prop_val32);
+            stq_le_p(pkt_buf + sizeof(hdr) + 0x8, prop_val64);
+        }
+        if (out_len == 4) {
+            stl_le_p(pkt_buf + sizeof(hdr) + in_len, 0xdeadbeefU);
+        }
+        dma_memory_write(as, cb_dva, pkt_buf, total_len,
+                         MEMTXATTRS_UNSPECIFIED);
+        warn_report("apple-modern: dcp-iop v6-resumed sending CB #%u tag='%s' "
+                    "on %s via %s (ctx=0 off=0x0 len=0x%x)",
+                    s->cb_index, tag, s->nub_name, which, total_len);
+        apple_rtkit_send_user_msg(APPLE_RTKIT(s), s->a401_ep,
+                                  ((uint64_t)total_len << 32) | UINT64_C(2));
+        return;
+    }
+
+    s->a401_pending = false;
+    warn_report("apple-modern: dcp-iop v6-resumed CB sequence "
+                "complete; sending ACK for ctx=%u", s->pending_rpc_ctx);
+    apple_rtkit_send_user_msg(APPLE_RTKIT(s), s->a401_ep,
+                              UINT64_C(2) | (UINT64_C(1) << 6) |
+                              ((uint64_t)s->pending_rpc_ctx << 8));
+}
+
+static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
+                                          unsigned raw, uint64_t message)
+{
+    uint8_t msg_type = message & 0xf;
+
+    if (msg_type == 0) {
+        /* IOMFB_MESSAGE_TYPE_SET_SHMEM: DVA is in bits [63:16]. */
+        s->shmem_dva = (message >> 16) & ~UINT64_C(0xffff);
+        s->a401_pending = false;
+        s->cb_index = 0;
+        s->cb_count = 0;
+        warn_report("apple-modern: dcp-iop v6-resumed SET_SHMEM on %s "
+                    "(user %u, raw %u / 0x%x): msg=0x%" PRIx64
+                    " shmem_dva=0x%" PRIx64
+                    "; replying INITIALIZED with fw_hash=0x15a5c96b",
+                    s->nub_name, (unsigned)ep, raw, raw, message,
+                    s->shmem_dva);
+        apple_rtkit_send_user_msg(APPLE_RTKIT(s), ep,
+                                  UINT64_C(0x000015A5C96B0001));
+        return;
+    }
+
+    if (msg_type == 2) {
+        uint32_t len = (uint32_t)(message >> 32);
+        uint16_t off = (uint16_t)((message >> 16) & 0xffff);
+        uint8_t ctx = (uint8_t)((message >> 8) & 0xf);
+        bool ack = (message & (UINT64_C(1) << 6)) != 0;
+        uint32_t chan_off = 0;
+
+        if (ctx == 4 || ctx == 6) {
+            chan_off = 0x08000;
+        } else if (ctx == 3) {
+            chan_off = 0x40000;
+        } else if (ctx == 7) {
+            chan_off = 0x48000;
+        }
+
+        if (ack) {
+            uint32_t cb_out = 0;
+            const char *which = "none";
+            uint64_t cb_dva = 0;
+            if (ctx == 0 && s->shmem_dva != 0) {
+                dcp_iop_select_dma_as(s, s->shmem_dva + 0x60000 + 12,
+                                      &cb_out, sizeof(cb_out), &which,
+                                      &cb_dva);
+            }
+            warn_report("apple-modern: dcp-iop v6-resumed RPC ACK #%" PRIu64
+                        " on %s: ctx=%u off=0x%x len=0x%x cb_out=0x%x "
+                        "raw_msg=0x%" PRIx64,
+                        s->messages, s->nub_name, ctx, off, len, cb_out,
+                        message);
+            if (ctx == 0 && s->a401_pending) {
+                s->cb_index++;
+                dcp_iop_send_next_startup_cb(s);
+            }
+            return;
+        }
+
+        if (s->shmem_dva != 0 && len >= sizeof(DcpRpcPacketHeader)) {
+            DcpRpcPacketHeader hdr = { 0 };
+            const char *which = "none";
+            uint64_t raw_pkt_dva = s->shmem_dva + chan_off + off;
+            uint64_t pkt_dva = raw_pkt_dva;
+            AddressSpace *as = dcp_iop_select_dma_as(s, raw_pkt_dva, &hdr,
+                                                     sizeof(hdr), &which,
+                                                     &pkt_dva);
+            if (as) {
+                char tag_str[5];
+                uint8_t in_preview[32] = { 0 };
+                char hex_preview[65] = { 0 };
+                uint32_t preview_len = hdr.in_len < sizeof(in_preview) ?
+                                       hdr.in_len : sizeof(in_preview);
+
+                for (int i = 0; i < 4; i++) {
+                    char c = hdr.tag[3 - i];
+                    tag_str[i] = (c >= 0x20 && c <= 0x7e) ? c : '?';
+                }
+                tag_str[4] = '\0';
+
+                if (preview_len > 0) {
+                    dma_memory_read(as, pkt_dva + sizeof(hdr), in_preview,
+                                    preview_len, MEMTXATTRS_UNSPECIFIED);
+                    for (uint32_t i = 0; i < preview_len; i++) {
+                        snprintf(&hex_preview[i * 2], 3, "%02x", in_preview[i]);
+                    }
+                }
+
+                warn_report("apple-modern: dcp-iop v6-resumed RPC #%" PRIu64
+                            " on %s: ctx=%u off=0x%x len=0x%x via=%s "
+                            "tag='%s' in_len=0x%x out_len=0x%x in_hex=%s",
+                            s->messages, s->nub_name, ctx, off, len, which,
+                            tag_str, hdr.in_len, hdr.out_len, hex_preview);
+                warn_report("apple-modern: dcp-iop v6-resumed RPCALL #%" PRIu64
+                            " tag='%s' ctx=%u in_len=%u out_len=%u",
+                            s->messages, tag_str, ctx, hdr.in_len, hdr.out_len);
+
+                if (!strcmp(tag_str, "A352")) {
+                    s->normal_mode_seen = true;
+                }
+
+                if (hdr.in_len > sizeof(in_preview) && hdr.in_len <= 0x4000) {
+                    uint8_t *full_in = g_malloc0(hdr.in_len);
+                    dma_memory_read(as, pkt_dva + sizeof(hdr), full_in,
+                                    hdr.in_len, MEMTXATTRS_UNSPECIFIED);
+                    for (uint32_t off_w = 0; off_w + 8 <= hdr.in_len; off_w += 8) {
+                        uint64_t val = ldq_le_p(full_in + off_w);
+                        if (val != 0 && val != UINT64_C(0xaaaaaaaaaaaaaaaa)) {
+                            warn_report("apple-modern: dcp-iop v6-resumed RPC #%" PRIu64
+                                        " tag='%s' in[+0x%03x]=0x%016" PRIx64,
+                                        s->messages, tag_str, off_w, val);
+                        }
+                        if ((!strcmp(tag_str, "A407") || !strcmp(tag_str, "A408")) &&
+                            (val >> 36) == UINT64_C(0x10) &&
+                            (val & UINT64_C(0xfffffffff)) != 0 &&
+                            s->disp0_dma_as) {
+                            const uint32_t fb_bytes = 1024 * 768 * 4;
+                            uint64_t surf_dva = val & UINT64_C(0xfffffffff);
+                            uint8_t *surf_buf = g_malloc0(fb_bytes);
+                            if (dma_memory_read(s->disp0_dma_as, surf_dva,
+                                                surf_buf, fb_bytes,
+                                                MEMTXATTRS_UNSPECIFIED) ==
+                                MEMTX_OK) {
+                                uint32_t nonzero_rgb = 0;
+                                for (uint32_t px = 0; px < 1024 * 768; px++) {
+                                    if ((ldl_le_p(surf_buf + px * 4) &
+                                         0x00ffffffu) != 0) {
+                                        nonzero_rgb++;
+                                    }
+                                }
+                                warn_report("apple-modern: dcp-iop v6-resumed "
+                                            "%s surface at in[+0x%03x] "
+                                            "dva=0x%" PRIx64 " via=dart-disp0(trunc36) "
+                                            "nonzero_rgb_pixels=%u",
+                                            tag_str, off_w, val, nonzero_rgb);
+                                if (nonzero_rgb > 0 && s->scanout_pa &&
+                                    s->scanout_size >= fb_bytes) {
+                                    address_space_write(&address_space_memory,
+                                                        s->scanout_pa,
+                                                        MEMTXATTRS_UNSPECIFIED,
+                                                        surf_buf, fb_bytes);
+                                }
+                            }
+                            g_free(surf_buf);
+                        }
+                    }
+                    g_free(full_in);
+                }
+
+                if (hdr.out_len > 0 && hdr.out_len <= 0x4000) {
+                    uint64_t out_dva = pkt_dva + sizeof(hdr) + hdr.in_len;
+                    uint8_t *zeros = g_malloc0(hdr.out_len);
+                    /* Methods returning bool_ true on init/display queries */
+                    if (hdr.out_len >= 4 &&
+                        (!strcmp(tag_str, "A000") ||
+                         !strcmp(tag_str, "A002") ||
+                         !strcmp(tag_str, "A020") ||
+                         !strcmp(tag_str, "A024") ||
+                         !strcmp(tag_str, "A030") ||
+                         !strcmp(tag_str, "A031") ||
+                         !strcmp(tag_str, "A032") ||
+                         !strcmp(tag_str, "A035") ||
+                         !strcmp(tag_str, "A036") ||
+                         !strcmp(tag_str, "A037") ||
+                         !strcmp(tag_str, "A043") ||
+                         !strcmp(tag_str, "A115") ||
+                         !strcmp(tag_str, "A116") ||
+                         !strcmp(tag_str, "A130") ||
+                         !strcmp(tag_str, "A131") ||
+                         !strcmp(tag_str, "A132") ||
+                         !strcmp(tag_str, "A204") ||
+                         !strcmp(tag_str, "A352") ||
+                         !strcmp(tag_str, "A381") ||
+                         !strcmp(tag_str, "A401") ||
+                         ((!strcmp(tag_str, "A410") ||
+                           !strcmp(tag_str, "A411")) && hdr.in_len == 0) ||
+                         !strcmp(tag_str, "A454") ||
+                         !strcmp(tag_str, "A455") ||
+                         !strcmp(tag_str, "A456") ||
+                         !strcmp(tag_str, "A463") ||
+                         !strcmp(tag_str, "A465") ||
+                         !strcmp(tag_str, "A466") ||
+                         !strcmp(tag_str, "A468") ||
+                         !strcmp(tag_str, "A473") ||
+                         !strcmp(tag_str, "A474") ||
+                         !strcmp(tag_str, "A475") ||
+                         !strcmp(tag_str, "A479") ||
+                         !strcmp(tag_str, "A485"))) {
+                        zeros[0] = 1;
+                    } else if (!strcmp(tag_str, "A412") && hdr.out_len >= 4) {
+                        /* V14_7+: get_digital_out_state(InOutPtr(uint)) -> connected (1) / is_main_display */
+                        stl_le_p(zeros, 1);
+                    } else if (!strcmp(tag_str, "A437")) {
+                        /* V14_7+: get_block_dcp — timing/param blocks: log id, zeros for now */
+                        warn_report("apple-modern: dcp-iop v6-resumed A437 get_block id=0x%x",
+                                    preview_len >= 4 ? ldl_le_p(in_preview) : 0);
+                    } else if ((!strcmp(tag_str, "A406") ||
+                                (!strcmp(tag_str, "A407") && hdr.in_len < 0x80)) &&
+                               hdr.out_len >= 8) {
+                        /* swap_start(InOutPtr(uint) swap_id, ...) */
+                        if (++s->next_swap_id == 0) {
+                            s->next_swap_id = 1;
+                        }
+                        stl_le_p(zeros, s->next_swap_id);
+                        stl_le_p(zeros + 4, 0);
+                    } else if ((!strcmp(tag_str, "A472") ||
+                                !strcmp(tag_str, "A473") ||
+                                !strcmp(tag_str, "A468") ||
+                                !strcmp(tag_str, "A484")) &&
+                               hdr.out_len >= 8 && preview_len >= 4) {
+                        /*
+                         * setPowerState(ulong powerState, ..., OutPtr(uint) outState, ...)
+                         * Echo requested powerState in out[0..3] and return 0 (kIOReturnSuccess).
+                         */
+                        stl_le_p(zeros, ldl_le_p(in_preview));
+                        stl_le_p(zeros + 4, 0);
+                    } else if (!strcmp(tag_str, "A453")) {
+                        /*
+                         * Native A453 in pinned BootKC a36b9241... is:
+                         * virtual void IOMobileFramebufferShim::get_display_size(uint32_t*, uint32_t*) const
+                         * Output 8 bytes are width (1024) and height (768), with no IOReturn status field.
+                         */
+                        if (hdr.out_len >= 8) {
+                            stl_le_p(zeros, 1024);
+                            stl_le_p(zeros + 4, 768);
+                        }
+                    } else if ((!strcmp(tag_str, "A443") ||
+                                !strcmp(tag_str, "A444") ||
+                                !strcmp(tag_str, "A445") ||
+                                !strcmp(tag_str, "A103")) &&
+                               hdr.out_len >= 8) {
+                        /* get_display_size / get_config_frame_size */
+                        stl_le_p(zeros, 1024);
+                        stl_le_p(zeros + 4, 768);
+                    } else if ((!strcmp(tag_str, "A441") ||
+                                !strcmp(tag_str, "A443") ||
+                                !strcmp(tag_str, "A440") ||
+                                !strcmp(tag_str, "A451") ||
+                                !strcmp(tag_str, "A351") ||
+                                (!strcmp(tag_str, "A442") && hdr.out_len == 4 && preview_len == 0)) &&
+                               hdr.out_len == 4) {
+                        /* display_width() -> uint */
+                        stl_le_p(zeros, 1024);
+                    } else if ((!strcmp(tag_str, "A442") ||
+                                !strcmp(tag_str, "A444") ||
+                                !strcmp(tag_str, "A452") ||
+                                !strcmp(tag_str, "A350")) &&
+                               hdr.out_len == 4) {
+                        /* display_height() -> uint */
+                        stl_le_p(zeros, 768);
+                    }
+                    dma_memory_write(as, out_dva, zeros, hdr.out_len,
+                                     MEMTXATTRS_UNSPECIFIED);
+                    warn_report("apple-modern: dcp-iop v6-resumed RPC #%" PRIu64
+                                " tag='%s' replied out_len=0x%x out_hex=%02x%02x%02x%02x%02x%02x%02x%02x",
+                                s->messages, tag_str, hdr.out_len,
+                                zeros[0], zeros[1], zeros[2], zeros[3],
+                                hdr.out_len > 4 ? zeros[4] : 0,
+                                hdr.out_len > 5 ? zeros[5] : 0,
+                                hdr.out_len > 6 ? zeros[6] : 0,
+                                hdr.out_len > 7 ? zeros[7] : 0);
+                    g_free(zeros);
+                }
+
+                if (ctx == 2 && !strcmp(tag_str, "A401")) {
+                    s->a401_pending = true;
+                    s->a401_ep = ep;
+                    s->pending_rpc_ctx = ctx;
+                    s->cb_index = 0;
+                    s->cb_count = ARRAY_SIZE(dcp_v6_resumed_startup_cbs);
+                    for (unsigned i = 0; i < s->cb_count; i++) {
+                        s->active_cbs[i].tag = dcp_v6_resumed_startup_cbs[i].tag;
+                        s->active_cbs[i].in_len = dcp_v6_resumed_startup_cbs[i].in_len;
+                        s->active_cbs[i].out_len = dcp_v6_resumed_startup_cbs[i].out_len;
+                        s->active_cbs[i].prop_id = dcp_v6_resumed_startup_cbs[i].prop_id;
+                        s->active_cbs[i].prop_key = dcp_v6_resumed_startup_cbs[i].prop_key;
+                        s->active_cbs[i].prop_val32 = dcp_v6_resumed_startup_cbs[i].prop_val32;
+                        s->active_cbs[i].prop_val64 = dcp_v6_resumed_startup_cbs[i].prop_val64;
+                    }
+                    dcp_iop_send_next_startup_cb(s);
+                    return;
+                }
+
+                if ((!strcmp(tag_str, "A200") || !strcmp(tag_str, "A201") ||
+                     !strcmp(tag_str, "A352")) &&
+                    preview_len >= 5 && !s->a401_pending) {
+                    uint32_t prop_id = ldl_le_p(in_preview);
+                    uint32_t prop_val = (preview_len >= 8) ?
+                                        ldl_le_p(in_preview + 4) :
+                                        (in_preview[4] ? 1u : 0u);
+                    if (!strcmp(tag_str, "A200")) {
+                        prop_val = in_preview[4] ? 1u : 0u;
+                    }
+                    memset(s->active_cbs, 0, sizeof(s->active_cbs));
+                    s->active_cbs[0].tag = "D300";
+                    s->active_cbs[0].in_len = 0x10;
+                    s->active_cbs[0].out_len = 0;
+                    s->active_cbs[0].prop_id = prop_id;
+                    s->active_cbs[0].prop_val32 = prop_val;
+                    s->active_cbs[0].prop_val64 = prop_val;
+                    s->cb_count = 1;
+                    if (prop_id == 124) {
+                        s->active_cbs[1].tag = "D104";
+                        s->active_cbs[1].in_len = 0x44;
+                        s->active_cbs[1].out_len = 0;
+                        s->active_cbs[1].prop_key = "NormalModeActive";
+                        s->active_cbs[1].prop_val32 = prop_val ? 1u : 0u;
+                        s->cb_count = 2;
+                        if (prop_val != 0) {
+                            /* NormalModeEnable = 1: emit hotplug attach, powerstate, backlight, and console mode */
+                            s->active_cbs[2].tag = "D576";
+                            s->active_cbs[2].in_len = 0x54;
+                            s->active_cbs[2].out_len = 0;
+                            dcp_iop_fill_hotplug_payload(s->active_cbs[2].payload, 1024, 768);
+                            s->active_cbs[2].payload_len = 0x54;
+
+                            s->active_cbs[3].tag = "D577";
+                            s->active_cbs[3].in_len = 8;
+                            s->active_cbs[3].out_len = 0;
+                            stl_le_p(s->active_cbs[3].payload, 1);
+                            stl_le_p(s->active_cbs[3].payload + 4, 1);
+                            s->active_cbs[3].payload_len = 8;
+
+                            s->active_cbs[4].tag = "D593";
+                            s->active_cbs[4].in_len = 4;
+                            s->active_cbs[4].out_len = 0;
+                            stl_le_p(s->active_cbs[4].payload, 1);
+                            s->active_cbs[4].payload_len = 4;
+
+                            s->active_cbs[5].tag = "D594";
+                            s->active_cbs[5].in_len = 4;
+                            s->active_cbs[5].out_len = 0;
+                            stl_le_p(s->active_cbs[5].payload, 0);
+                            s->active_cbs[5].payload_len = 4;
+
+                            s->cb_count = 6;
+                        }
+                    }
+                    s->a401_pending = true;
+                    s->a401_ep = ep;
+                    s->pending_rpc_ctx = ctx;
+                    s->cb_index = 0;
+                    dcp_iop_send_next_startup_cb(s);
+                    return;
+                }
+
+                uint64_t ack_msg = UINT64_C(2) | (UINT64_C(1) << 6) |
+                                   ((uint64_t)ctx << 8);
+                apple_rtkit_send_user_msg(APPLE_RTKIT(s), ep, ack_msg);
+                return;
+            }
+            warn_report("apple-modern: dcp-iop v6-resumed RPC #%" PRIu64
+                        " DMA read failed at dva=0x%" PRIx64
+                        " (ctx=%u off=0x%x len=0x%x)",
+                        s->messages, pkt_dva, ctx, off, len);
+        }
+    }
+}
 
 static void dcp_iop_handle_message(void *opaque, uint8_t ep, uint64_t message)
 {
     AppleModernDcpIop *s = opaque;
+    unsigned raw = (unsigned)ep + APPLE_MODERN_DCP_IOP_EP_USER_START;
 
     s->messages++;
     /*
-     * Declared: nothing behind the endpoint is implemented.  The first message
-     * is reported once so the frontier is visible; the rest are counted and
-     * flagged as unimplemented rather than silently dropped.
+     * Declared: nothing behind the endpoint is implemented in baseline modes.
+     * The first message is reported once so the frontier is visible; the rest
+     * are counted and flagged as unimplemented rather than silently dropped.
      */
     if (s->messages == 1) {
-        warn_report("apple-modern: dcp-iop endpoint %s (raw %u) received its "
-                    "FIRST guest message 0x%" PRIx64 "; no DCP message "
-                    "semantics are implemented and no reply is sent",
-                    s->nub_name, s->endpoint_raw, message);
+        warn_report("apple-modern: dcp-iop endpoint %s (user %u, raw %u / 0x%x) "
+                    "received its FIRST guest message 0x%" PRIx64 "; no DCP "
+                    "message semantics are implemented and no reply is sent",
+                    s->nub_name, (unsigned)ep, raw, raw, message);
+    }
+    if (s->dual_endpoints && raw == s->endpoint_raw) {
+        dcp_iop_handle_v6_resumed_rpc(s, ep, raw, message);
     }
     qemu_log_mask(LOG_UNIMP,
                   "apple-modern dcp-iop: unimplemented message #%" PRIu64
-                  " on user endpoint %u (raw %u): 0x%" PRIx64 "\n",
-                  s->messages, ep, s->endpoint_raw, message);
+                  " on user endpoint %u (raw %u / 0x%x): 0x%" PRIx64 "\n",
+                  s->messages, ep, raw, raw, message);
 }
 
 static void dcp_iop_boot_done(void *opaque)
@@ -538,10 +1210,19 @@ static void dcp_iop_boot_done(void *opaque)
     AppleModernDcpIop *s = opaque;
 
     s->rollcall_done = true;
-    warn_report("apple-modern: dcp-iop RTKit roll-call COMPLETED; the guest "
-                "was told about raw endpoint %u, so RTBuddy should publish a "
-                "RTBuddyEndpointService nub named \"%s\"",
-                s->endpoint_raw, s->nub_name);
+    if (s->dual_endpoints) {
+        warn_report("apple-modern: dcp-iop RTKit roll-call COMPLETED; the guest "
+                    "was told about raw endpoints %u (0x%x) and %u (0x%x), so "
+                    "RTBuddy should publish RTBuddyEndpointService nubs "
+                    "including \"%s\"",
+                    s->endpoint_raw, s->endpoint_raw,
+                    s->endpoint_raw + 1, s->endpoint_raw + 1, s->nub_name);
+    } else {
+        warn_report("apple-modern: dcp-iop RTKit roll-call COMPLETED; the guest "
+                    "was told about raw endpoint %u, so RTBuddy should publish a "
+                    "RTBuddyEndpointService nub named \"%s\"",
+                    s->endpoint_raw, s->nub_name);
+    }
 }
 
 /*
@@ -628,6 +1309,61 @@ static const MemoryRegionOps dcp_expert_control_ops = {
     .impl = { .min_access_size = 4, .max_access_size = 4 },
 };
 
+/* Declared ASC core-register window (/arm-io/dcp reg[1]) for v6-resumed:
+ * bit 0 at offset 0 mirrors modern-smc's smc_loaded_read (host-simulated
+ * firmware-loaded claim for AppleASCWrapV6). */
+static uint64_t dcp_core_read(void *opaque, hwaddr offset, unsigned size)
+{
+    uint64_t val = (offset == 0) ? 1 : 0;
+    (void)opaque;
+    qemu_log_mask(LOG_UNIMP, "DCP-CORE read offset 0x%" PRIx64
+                  " size %u value 0x%" PRIx64 "\n",
+                  (uint64_t)offset, size, val);
+    return val;
+}
+
+static void dcp_core_write(void *opaque, hwaddr offset, uint64_t value,
+                           unsigned size)
+{
+    (void)opaque;
+    qemu_log_mask(LOG_UNIMP, "DCP-CORE write offset 0x%" PRIx64
+                  " size %u value 0x%" PRIx64 "\n",
+                  (uint64_t)offset, size, value);
+}
+
+static const MemoryRegionOps dcp_core_ops = {
+    .read = dcp_core_read,
+    .write = dcp_core_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 8 },
+};
+
+static uint64_t dcp_segment_read(void *opaque, hwaddr offset, unsigned size)
+{
+    (void)opaque;
+    qemu_log_mask(LOG_UNIMP, "DCP-SEGMENT read offset 0x%" PRIx64 " size %u\n",
+                  (uint64_t)offset, size);
+    return 0;
+}
+
+static void dcp_segment_write(void *opaque, hwaddr offset, uint64_t value,
+                              unsigned size)
+{
+    (void)opaque;
+    qemu_log_mask(LOG_UNIMP, "DCP-SEGMENT write offset 0x%" PRIx64
+                  " size %u value 0x%" PRIx64 "\n",
+                  (uint64_t)offset, size, value);
+}
+
+static const MemoryRegionOps dcp_segment_ops = {
+    .read = dcp_segment_read,
+    .write = dcp_segment_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .impl = { .min_access_size = 1, .max_access_size = 8 },
+};
+
 DeviceState *apple_modern_dcp_iop_new(const AppleModernDcpIopPlan *plan,
                                       unsigned mode)
 {
@@ -646,12 +1382,14 @@ DeviceState *apple_modern_dcp_iop_new(const AppleModernDcpIopPlan *plan,
     s = APPLE_MODERN_DCP_IOP(dev);
     s->prestarted = mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED ||
                     mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED_QUIESCED;
+    s->dual_endpoints = mode == APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED;
     s->endpoint_user = plan->endpoint_user;
     s->endpoint_raw = plan->endpoint_raw;
     snprintf(s->nub_name, sizeof(s->nub_name), "%s", plan->nub_name);
     apple_rtkit_init(APPLE_RTKIT(dev), s, plan->role, plan->wrapper_size,
                      version, &dcp_iop_rtkit_ops);
-    if (mode == APPLE_MODERN_DCP_IOP_MODE_V6_EXPERT_START) {
+    if (mode == APPLE_MODERN_DCP_IOP_MODE_V6_EXPERT_START ||
+        mode == APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED) {
         s->expert_control_on = plan->expert_control_on;
         s->expert_control_off = plan->expert_control_off;
         s->expert_control_value = s->expert_control_off;
@@ -660,13 +1398,43 @@ DeviceState *apple_modern_dcp_iop_new(const AppleModernDcpIopPlan *plan,
                                "apple-modern.dcp-expert-control", 4);
         sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->expert_control);
     }
+    if (mode == APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED) {
+        memory_region_init_io(&s->core_regs, OBJECT(s), &dcp_core_ops, s,
+                              "apple-modern.dcp-core", plan->core_size);
+        sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->core_regs);
+        memory_region_init_io(&s->segment_sram, OBJECT(s), &dcp_segment_ops, s,
+                              "apple-modern.dcp-segment", plan->segment_size);
+        sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->segment_sram);
+    }
     /*
      * USER-RELATIVE index: the a7iop layer adds EP_USER_START itself.  Never
      * hand-compute the raw number here; the plan carries it only to report it.
+     * In v6-resumed mode, publish both candidate user endpoints (23 -> raw
+     * 0x37 and 24 -> raw 0x38) per project-memory/iomfb-pixels-touch-route.md.
      */
     apple_rtkit_register_user_ep(APPLE_RTKIT(dev), plan->endpoint_user, s,
                                  dcp_iop_handle_message);
+    if (s->dual_endpoints) {
+        apple_rtkit_register_user_ep(APPLE_RTKIT(dev), plan->endpoint_user + 1,
+                                     s, dcp_iop_handle_message);
+    }
     return dev;
+}
+
+void apple_modern_dcp_iop_set_dma(DeviceState *dev, AddressSpace *dcp_dma_as,
+                                  AddressSpace *disp0_dma_as)
+{
+    AppleModernDcpIop *s = APPLE_MODERN_DCP_IOP(dev);
+    s->dcp_dma_as = dcp_dma_as;
+    s->disp0_dma_as = disp0_dma_as;
+}
+
+void apple_modern_dcp_iop_set_scanout(DeviceState *dev, uint64_t scanout_pa,
+                                      uint64_t scanout_size)
+{
+    AppleModernDcpIop *s = APPLE_MODERN_DCP_IOP(dev);
+    s->scanout_pa = scanout_pa;
+    s->scanout_size = scanout_size;
 }
 
 static const VMStateDescription vmstate_apple_modern_dcp_iop = {
@@ -694,6 +1462,12 @@ static void dcp_iop_reset_hold(Object *obj, ResetType type)
     s->reset_start = false;
     s->expert_start = false;
     s->expert_control_value = s->expert_control_off;
+    s->next_swap_id = 0;
+    s->shmem_dva = 0;
+    s->a401_pending = false;
+    s->a401_ep = 0;
+    s->cb_index = 0;
+    s->normal_mode_seen = false;
 }
 
 static void dcp_iop_reset_exit(Object *obj, ResetType type)

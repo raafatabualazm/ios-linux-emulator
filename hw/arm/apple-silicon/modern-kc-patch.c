@@ -528,3 +528,608 @@ bool apple_modern_kc_md0_width_compat(uint8_t *bootkc, size_t len,
     }
     return true;
 }
+
+/* ------------------------------------------------------------------------- *
+ * Root-remount read/write compatibility (opt-in; see modern-kc-patch.h for
+ * the published-source root cause in bsd/vfs/vfs_syscalls.c:1066-1092).
+ * ------------------------------------------------------------------------- */
+
+/* LDRB Wt, [Xn, #84]  (struct vnode.v_flag at +84, bsd/sys/vnode_internal.h) */
+#define LDRB_W_84_MASK      0xFFFFFC00u
+#define LDRB_W_84_VAL       0x39415000u
+/* TBZ Wt, #0, label   (vp->v_flag & VROOT) */
+#define TBZ_W_BIT0_MASK     0xFFF80000u
+#define TBZ_W_BIT0_VAL      0x36000000u
+/* LDRB Wt, [Xn, #113] (byte +1 of struct mount.mnt_flag at +112) */
+#define LDRB_W_113_MASK     0xFFFFFC00u
+#define LDRB_W_113_VAL      0x3941C400u
+/* TBNZ Wt, #6, label  (vp->v_mount->mnt_flag & MNT_ROOTFS) */
+#define TBNZ_W_BIT6_MASK    0xFFF80000u
+#define TBNZ_W_BIT6_VAL     0x37300000u
+/* ORR Wd, Wn, #0x10000 (flags |= MNT_UPDATE) */
+#define ORR_W_10000_MASK    0xFFFFFC00u
+#define ORR_W_10000_VAL     0x32100000u
+/* TBNZ Wt, #0, label  (flags & MNT_RDONLY) */
+#define TBNZ_W_BIT0_MASK    0xFFF80000u
+#define TBNZ_W_BIT0_VAL     0x37000000u
+/* MOVZ Wd, #1         (error = EPERM) */
+#define MOVZ_W_1_MASK       0xFFFFFFE0u
+#define MOVZ_W_1_VAL        0x52800020u
+/* B label             (unconditional branch) */
+#define B_UNCOND_VAL        0x14000000u
+
+static bool match_mac_mount_root_check(const uint8_t *text, uint64_t off,
+                                       uint64_t total_size,
+                                       uint64_t *update_off_out)
+{
+    uint32_t w0, w1, w6, w7, t0, t1, t2;
+    int32_t imm14;
+    uint64_t target_off;
+
+    if (off + 32 > total_size) {
+        return false;
+    }
+    w0 = ldl_le_p(text + off);
+    w1 = ldl_le_p(text + off + 4);
+    w6 = ldl_le_p(text + off + 24);
+    w7 = ldl_le_p(text + off + 28);
+
+    if ((w0 & LDRB_W_84_MASK) != LDRB_W_84_VAL ||
+        (w1 & TBZ_W_BIT0_MASK) != TBZ_W_BIT0_VAL ||
+        INSN_RD(w1) != INSN_RD(w0)) {
+        return false;
+    }
+    if ((w6 & LDRB_W_113_MASK) != LDRB_W_113_VAL ||
+        (w7 & TBNZ_W_BIT6_MASK) != TBNZ_W_BIT6_VAL ||
+        INSN_RD(w7) != INSN_RD(w6)) {
+        return false;
+    }
+
+    imm14 = ((int32_t)(w7 << 13)) >> 18;
+    if (imm14 <= 0) {
+        return false;
+    }
+    target_off = off + 28 + (uint64_t)imm14 * 4u;
+    if (target_off + 12 > total_size) {
+        return false;
+    }
+
+    t0 = ldl_le_p(text + target_off);
+    t1 = ldl_le_p(text + target_off + 4);
+    t2 = ldl_le_p(text + target_off + 8);
+
+    if ((t0 & ORR_W_10000_MASK) != ORR_W_10000_VAL ||
+        (t1 & TBNZ_W_BIT0_MASK) != TBNZ_W_BIT0_VAL ||
+        INSN_RD(t1) != INSN_RN(t0) ||
+        (t2 & MOVZ_W_1_MASK) != MOVZ_W_1_VAL) {
+        return false;
+    }
+
+    *update_off_out = target_off;
+    return true;
+}
+
+/*
+ * vfs_rootmountalloc_internal (bsd/vfs/vfs_subr.c:1145-1150):
+ *   movz  Wa, #0xb7fe           ; low 16 of MNT_VISFLAGMASK & ~(MNT_RDONLY|MNT_ROOTFS)
+ *   movk  Wa, #0xdff0, lsl #16  ; high 16 of 0xdff0b7fe
+ *   and   Wb, Wc, Wa
+ *   movz  Wd, #0x4001           ; MNT_RDONLY | MNT_ROOTFS
+ *   orr   We, Wb, Wd
+ *   str   We, [Xmp, #112]       ; mp->mnt_flag
+ */
+static bool match_rootmountalloc(const uint8_t *text, uint64_t off,
+                                 uint64_t left)
+{
+    uint32_t w[6], reg_a, reg_b, reg_d, reg_e;
+
+    if (left < 24) {
+        return false;
+    }
+    for (unsigned i = 0; i < 6; i++) {
+        w[i] = ldl_le_p(text + off + i * 4);
+    }
+    if ((w[0] & 0xFFFFFFE0u) != 0x5296FFC0u ||
+        (w[1] & 0xFFFFFFE0u) != 0x72BBFE00u ||
+        INSN_RD(w[1]) != INSN_RD(w[0])) {
+        return false;
+    }
+    reg_a = INSN_RD(w[0]);
+    if ((w[2] & 0xFFE0FC00u) != 0x0A000000u ||
+        (INSN_RM(w[2]) != reg_a && INSN_RN(w[2]) != reg_a)) {
+        return false;
+    }
+    reg_b = INSN_RD(w[2]);
+    if ((w[3] & 0xFFFFFFE0u) != 0x52880020u) {
+        return false;
+    }
+    reg_d = INSN_RD(w[3]);
+    if ((w[4] & 0xFFE0FC00u) != 0x2A000000u) {
+        return false;
+    }
+    if (!((INSN_RN(w[4]) == reg_b && INSN_RM(w[4]) == reg_d) ||
+          (INSN_RN(w[4]) == reg_d && INSN_RM(w[4]) == reg_b))) {
+        return false;
+    }
+    reg_e = INSN_RD(w[4]);
+    if ((w[5] & 0xFFFFFC00u) != 0xB9007000u || INSN_RD(w[5]) != reg_e) {
+        return false;
+    }
+    return true;
+}
+
+bool apple_modern_kc_root_rw_compat(uint8_t *bootkc, size_t len,
+                                    AppleModernRootRwPatch *out,
+                                    Error **errp)
+{
+    uint64_t kernel, texec_off, texec_size;
+    uint64_t check_anchor = 0, update_anchor = 0, rma_anchor = 0;
+    unsigned hits = 0, rma_hits = 0;
+    uint32_t before, after, rma_before, rma_after;
+    int32_t disp;
+
+    if (!bootkc) {
+        error_setg(errp, "root-rw-compat: no kernel cache");
+        return false;
+    }
+    if (!find_fileset_entry(bootkc, len, "com.apple.kernel", &kernel)) {
+        error_setg(errp, "root-rw-compat: com.apple.kernel fileset entry "
+                   "not found");
+        return false;
+    }
+    if (!find_segment(bootkc, len, kernel, "__TEXT_EXEC", NULL,
+                      &texec_off, &texec_size)) {
+        error_setg(errp, "root-rw-compat: kernel __TEXT_EXEC not found");
+        return false;
+    }
+    if (texec_off > len || texec_size > len - texec_off ||
+        (texec_off & 3) != 0 || texec_size < 32) {
+        error_setg(errp, "root-rw-compat: kernel __TEXT_EXEC outside image "
+                   "or unaligned");
+        return false;
+    }
+
+    for (uint64_t off = 0; off + 24 <= texec_size; off += 4) {
+        uint64_t uoff = 0;
+
+        if (off + 32 <= texec_size &&
+            match_mac_mount_root_check(bootkc + texec_off, off, texec_size,
+                                       &uoff)) {
+            hits++;
+            check_anchor = texec_off + off;
+            update_anchor = texec_off + uoff;
+        }
+        if (match_rootmountalloc(bootkc + texec_off, off, texec_size - off)) {
+            rma_hits++;
+            rma_anchor = texec_off + off;
+        }
+    }
+    if (rma_hits != 1) {
+        error_setg(errp, "root-rw-compat: vfs_rootmountalloc_internal anchor "
+                   "matched %u times in the kernel __TEXT_EXEC, expected "
+                   "exactly 1; refusing to patch", rma_hits);
+        return false;
+    }
+    if (hits != 1) {
+        error_setg(errp, "root-rw-compat: __mac_mount root-update anchor "
+                   "matched %u times in the kernel __TEXT_EXEC, expected "
+                   "exactly 1; refusing to patch", hits);
+        return false;
+    }
+
+    /*
+     * vfs_rootmountalloc_internal (bsd/vfs/vfs_subr.c:1147):
+     *   MOVZ Wd, #0x4001 (MNT_RDONLY | MNT_ROOTFS) -> MOVZ Wd, #0
+     * so apfs_vfsop_mountroot / apfs_mount_livefs mounts the root volume
+     * read/write during vfs_mountroot(), and bsd_init() (bsd/kern/bsd_init.c:918)
+     * then sets mountlist.tqh_first->mnt_flag |= MNT_ROOTFS immediately after
+     * vfs_mountroot() returns 0.
+     */
+    rma_before = ldl_le_p(bootkc + rma_anchor + 12);
+    rma_after = 0x52800000u | INSN_RD(rma_before);
+    stl_le_p(bootkc + rma_anchor + 12, rma_after);
+
+    before = ldl_le_p(bootkc + update_anchor + 4);
+    disp = ((int32_t)(before << 13)) >> 18;
+    after = B_UNCOND_VAL | ((uint32_t)disp & 0x03FFFFFFu);
+    stl_le_p(bootkc + update_anchor + 4, after);
+
+    if (out) {
+        out->rootmountalloc_anchor = rma_anchor;
+        out->rootmountalloc_before = rma_before;
+        out->rootmountalloc_after = rma_after;
+        out->check_anchor = check_anchor;
+        out->update_anchor = update_anchor;
+        out->insn_before = before;
+        out->insn_after = after;
+    }
+    return true;
+}
+
+#define INSN_RET            0xd65f03c0u
+#define TXM_SC_FN_VA        UINT64_C(0xfffffff017033d00)
+#define TXM_SC_GLOBAL_VA    UINT64_C(0xfffffff017088db0)
+/* ADRP Xd, 0xfffffff017088000 from PC page 0xfffffff017033000 (+0x55 pages) */
+#define ADRP_TXM_SC_MASK    0xffffffe0u
+#define ADRP_TXM_SC_VAL     0xb00002a0u
+
+static bool find_segment_and_section_va(const uint8_t *buf, size_t len, uint64_t image_base,
+                                        const char *seg, const char *sect,
+                                        uint64_t *out_va, uint64_t *out_vmsize,
+                                        uint64_t *out_off, uint64_t *out_size)
+{
+    uint32_t magic, ncmds;
+    uint64_t cursor;
+    size_t seglen = strlen(seg);
+
+    if (!rd32(buf, len, image_base, &magic) || magic != MH_MAGIC_64 ||
+        !rd32(buf, len, image_base + 16, &ncmds) || ncmds > 4096) {
+        return false;
+    }
+    cursor = image_base + 32;
+    for (uint32_t i = 0; i < ncmds; i++) {
+        uint32_t cmd, cmdsize;
+
+        if (!rd32(buf, len, cursor, &cmd) ||
+            !rd32(buf, len, cursor + 4, &cmdsize) ||
+            cmdsize < 8 || cmdsize > len - cursor) {
+            return false;
+        }
+        if (cmd == LC_SEGMENT_64 && cmdsize >= SEG_CMD_MIN && seglen < 16 &&
+            !memcmp(buf + cursor + 8, seg, seglen) &&
+            buf[cursor + 8 + seglen] == '\0') {
+            uint64_t fileoff, filesize, va, vmsize;
+            uint32_t nsects;
+
+            if (!rd64(buf, len, cursor + 24, &va) ||
+                !rd64(buf, len, cursor + 32, &vmsize) ||
+                !rd64(buf, len, cursor + 40, &fileoff) ||
+                !rd64(buf, len, cursor + 48, &filesize) ||
+                !rd32(buf, len, cursor + 64, &nsects)) {
+                return false;
+            }
+            if (!sect) {
+                *out_va = va;
+                *out_vmsize = vmsize;
+                *out_off = fileoff;
+                *out_size = filesize;
+                return true;
+            }
+            if (nsects > (cmdsize - SEG_CMD_MIN) / SECTION_64_SIZE) {
+                return false;
+            }
+            for (uint32_t s = 0; s < nsects; s++) {
+                uint64_t so = cursor + SEG_CMD_MIN + (uint64_t)s * SECTION_64_SIZE;
+                uint64_t s_vmaddr, s_vmsize;
+                uint32_t soff;
+
+                if (so + 48 > len || buf[so + 16 + 15] != '\0' ||
+                    strcmp((const char *)(buf + so), sect) != 0) {
+                    continue;
+                }
+                if (!rd64(buf, len, so + 32, &s_vmaddr) ||
+                    !rd64(buf, len, so + 40, &s_vmsize) ||
+                    !rd32(buf, len, so + 48, &soff)) {
+                    return false;
+                }
+                *out_va = s_vmaddr;
+                *out_vmsize = s_vmsize;
+                *out_off = soff;
+                *out_size = s_vmsize;
+                return true;
+            }
+            return false;
+        }
+        cursor += cmdsize;
+    }
+    return false;
+}
+
+static bool find_segment_va(const uint8_t *buf, size_t len, uint64_t image_base,
+                            const char *seg, uint64_t *out_va,
+                            uint64_t *out_vmsize, uint64_t *out_off,
+                            uint64_t *out_size)
+{
+    return find_segment_and_section_va(buf, len, image_base, seg, NULL,
+                                       out_va, out_vmsize, out_off, out_size);
+}
+
+bool apple_modern_txm_sc_compat(uint8_t *txm, size_t len,
+                                AppleModernTxmScPatch *out,
+                                Error **errp)
+{
+    uint64_t texec_va = 0, texec_vmsize = 0, texec_off = 0, texec_size = 0;
+    uint64_t data_va = 0, data_vmsize = 0, data_off = 0, data_size = 0;
+    uint64_t fn_off;
+    uint32_t w0, w1, w2;
+
+    if (!txm) {
+        error_setg(errp, "txm-sc-compat: no TXM image");
+        return false;
+    }
+    if (!find_segment_va(txm, len, 0, "__TEXT_EXEC", &texec_va, &texec_vmsize,
+                         &texec_off, &texec_size) ||
+        !find_segment_va(txm, len, 0, "__DATA", &data_va, &data_vmsize,
+                         &data_off, &data_size)) {
+        error_setg(errp, "txm-sc-compat: TXM __TEXT_EXEC or __DATA not found");
+        return false;
+    }
+    if (texec_off > len || texec_size > len - texec_off ||
+        (texec_off & 3) != 0 || texec_size < 16) {
+        error_setg(errp, "txm-sc-compat: TXM __TEXT_EXEC outside image");
+        return false;
+    }
+    if (TXM_SC_FN_VA < texec_va ||
+        TXM_SC_FN_VA - texec_va > texec_size - 12) {
+        error_setg(errp, "txm-sc-compat: target VA 0x%" PRIx64 " outside "
+                   "TXM __TEXT_EXEC", TXM_SC_FN_VA);
+        return false;
+    }
+    if (TXM_SC_GLOBAL_VA < data_va ||
+        TXM_SC_GLOBAL_VA - data_va > data_vmsize - 4) {
+        error_setg(errp, "txm-sc-compat: global VA 0x%" PRIx64 " outside "
+                   "TXM __DATA", TXM_SC_GLOBAL_VA);
+        return false;
+    }
+
+    fn_off = texec_off + (TXM_SC_FN_VA - texec_va);
+    w0 = ldl_le_p(txm + fn_off);
+    w1 = ldl_le_p(txm + fn_off + 4);
+    w2 = ldl_le_p(txm + fn_off + 8);
+
+    if ((w0 != INSN_BTI_C && w0 != INSN_PACIBSP) ||
+        ((w1 & ADRP_TXM_SC_MASK) != ADRP_TXM_SC_VAL &&
+         (w2 & ADRP_TXM_SC_MASK) != ADRP_TXM_SC_VAL)) {
+        error_setg(errp, "txm-sc-compat: unexpected instructions at 0x%" PRIx64
+                   " (file +0x%" PRIx64 "): 0x%08x 0x%08x 0x%08x",
+                   TXM_SC_FN_VA, fn_off, w0, w1, w2);
+        return false;
+    }
+
+    stl_le_p(txm + fn_off + 4, MOVZ_W_1_VAL);
+    stl_le_p(txm + fn_off + 8, INSN_RET);
+
+    if (out) {
+        out->anchor = fn_off;
+        out->prologue = w0;
+        out->insn_before[0] = w1;
+        out->insn_before[1] = w2;
+        out->insn_after[0] = MOVZ_W_1_VAL;
+        out->insn_after[1] = INSN_RET;
+    }
+    return true;
+}
+
+bool apple_modern_kc_iouc_sandbox_compat(uint8_t *bootkc, size_t len,
+                                         AppleModernIoucPatch *out,
+                                         Error **errp)
+{
+    uint64_t kernel = 0;
+    uint64_t texec_va = 0, texec_vmsize = 0, texec_off = 0, texec_size = 0;
+    uint64_t cstr_va = 0, cstr_vmsize = 0, cstr_off = 0, cstr_size = 0;
+    const char *sb_needle = "IOUC %s failed sandbox in process %s\n";
+    size_t sb_needle_len = strlen(sb_needle);
+    uint64_t sb_str_off = 0;
+    uint64_t sb_xref_off = 0;
+    unsigned sb_xref_hits = 0;
+    uint64_t kio_off = 0;
+    uint64_t beq_off = 0, allow_pc = 0;
+    uint64_t cbnz_off = 0, deny_pc = 0, deny_fo = 0;
+    uint32_t b_allow_insn = 0;
+    int64_t disp_bytes = 0, disp_insns = 0;
+
+    const char *macf_needle = "IOUC %s failed MACF in process %s\n";
+    size_t macf_needle_len = strlen(macf_needle);
+    uint64_t macf_str_off = 0;
+    uint64_t macf_xref_off = 0;
+    unsigned macf_xref_hits = 0;
+    uint64_t macf_cbz_off = 0, macf_allow_pc = 0;
+    uint32_t b_macf_allow_insn = 0;
+    int64_t disp_macf_bytes = 0, disp_macf_insns = 0;
+
+    if (!bootkc) {
+        error_setg(errp, "iouc-sandbox-compat: no kernel cache");
+        return false;
+    }
+    if (!find_fileset_entry(bootkc, len, "com.apple.kernel", &kernel)) {
+        error_setg(errp, "iouc-sandbox-compat: com.apple.kernel fileset entry not found");
+        return false;
+    }
+    if (!find_segment_and_section_va(bootkc, len, kernel, "__TEXT_EXEC", NULL,
+                                     &texec_va, &texec_vmsize, &texec_off, &texec_size) ||
+        !find_segment_and_section_va(bootkc, len, kernel, "__TEXT", "__cstring",
+                                     &cstr_va, &cstr_vmsize, &cstr_off, &cstr_size)) {
+        error_setg(errp, "iouc-sandbox-compat: kernel __TEXT_EXEC or __cstring not found");
+        return false;
+    }
+    if (texec_off > len || texec_size > len - texec_off ||
+        cstr_off > len || cstr_size > len - cstr_off ||
+        (texec_off & 3) != 0 || texec_size < 32) {
+        error_setg(errp, "iouc-sandbox-compat: segments misaligned or outside image");
+        return false;
+    }
+
+    /* 1. Sandbox string in __cstring */
+    for (uint64_t i = 0; i + sb_needle_len + 1 <= cstr_size; i++) {
+        if (!memcmp(bootkc + cstr_off + i, sb_needle, sb_needle_len + 1)) {
+            sb_str_off = cstr_off + i;
+            break;
+        }
+    }
+    if (!sb_str_off) {
+        error_setg(errp, "iouc-sandbox-compat: sandbox failure string not found");
+        return false;
+    }
+    uint64_t sb_str_va = cstr_va + (sb_str_off - cstr_off);
+    uint64_t sb_page = sb_str_va & ~0xfffULL;
+    uint64_t sb_page_off = sb_str_va & 0xfffULL;
+
+    /* 2. ADRP+ADD xref in __TEXT_EXEC */
+    for (uint64_t off = 0; off + 8 <= texec_size; off += 4) {
+        uint64_t pc = texec_va + off;
+        uint64_t pc_page = pc & ~0xfffULL;
+        uint32_t w = ldl_le_p(bootkc + texec_off + off);
+        if ((w & 0x9f000000u) == 0x90000000u) {
+            uint32_t immlo = (w >> 29) & 3u;
+            uint32_t immhi = (w >> 5) & 0x7ffffu;
+            int64_t imm = (int64_t)((immhi << 2) | immlo);
+            if (imm & 0x100000) {
+                imm -= 0x200000;
+            }
+            if ((uint64_t)((int64_t)pc_page + (imm << 12)) == sb_page) {
+                uint32_t nw = ldl_le_p(bootkc + texec_off + off + 4);
+                if ((nw & 0xffc00000u) == 0x91000000u) {
+                    uint32_t add_imm12 = (nw >> 10) & 0xfffu;
+                    if (add_imm12 == sb_page_off) {
+                        sb_xref_hits++;
+                        sb_xref_off = texec_off + off;
+                    }
+                }
+            }
+        }
+    }
+    if (sb_xref_hits != 1) {
+        error_setg(errp, "iouc-sandbox-compat: sandbox xref matched %u times, expected 1", sb_xref_hits);
+        return false;
+    }
+
+    /* 3. Search backward for MOVZ Wn, #0x2c7 ; MOVK Wn, #0xe000, LSL #16 */
+    for (uint64_t back = 4; back <= 160 && sb_xref_off >= texec_off + back; back += 4) {
+        uint64_t cand = sb_xref_off - back;
+        uint32_t w1 = ldl_le_p(bootkc + cand);
+        uint32_t w2 = ldl_le_p(bootkc + cand + 4);
+        if ((w1 & 0xffffffe0u) == 0x528058e0u && (w2 & 0xffffffe0u) == 0x72bc0000u) {
+            kio_off = cand;
+            break;
+        }
+    }
+    if (!kio_off) {
+        error_setg(errp, "iouc-sandbox-compat: kIOReturnNotPermitted immediate not found");
+        return false;
+    }
+
+    /* 4. Find B.EQ */
+    for (uint64_t fwd = 8; fwd <= 24 && kio_off + fwd < texec_off + texec_size; fwd += 4) {
+        uint64_t cand = kio_off + fwd;
+        uint32_t w = ldl_le_p(bootkc + cand);
+        if ((w & 0xff00001fu) == 0x54000000u) {
+            int32_t imm19 = ((int32_t)(w << 8)) >> 13;
+            uint64_t pc = texec_va + (cand - texec_off);
+            allow_pc = pc + (int64_t)imm19 * 4;
+            beq_off = cand;
+            break;
+        }
+    }
+    if (!beq_off) {
+        error_setg(errp, "iouc-sandbox-compat: B.EQ allow branch not found");
+        return false;
+    }
+
+    /* 5. Find CBNZ */
+    for (uint64_t fwd = 4; fwd <= 16 && beq_off + fwd < texec_off + texec_size; fwd += 4) {
+        uint64_t cand = beq_off + fwd;
+        uint32_t w = ldl_le_p(bootkc + cand);
+        if ((w & 0xff000000u) == 0x35000000u) {
+            int32_t imm19 = ((int32_t)(w << 8)) >> 13;
+            uint64_t pc = texec_va + (cand - texec_off);
+            deny_pc = pc + (int64_t)imm19 * 4;
+            cbnz_off = cand;
+            break;
+        }
+    }
+    if (!cbnz_off) {
+        error_setg(errp, "iouc-sandbox-compat: CBNZ deny branch not found");
+        return false;
+    }
+    deny_fo = texec_off + (deny_pc - texec_va);
+    if (deny_fo >= sb_xref_off || deny_fo < texec_off) {
+        error_setg(errp, "iouc-sandbox-compat: <DENY> target out of bounds");
+        return false;
+    }
+    disp_bytes = (int64_t)(allow_pc - deny_pc);
+    if ((disp_bytes & 3) != 0) {
+        error_setg(errp, "iouc-sandbox-compat: branch displacement unaligned");
+        return false;
+    }
+    disp_insns = disp_bytes / 4;
+    b_allow_insn = 0x14000000u | ((uint32_t)disp_insns & 0x03ffffffu);
+
+    /* 6. MACF string in __cstring */
+    for (uint64_t i = 0; i + macf_needle_len + 1 <= cstr_size; i++) {
+        if (!memcmp(bootkc + cstr_off + i, macf_needle, macf_needle_len + 1)) {
+            macf_str_off = cstr_off + i;
+            break;
+        }
+    }
+    if (!macf_str_off) {
+        error_setg(errp, "iouc-sandbox-compat: MACF failure string not found");
+        return false;
+    }
+    uint64_t macf_str_va = cstr_va + (macf_str_off - cstr_off);
+    uint64_t macf_page = macf_str_va & ~0xfffULL;
+    uint64_t macf_page_off = macf_str_va & 0xfffULL;
+
+    /* 7. MACF ADRP+ADD xref */
+    for (uint64_t off = 0; off + 8 <= texec_size; off += 4) {
+        uint64_t pc = texec_va + off;
+        uint64_t pc_page = pc & ~0xfffULL;
+        uint32_t w = ldl_le_p(bootkc + texec_off + off);
+        if ((w & 0x9f000000u) == 0x90000000u) {
+            uint32_t immlo = (w >> 29) & 3u;
+            uint32_t immhi = (w >> 5) & 0x7ffffu;
+            int64_t imm = (int64_t)((immhi << 2) | immlo);
+            if (imm & 0x100000) {
+                imm -= 0x200000;
+            }
+            if ((uint64_t)((int64_t)pc_page + (imm << 12)) == macf_page) {
+                uint32_t nw = ldl_le_p(bootkc + texec_off + off + 4);
+                if ((nw & 0xffc00000u) == 0x91000000u) {
+                    uint32_t add_imm12 = (nw >> 10) & 0xfffu;
+                    if (add_imm12 == macf_page_off) {
+                        macf_xref_hits++;
+                        macf_xref_off = texec_off + off;
+                    }
+                }
+            }
+        }
+    }
+    if (macf_xref_hits != 1) {
+        error_setg(errp, "iouc-sandbox-compat: MACF xref matched %u times, expected 1", macf_xref_hits);
+        return false;
+    }
+
+    /* 8. MACF CBZ W0 backward search */
+    for (uint64_t back = 4; back <= 120 && macf_xref_off >= texec_off + back; back += 4) {
+        uint64_t cand = macf_xref_off - back;
+        uint32_t w = ldl_le_p(bootkc + cand);
+        if ((w & 0xff00001fu) == 0x34000000u) { /* CBZ W0 */
+            int32_t imm19 = ((int32_t)(w << 8)) >> 13;
+            uint64_t pc = texec_va + (cand - texec_off);
+            macf_allow_pc = pc + (int64_t)imm19 * 4;
+            macf_cbz_off = cand;
+            break;
+        }
+    }
+    if (!macf_cbz_off) {
+        error_setg(errp, "iouc-sandbox-compat: MACF CBZ W0 not found");
+        return false;
+    }
+    disp_macf_bytes = (int64_t)(macf_allow_pc - (texec_va + (macf_cbz_off - texec_off)));
+    disp_macf_insns = disp_macf_bytes / 4;
+    b_macf_allow_insn = 0x14000000u | ((uint32_t)disp_macf_insns & 0x03ffffffu);
+
+    if (out) {
+        out->sandbox_deny_anchor = deny_fo;
+        out->sandbox_deny_before = ldl_le_p(bootkc + deny_fo);
+        out->sandbox_deny_after = b_allow_insn;
+        out->macf_gate_anchor = macf_cbz_off;
+        out->macf_gate_before = ldl_le_p(bootkc + macf_cbz_off);
+        out->macf_gate_after = b_macf_allow_insn;
+    }
+
+    /* Apply writes */
+    stl_le_p(bootkc + deny_fo, b_allow_insn);
+    stl_le_p(bootkc + macf_cbz_off, b_macf_allow_insn);
+    return true;
+}
+
