@@ -2522,7 +2522,6 @@ static void modern_init(MachineState *machine)
     const AppleModernAdtOverride *profile = NULL;
     size_t profile_count = 0, override_count = 0;
     uint8_t timebase_bytes[4];
-    uint8_t sepfw_bytes[4] = { 0 };
     uint64_t uart, uart_span;
     size_t asset_budget = GiB;
     Error *error = NULL;
@@ -2831,14 +2830,10 @@ static void modern_init(MachineState *machine)
          * property. No SEP firmware executes on this board, so the template
          * value 1 leaves both waiting for an AppleSEPManager that never
          * appears ("ACMTRM: waitForSEPEndpoint: timed out" every 5 s) and
-         * keybag clients block. Declared guest modification, default off.
+         * keybag clients block. /chosen is loader-owned, so the loader writes
+         * the value itself. Declared guest modification, default off.
          */
-        if (override_count >= APPLE_MODERN_MAX_ADT_OVERRIDES) {
-            error_report("apple-modern: too many ADT overrides");
-            exit(EXIT_FAILURE);
-        }
-        overrides[override_count++] = (AppleModernAdtOverride){
-            "/chosen", "sepfw-load-at-boot", sepfw_bytes, sizeof(sepfw_bytes)};
+        metadata_input.chosen_sepfw_absent = true;
         warn_report("apple-modern: sepfw-absent serves /chosen "
                     "sepfw-load-at-boot = 0 (declared: no SEP firmware runs)");
     }

@@ -51,6 +51,12 @@ typedef struct AppleModernBootMetadataInput {
      */
     uint32_t aic_iack_offset;
     /*
+     * Publish /chosen "sepfw-load-at-boot" = 0 (u32), replacing the template
+     * value: declares that no SEP firmware runs (board option sepfw-absent).
+     * /chosen is loader-owned, so this cannot go through the override list.
+     */
+    bool chosen_sepfw_absent;
+    /*
      * Optional property overrides. Every node must exist exactly once and the
      * (path, name) pairs must be unique. Nodes the loader already rewrites
      * (/chosen, /chosen/memory-map, /vram, /arm-io/aic) are refused; the
