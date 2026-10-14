@@ -31,6 +31,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'modern-compat-groups-resolve.c',
     'modern-dcp-asc.c',
     'modern-smc.c',
+    'modern-dockchannel.c',
     'modern-dcp-iop.c',
     'modern-pmgr-storage.c',
     'modern-mcc-dsid.c',
