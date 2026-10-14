@@ -187,6 +187,8 @@ struct AppleModernMachine {
     char *pmgr_boot_on;
     /* Publish the modelled counter frequency as /cpus/cpu0 timebase-frequency. */
     bool adt_timebase_match;
+    /* Serve /chosen sepfw-load-at-boot = 0: declare that no SEP firmware runs. */
+    bool sepfw_absent;
     /* Serve a unique dart-id on every dart,t8110 node (ADT order, declared). */
     bool adt_dart_ids;
     /*
@@ -2520,6 +2522,7 @@ static void modern_init(MachineState *machine)
     const AppleModernAdtOverride *profile = NULL;
     size_t profile_count = 0, override_count = 0;
     uint8_t timebase_bytes[4];
+    uint8_t sepfw_bytes[4] = { 0 };
     uint64_t uart, uart_span;
     size_t asset_budget = GiB;
     Error *error = NULL;
@@ -2817,6 +2820,27 @@ static void modern_init(MachineState *machine)
         overrides[override_count++] = (AppleModernAdtOverride){
             "/cpus/cpu0", "timebase-frequency", timebase_bytes,
             sizeof(timebase_bytes)};
+    }
+    if (s->sepfw_absent) {
+        /*
+         * Attested consumers in BootKC a36b9241: AppleSEPKeyStore decides
+         * whether SEP firmware is expected from the SEP service's
+         * "sep-booted" or, failing that, IODeviceTree:/chosen
+         * "sepfw-load-at-boot" (unslid 0xfffffff0095ca548), and
+         * AppleCredentialManager logs "isSEPAvailable" from the same /chosen
+         * property. No SEP firmware executes on this board, so the template
+         * value 1 leaves both waiting for an AppleSEPManager that never
+         * appears ("ACMTRM: waitForSEPEndpoint: timed out" every 5 s) and
+         * keybag clients block. Declared guest modification, default off.
+         */
+        if (override_count >= APPLE_MODERN_MAX_ADT_OVERRIDES) {
+            error_report("apple-modern: too many ADT overrides");
+            exit(EXIT_FAILURE);
+        }
+        overrides[override_count++] = (AppleModernAdtOverride){
+            "/chosen", "sepfw-load-at-boot", sepfw_bytes, sizeof(sepfw_bytes)};
+        warn_report("apple-modern: sepfw-absent serves /chosen "
+                    "sepfw-load-at-boot = 0 (declared: no SEP firmware runs)");
     }
     if (s->pmgr_ungate) {
         size_t ungate_count = 0;
@@ -3449,6 +3473,7 @@ BOOL_PROPERTY(modern_mcc_socni, modern_mcc_socni)
 BOOL_PROPERTY(modern_mcc_socni_command, modern_mcc_socni_command)
 BOOL_PROPERTY(modern_mcc_dcs_perf, modern_mcc_dcs_perf)
 BOOL_PROPERTY(adt_timebase_match, adt_timebase_match)
+BOOL_PROPERTY(sepfw_absent, sepfw_absent)
 BOOL_PROPERTY(adt_dart_ids, adt_dart_ids)
 BOOL_PROPERTY(large_ramdisk, large_ramdisk)
 BOOL_PROPERTY(pmgr_ungate, pmgr_ungate)
@@ -3656,6 +3681,12 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    get_modern_pmgr_storage, set_modern_pmgr_storage);
     object_class_property_add_bool(oc, "adt-timebase-match", get_adt_timebase_match,
                                    set_adt_timebase_match);
+    object_class_property_add_bool(oc, "sepfw-absent", get_sepfw_absent,
+                                   set_sepfw_absent);
+    object_class_property_set_description(oc, "sepfw-absent",
+        "serve /chosen sepfw-load-at-boot = 0 so AppleSEPKeyStore and "
+        "AppleCredentialManager do not wait for SEP firmware that never runs "
+        "(declared guest modification, default off)");
     object_class_property_add_bool(oc, "pmgr-ungate", get_pmgr_ungate,
                                    set_pmgr_ungate);
     object_class_property_add_bool(oc, "adt-dart-ids", get_adt_dart_ids,
