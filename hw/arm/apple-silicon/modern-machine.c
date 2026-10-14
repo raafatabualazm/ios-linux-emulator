@@ -19,6 +19,7 @@
 #include "hw/arm/apple-silicon/modern-boot-metadata.h"
 #include "hw/arm/apple-silicon/modern-board-regions.h"
 #include "hw/arm/apple-silicon/modern-amcc.h"
+#include "hw/arm/apple-silicon/modern-ans.h"
 #include "hw/arm/apple-silicon/modern-pmgr.h"
 #include "hw/arm/apple-silicon/modern-pmgr-fuse.h"
 #include "hw/arm/apple-silicon/modern-mcc-dramcfg.h"
@@ -107,6 +108,7 @@ struct AppleModernMachine {
     bool sep_mailbox;
     bool sep_sim;
     bool sep_dart;
+    bool modern_ans;
     bool modern_pmgr;
     bool modern_mcc_dramcfg;
     uint32_t mcc_dramcfg_reset;
@@ -2129,6 +2131,75 @@ static bool map_sep_trace(AppleModernMachine *s, Error **errp)
  * The reg-block base is absolute (not /arm-io child-relative). Absent on some
  * trees, in which case nothing is mapped.
  */
+static bool map_modern_ans(AppleModernMachine *s, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernBlob reg, irq;
+    uint64_t bases[3], sizes[3];
+    const unsigned indices[] = {3, 9, 0};
+    const uint64_t minimum[] = {0x60000, 0x10000, 0x88000};
+    uint32_t irq_index, queue_entries;
+    SysBusDevice *dev;
+
+    if (!s->aic) {
+        error_setg(errp, "modern-ans requires modern-aic for mailbox and NVMe IRQs");
+        return false;
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/ans", "reg", &reg, errp) ||
+        reg.size != 13 * 16 ||
+        !apple_modern_adt_property(dtree, "/arm-io/ans", "interrupts", &irq, errp) ||
+        irq.size != 20 ||
+        !adt_u32(dtree, "/arm-io/ans", "nvme-interrupt-idx", &irq_index, errp) ||
+        irq_index != 4 ||
+        !adt_u32(dtree, "/arm-io/ans", "nvme-queue-entries", &queue_entries, errp) ||
+        queue_entries != 64) {
+        if (!*errp) {
+            error_setg(errp, "unsupported modern ANS ADT geometry");
+        }
+        return false;
+    }
+    for (unsigned i = 0; i < 3; i++) {
+        sizes[i] = ldq_le_p(reg.data + indices[i] * 16 + 8);
+        if (sizes[i] != minimum[i] ||
+            !arm_io_translate(dtree, ldq_le_p(reg.data + indices[i] * 16),
+                               sizes[i], &bases[i], errp)) {
+            if (!*errp) {
+                error_setg(errp, "unsupported modern ANS aperture %u", indices[i]);
+            }
+            return false;
+        }
+        for (unsigned j = 0; j < i; j++) {
+            if (bases[i] < bases[j] + sizes[j] && bases[j] < bases[i] + sizes[i]) {
+                error_setg(errp, "overlapping modern ANS apertures");
+                return false;
+            }
+        }
+    }
+    for (unsigned i = 0; i < 5; i++) {
+        if (ldl_le_p(irq.data + i * 4) >= s->aic_num_irqs) {
+            error_setg(errp, "modern ANS interrupt outside AIC");
+            return false;
+        }
+    }
+    dev = apple_modern_ans_create(OBJECT(s), s->ram, s->components.dram_base,
+                                  sizes[2], errp);
+    if (!dev) {
+        return false;
+    }
+    for (unsigned i = 0; i < 3; i++) {
+        sysbus_mmio_map(dev, i, bases[i]);
+    }
+    sysbus_connect_irq(dev, 4, qdev_get_gpio_in(s->aic, ldl_le_p(irq.data + 16)));
+    for (unsigned i = 0; i < 4; i++) {
+        sysbus_connect_irq(dev, i,
+                           qdev_get_gpio_in(s->aic, ldl_le_p(irq.data + i * 4)));
+    }
+    warn_report("apple-modern: opt-in firmware-free ANS/NVMMU block adapter; "
+                "64 tags, RAM-only DMA; ANS CPU/CoastGuard security/SEP crypto "
+                "not implemented; attach namespace on bus modern-ans-nvme");
+    return true;
+}
+
 static bool map_sep(AppleModernMachine *s, Error **errp)
 {
     AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
@@ -2704,6 +2775,7 @@ static void modern_init(MachineState *machine)
                                     &s->cpu_register_ram[i]);
     }
     if (!map_amcc(s, &error) || !map_aic(s, &error) || !map_sep(s, &error) ||
+        (s->modern_ans && !map_modern_ans(s, &error)) ||
         (s->sep_dart && !map_sep_dart(s, &error)) ||
         ((s->sep_mailbox || s->sep_sim) && !map_sep_mailbox(s, &error)) ||
         (s->sep_trace && !map_sep_trace(s, &error)) ||
@@ -3004,6 +3076,7 @@ BOOL_PROPERTY(sep_trace, sep_trace)
 BOOL_PROPERTY(sep_mailbox, sep_mailbox)
 BOOL_PROPERTY(sep_sim, sep_sim)
 BOOL_PROPERTY(sep_dart, sep_dart)
+BOOL_PROPERTY(modern_ans, modern_ans)
 BOOL_PROPERTY(modern_pmgr, modern_pmgr)
 BOOL_PROPERTY(modern_mcc_dramcfg, modern_mcc_dramcfg)
 BOOL_PROPERTY(modern_mcc_quota, modern_mcc_quota)
@@ -3251,6 +3324,7 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_sep_mailbox);
     object_class_property_add_bool(oc, "sep-sim", get_sep_sim, set_sep_sim);
     object_class_property_add_bool(oc, "sep-dart", get_sep_dart, set_sep_dart);
+    object_class_property_add_bool(oc, "modern-ans", get_modern_ans, set_modern_ans);
     object_class_property_add_bool(oc, "modern-pmgr", get_modern_pmgr,
                                    set_modern_pmgr);
     object_class_property_add_bool(oc, "modern-mcc-dramcfg", get_modern_mcc_dramcfg,

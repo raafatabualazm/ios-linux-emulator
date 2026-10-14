@@ -14,6 +14,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'dart-t8110.c',
     'mem.c',
     'modern-amcc.c',
+    'modern-ans.c',
     'modern-pmgr.c',
     'modern-pmgr-fuse.c',
     'modern-mcc-dramcfg.c',

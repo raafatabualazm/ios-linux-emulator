@@ -548,6 +548,7 @@ typedef struct NvmeParams {
     uint8_t  vsl;
     bool     use_intel_id;
     bool     is_apple_ans;
+    bool     apple_linear_sq;
     uint8_t  zasl;
     bool     auto_transition_zones;
     bool     legacy_cmb;
@@ -726,6 +727,11 @@ static inline NvmeSecCtrlEntry *nvme_sctrl_for_cntlid(NvmeCtrl *n,
 }
 
 void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns);
+/* Platform ANS adapters submit a validated command, not a ring tail.  These
+ * entry points are unavailable to ordinary PCI controllers. */
+bool nvme_apple_submit_cmd(NvmeCtrl *n, unsigned qid,
+                           const NvmeCmd *cmd, uint16_t pre_status);
+bool nvme_apple_cmd_pending(NvmeCtrl *n, uint16_t cid);
 uint16_t nvme_bounce_data(NvmeCtrl *n, void *ptr, uint32_t len,
                           NvmeTxDirection dir, NvmeRequest *req);
 uint16_t nvme_bounce_mdata(NvmeCtrl *n, void *ptr, uint32_t len,

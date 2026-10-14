@@ -5677,7 +5677,8 @@ static uint16_t nvme_create_cq(NvmeCtrl *n, NvmeRequest *req)
     trace_pci_nvme_create_cq(prp1, cqid, vector, qsize, qflags,
                              NVME_CQ_FLAGS_IEN(qflags) != 0);
 
-    if (iosqes != NVME_SQES || iocqes != NVME_CQES) {
+    if (iosqes != (n->params.apple_linear_sq ? 6 : NVME_SQES) ||
+        iocqes != NVME_CQES) {
         trace_pci_nvme_err_invalid_create_cq_entry_size(iosqes, iocqes);
         return NVME_MAX_QSIZE_EXCEEDED | NVME_DNR;
     }
@@ -7787,6 +7788,66 @@ static void nvme_process_sq(void *opaque)
     }
 }
 
+bool nvme_apple_cmd_pending(NvmeCtrl *n, uint16_t cid)
+{
+    NvmeRequest *req;
+
+    if (!n->params.is_apple_ans) {
+        return false;
+    }
+    for (unsigned i = 0; i <= n->params.max_ioqpairs; i++) {
+        if (n->sq[i]) {
+            QTAILQ_FOREACH(req, &n->sq[i]->out_req_list, entry) {
+                if (le16_to_cpu(req->cmd.cid) == cid) {
+                    return true;
+                }
+            }
+        }
+        if (n->cq[i]) {
+            QTAILQ_FOREACH(req, &n->cq[i]->req_list, entry) {
+                if (le16_to_cpu(req->cmd.cid) == cid) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool nvme_apple_submit_cmd(NvmeCtrl *n, unsigned qid,
+                           const NvmeCmd *cmd, uint16_t pre_status)
+{
+    NvmeSQueue *sq;
+    NvmeRequest *req;
+    uint16_t status = pre_status;
+
+    if (!n->params.is_apple_ans || !n->params.apple_linear_sq ||
+        qid > n->params.max_ioqpairs ||
+        !(ldl_le_p(&n->bar.csts) & NVME_CSTS_READY) ||
+        !(sq = n->sq[qid]) || !n->cq[sq->cqid] ||
+        QTAILQ_EMPTY(&sq->req_list) ||
+        nvme_apple_cmd_pending(n, le16_to_cpu(cmd->cid))) {
+        return false;
+    }
+    /* The adapter has already copied the tag-indexed SQE and NVMMU TCB.
+     * Neither ring head/tail nor guest SQ memory are rewritten here.  Normal
+     * NVMe completion, DMA, cancellation, FUA and block flush paths apply. */
+    req = QTAILQ_FIRST(&sq->req_list);
+    QTAILQ_REMOVE(&sq->req_list, req, entry);
+    QTAILQ_INSERT_TAIL(&sq->out_req_list, req, entry);
+    nvme_req_clear(req);
+    req->cqe.cid = cmd->cid;
+    memcpy(&req->cmd, cmd, sizeof(*cmd));
+    if (!status) {
+        status = qid ? nvme_io_cmd(n, req) : nvme_admin_cmd(n, req);
+    }
+    if (status != NVME_NO_COMPLETE) {
+        req->status = status;
+        nvme_enqueue_req_completion(n->cq[sq->cqid], req);
+    }
+    return true;
+}
+
 static void nvme_update_msixcap_ts(PCIDevice *pci_dev, uint32_t table_size)
 {
     uint8_t *config;
@@ -8468,6 +8529,12 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data,
     if (addr < sizeof(n->bar)) {
         nvme_write_bar(n, addr, data, size);
     } else {
+        if (n->params.apple_linear_sq && !(addr & 4)) {
+            /* Ring-tail submission would bypass the platform's TCB adapter. */
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "ANS linear controller: rejected ring SQ doorbell\n");
+            return;
+        }
         nvme_process_db(n, addr, data);
     }
 }
@@ -9085,7 +9152,8 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->wctemp = cpu_to_le16(NVME_TEMPERATURE_WARNING);
     id->cctemp = cpu_to_le16(NVME_TEMPERATURE_CRITICAL);
 
-    id->sqes = (NVME_SQES << 4) | NVME_SQES;
+    id->sqes = n->params.apple_linear_sq ? 0x66 :
+               (NVME_SQES << 4) | NVME_SQES;
     id->cqes = (NVME_CQES << 4) | NVME_CQES;
     id->nn = cpu_to_le32(NVME_MAX_NAMESPACES);
     id->oncs = cpu_to_le16(NVME_ONCS_WRITE_ZEROES | NVME_ONCS_TIMESTAMP |
@@ -9302,6 +9370,7 @@ static const Property nvme_props[] = {
     DEFINE_PROP_UINT8("vsl", NvmeCtrl, params.vsl, 7),
     DEFINE_PROP_BOOL("use-intel-id", NvmeCtrl, params.use_intel_id, false),
     DEFINE_PROP_BOOL("is-apple-ans", NvmeCtrl, params.is_apple_ans, false),
+    DEFINE_PROP_BOOL("apple-linear-sq", NvmeCtrl, params.apple_linear_sq, false),
     DEFINE_PROP_BOOL("legacy-cmb", NvmeCtrl, params.legacy_cmb, false),
     DEFINE_PROP_BOOL("ioeventfd", NvmeCtrl, params.ioeventfd, false),
     DEFINE_PROP_BOOL("dbcs", NvmeCtrl, params.dbcs, true),
