@@ -237,5 +237,86 @@ bool apple_modern_kc_iouc_sandbox_compat(uint8_t *bootkc, size_t len,
                                          AppleModernIoucPatch *out,
                                          Error **errp);
 
+/*
+ * Declared, opt-in HID static-config edit (off by default).
+ *
+ * ROOT CAUSE (established by read-only RE of BootKC a36b9241..., recorded in
+ * modern-emulator/.../re/fifo-protocol.md and the re/dis disassembly):
+ *
+ *   iOS 27 multitouch runs over AppleHIDTransportDeviceFIFO. The transport
+ *   stalls at "ERROR!! No protocol specified" (AppleHIDTransportDevice::
+ *   powerHasChanged, unslid 0xfffffff008e1e11c) because device+0xb0, the
+ *   protocol object, is NULL. Only AppleHIDTransportDevice::cacheConfig
+ *   (0xfffffff008e1e810, device vtable +0x570) sets device+0xb0, from an
+ *   OSString "Protocol" key in a config OSDictionary it is handed. On a board
+ *   with no live MTP firmware download the only reachable caller that can hand
+ *   it one is AppleHIDTransportDevice::startGated (0xfffffff008e1c368), which
+ *   at 0xfffffff008e1ca30 calls cacheConfig(getStaticConfig()). getStaticConfig
+ *   (FIFO device vtable +0x6e8) is a 12-byte stub "bti c; movz x0,#0; ret" that
+ *   returns NULL in all five device classes, so no config ever arrives. The
+ *   startGated guard at 0xfffffff008e1c9c4 takes the static branch when
+ *   device+0xb8 == NULL (true: /arm-io/dockchannel-mtp/mtp-transport carries no
+ *   "bootloader-type") or when copyProperty("use-static-config", ...parents)
+ *   is non-NULL.
+ *
+ * WHAT THIS DOES: in the board's PRIVATE in-memory copy of the boot kernel
+ * cache only (never the firmware file on disk), and only when the board's
+ * hid-static-config property is set, it rewrites getStaticConfig so it returns
+ * an OSDictionary built from an embedded XML plist, equivalent to
+ *   adrp/add x0, <embedded XML> ; movz x1, #0 ; b OSUnserializeXML
+ * The 12-byte stub cannot hold that sequence, so its first instruction (the
+ * "bti c" landing pad required by the indirect blraa call) is KEPT and its
+ * second instruction is replaced with a single "b <cave>" into a code cave in
+ * the trailing zero padding of the cache __TEXT_EXEC; the cave holds the real
+ * instruction sequence and the NUL-terminated XML string. OSUnserializeXML is
+ * reached through AppleHIDTransport's existing GOT import thunk (unslid
+ * 0xfffffff008e99c24), whose shape and resolved target are verified. The
+ * returned OSDictionary has refcount 1 and is released by startGated at
+ * 0xfffffff008e1ca60 (vtable +0x28), matching getStaticConfig's contract (no
+ * retain). The patch site is the UNIQUE table in the FIFO kext __DATA_CONST
+ * whose +0x6e8 slot targets the "bti c; movz x0,#0; ret" stub in the FIFO
+ * __TEXT_EXEC and whose +0x570 slot targets a prologue in the base
+ * AppleHIDTransport __TEXT_EXEC (inherited cacheConfig); nothing is written
+ * unless exactly one such table is found, every bound is checked, and the cave
+ * is confirmed to be all-zero padding.
+ *
+ * XML PAYLOAD: the config dict carries the real MTP_SYS[0].Config values from
+ * the pinned FTAB personality (re/mtpfw/iokt.json): Client, Version,
+ * Allocation, Protocol=SCMFIFO, MaxReadSize/MaxWriteSize=16384, MemoryFifos and
+ * the four Interfaces with their scalar/flag keys. "Protocol" is what
+ * cacheConfig casts to an OSString and resolves to the real class
+ * AppleHIDTransportProtocolSCMFIFO; MaxReadSize/MaxWriteSize/Interfaces/
+ * MemoryFifos are what that protocol's configure method (protocol vtable +0x600,
+ * called from cacheConfig at 0xfffffff008e1e9d8) consumes. The deep per-
+ * interface Reporters/Channels/reset-sequence sub-arrays are OMITTED: configure
+ * stores the Interfaces array by reference and logs its count but never walks
+ * them (verified in the disassembly), every key it reads is cast-and-null-
+ * checked or defaulted, and the full dict (~58 KiB of XML) does not fit in any
+ * provably-unused code cave.
+ *
+ * WHAT IT REMOVES: nothing. It adds no path around any signing, trust-cache,
+ * AMFI, pmap_cs or page-in enforcement check; it replaces one config-provider
+ * stub and adds otherwise-unused code to segment padding. It is a compatibility
+ * measure, not Apple hardware or software fidelity.
+ */
+typedef struct AppleModernHidStaticConfigPatch {
+    uint64_t stub_anchor;    /* file offset of the getStaticConfig stub (G) */
+    uint64_t stub_va;        /* unslid VA of the stub (orientation) */
+    uint32_t stub_before;    /* word at G+4 before the patch (movz x0,#0) */
+    uint32_t stub_after;     /* word at G+4 after the patch (b <cave>) */
+    uint64_t vtable_va;      /* unslid VA of the FIFO device vtable */
+    uint64_t cave_off;       /* file offset of the code cave */
+    uint64_t cave_va;        /* unslid VA of the code cave */
+    uint64_t xml_off;        /* file offset of the embedded XML string */
+    uint64_t xml_va;         /* unslid VA of the embedded XML string */
+    uint32_t xml_len;        /* XML byte count, excluding the NUL terminator */
+    uint64_t thunk_va;       /* unslid VA of the OSUnserializeXML import thunk */
+    uint32_t cave_insns[4];  /* adrp x0 ; add x0 ; movz x1,#0 ; b thunk */
+} AppleModernHidStaticConfigPatch;
+
+bool apple_modern_kc_hid_static_config(uint8_t *bootkc, size_t len,
+                                       AppleModernHidStaticConfigPatch *out,
+                                       Error **errp);
+
 #endif
 

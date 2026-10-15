@@ -1133,3 +1133,364 @@ bool apple_modern_kc_iouc_sandbox_compat(uint8_t *bootkc, size_t len,
     return true;
 }
 
+/* ------------------------------------------------------------------------- *
+ * HID static-config compatibility (opt-in; see modern-kc-patch.h for the RE
+ * root cause, the exact unslid VAs and what this replaces). Rewrites the
+ * AppleHIDTransportDeviceFIFO getStaticConfig NULL stub so startGated can hand
+ * cacheConfig a Protocol-bearing OSDictionary, clearing "No protocol
+ * specified", without a live MTP firmware download.
+ * ------------------------------------------------------------------------- */
+
+/*
+ * The MTP Config dict OSUnserializeXML builds at run time. Real values from the
+ * pinned FTAB personality MTP_SYS[0].Config (re/mtpfw/iokt.json): exactly the
+ * keys cacheConfig ("Protocol") and the SCMFIFO protocol configure method
+ * (vtable +0x600: Interfaces, MaxReadSize, MaxWriteSize, MemoryFifos) consume.
+ * The per-interface Reporters/Channels/reset-sequence sub-arrays are omitted on
+ * purpose: configure() stores the Interfaces array by reference and logs its
+ * count but never walks it, and the whole dict (~58 KiB of XML) would not fit
+ * in a provably-unused code cave. A bare <dict> (no <?xml?>/<plist> wrapper) is
+ * what the kernel OSUnserializeXML grammar accepts.
+ */
+static const char apple_modern_hid_static_config_xml[] =
+    "<dict>"
+    "<key>Client</key><string>D47</string>"
+    "<key>Version</key><string>AppleMTPFirmwarePhone-6100.84.6.1~361</string>"
+    "<key>Allocation</key><string>1310720</string>"
+    "<key>Protocol</key><string>SCMFIFO</string>"
+    "<key>MaxReadSize</key><integer>16384</integer>"
+    "<key>MaxWriteSize</key><integer>16384</integer>"
+    "<key>MemoryFifos</key><array>"
+        "<dict><key>WriteSize</key><integer>0</integer>"
+            "<key>ReadSize</key><integer>2097152</integer></dict>"
+        "<dict><key>WriteSize</key><integer>0</integer>"
+            "<key>ReadSize</key><integer>2097152</integer></dict>"
+    "</array>"
+    "<key>Interfaces</key><array>"
+        "<dict><key>bInterfaceNumber</key><integer>0</integer>"
+            "<key>InterfaceName</key><string>comm</string></dict>"
+        "<dict><key>bInterfaceNumber</key><integer>1</integer>"
+            "<key>InterfaceName</key><string>multi-touch</string>"
+            "<key>AsyncRegistration</key><true/><key>PowerMethod</key><integer>2</integer>"
+            "<key>NotifyPowerStateChange</key><true/><key>NotifyAllResets</key><false/></dict>"
+        "<dict><key>bInterfaceNumber</key><integer>3</integer>"
+            "<key>InterfaceName</key><string>nova</string>"
+            "<key>AsyncRegistration</key><true/><key>PowerMethod</key><integer>2</integer>"
+            "<key>NotifyPowerStateChange</key><true/><key>NotifyAllResets</key><false/>"
+            "<key>HIDServiceEnabled</key><true/></dict>"
+        "<dict><key>bInterfaceNumber</key><integer>2</integer>"
+            "<key>InterfaceName</key><string>mtp</string>"
+            "<key>AsyncRegistration</key><true/></dict>"
+    "</array>"
+    "</dict>";
+
+#define HID_FIFO_FILESET        "com.apple.driver.AppleHIDTransportFIFO"
+#define HID_BASE_FILESET        "com.apple.driver.AppleHIDTransport"
+#define HID_CACHECONFIG_SLOT    UINT64_C(0x570)
+#define HID_GETSTATICCFG_SLOT   UINT64_C(0x6e8)
+/* AppleHIDTransport's GOT import thunk for OSUnserializeXML (orientation; its
+ * shape and resolved target are verified before use). */
+#define HID_OSUNSERIALIZE_THUNK_VA  UINT64_C(0xfffffff008e99c24)
+
+#define INSN_MOVZ_X1_0      0xd2800001u /* movz x1, #0 */
+#define INSN_BRAA_X16_X17   0xd71f0a11u /* braa x16, x17 */
+/* OSUnserializeXML prologue: bti c ; mov x4,x1 ; mov x1,#0 ; mov x2,#0. */
+#define INSN_MOV_X4_X1      0xaa0103e4u
+#define INSN_MOVZ_X2_0      0xd2800002u
+
+/* AArch64 B imm26 is scaled by 4: reachable range is +/- 128 MiB. */
+#define B_IMM_LIMIT         ((int64_t)1 << 25)
+/* ADRP imm is a signed 21-bit page count. */
+#define ADRP_IMM_LIMIT      ((int64_t)1 << 20)
+
+bool apple_modern_kc_hid_static_config(uint8_t *bootkc, size_t len,
+                                       AppleModernHidStaticConfigPatch *out,
+                                       Error **errp)
+{
+    uint64_t fifo = 0, base = 0;
+    uint64_t gtx_va = 0, gtx_vmsize = 0, gtx_off = 0, gtx_size = 0;
+    uint64_t ftx_va = 0, ftx_vmsize = 0, ftx_off = 0, ftx_size = 0;
+    uint64_t fdc_va = 0, fdc_vmsize = 0, fdc_off = 0, fdc_size = 0;
+    uint64_t btx_va = 0, btx_vmsize = 0, btx_off = 0, btx_size = 0;
+    uint64_t kc_base, vtable_off = 0, gsc_off = 0;
+    unsigned hits = 0;
+    uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0, stub_before = 0;
+    uint32_t p0 = 0, p1 = 0, p2 = 0, p3 = 0;
+    uint64_t thunk_va, thunk_off, got_va, got_off, raw = 0, osu_off;
+    int64_t adrp_imm;
+    uint64_t seg_end, run_start, cave_off, avail, cave_va, xml_off, xml_va, gsc_va;
+    size_t xml_len = sizeof(apple_modern_hid_static_config_xml) - 1;
+    uint64_t need = 16 + (uint64_t)xml_len + 1;
+    int64_t adrp_pages, bdelta, binsns, sdelta, sinsns;
+    uint32_t adrp, add, movz, b_thunk, stub_b;
+
+    if (!bootkc) {
+        error_setg(errp, "hid-static-config: no kernel cache");
+        return false;
+    }
+    if (!find_fileset_entry(bootkc, len, HID_FIFO_FILESET, &fifo)) {
+        error_setg(errp, "hid-static-config: " HID_FIFO_FILESET
+                   " fileset entry not found");
+        return false;
+    }
+    if (!find_fileset_entry(bootkc, len, HID_BASE_FILESET, &base)) {
+        error_setg(errp, "hid-static-config: " HID_BASE_FILESET
+                   " fileset entry not found");
+        return false;
+    }
+    if (!find_segment_va(bootkc, len, 0, "__TEXT_EXEC",
+                         &gtx_va, &gtx_vmsize, &gtx_off, &gtx_size) ||
+        !find_segment_va(bootkc, len, fifo, "__TEXT_EXEC",
+                         &ftx_va, &ftx_vmsize, &ftx_off, &ftx_size) ||
+        !find_segment_va(bootkc, len, fifo, "__DATA_CONST",
+                         &fdc_va, &fdc_vmsize, &fdc_off, &fdc_size) ||
+        !find_segment_va(bootkc, len, base, "__TEXT_EXEC",
+                         &btx_va, &btx_vmsize, &btx_off, &btx_size)) {
+        error_setg(errp, "hid-static-config: required HID transport segments "
+                   "not found");
+        return false;
+    }
+    if (gtx_off > len || gtx_size > len - gtx_off ||
+        ftx_off > len || ftx_size > len - ftx_off ||
+        fdc_off > len || fdc_size > len - fdc_off ||
+        btx_off > len || btx_size > len - btx_off ||
+        ftx_size < 12 || btx_size < 4 || fdc_size < HID_GETSTATICCFG_SLOT + 8) {
+        error_setg(errp, "hid-static-config: HID transport segment outside "
+                   "image");
+        return false;
+    }
+    /*
+     * Every segment in this MH_FILESET cache maps at file offset == vmaddr -
+     * kc_base, so a dyld-chained fixup's 30-bit in-cache target is also a file
+     * offset. Require that invariant across all four segments before trusting
+     * it; otherwise the fixup decode below would be wrong.
+     */
+    kc_base = gtx_va - gtx_off;
+    if (ftx_va - ftx_off != kc_base || fdc_va - fdc_off != kc_base ||
+        btx_va - btx_off != kc_base) {
+        error_setg(errp, "hid-static-config: inconsistent cache base; refusing "
+                   "to decode chained fixups");
+        return false;
+    }
+
+    /*
+     * The FIFO device vtable is the UNIQUE pointer table in the FIFO kext's
+     * __DATA_CONST whose getStaticConfig slot (+0x6e8) targets a
+     * "bti c; movz x0,#0; ret" NULL stub inside the FIFO __TEXT_EXEC and whose
+     * cacheConfig slot (+0x570) targets a function prologue inside the base
+     * AppleHIDTransport __TEXT_EXEC (cacheConfig is inherited from the base
+     * class). Count every match; nothing is written unless exactly one table
+     * matches, so an ambiguous or absent anchor leaves the image intact.
+     */
+    for (uint64_t o = fdc_off;
+         o + HID_GETSTATICCFG_SLOT + 8 <= fdc_off + fdc_size; o += 8) {
+        uint64_t graw = 0, craw = 0, gco, cco;
+        uint32_t g0 = 0, g1 = 0, g2 = 0, c0 = 0;
+
+        if (!rd64(bootkc, len, o + HID_GETSTATICCFG_SLOT, &graw)) {
+            continue;
+        }
+        gco = graw & KC_FIXUP_TARGET_MASK;
+        if (gco < ftx_off || gco > ftx_off + ftx_size - 12) {
+            continue;
+        }
+        if (!rd32(bootkc, len, gco, &g0) || !rd32(bootkc, len, gco + 4, &g1) ||
+            !rd32(bootkc, len, gco + 8, &g2) ||
+            g0 != INSN_BTI_C || g1 != INSN_MOVZ_X0_0 || g2 != INSN_RET) {
+            continue;
+        }
+        if (!rd64(bootkc, len, o + HID_CACHECONFIG_SLOT, &craw)) {
+            continue;
+        }
+        cco = craw & KC_FIXUP_TARGET_MASK;
+        if (cco < btx_off || cco > btx_off + btx_size - 4) {
+            continue;
+        }
+        if (!rd32(bootkc, len, cco, &c0) ||
+            (c0 != INSN_BTI_C && c0 != INSN_PACIBSP)) {
+            continue;
+        }
+        hits++;
+        vtable_off = o;
+        gsc_off = gco;
+    }
+    if (hits != 1) {
+        error_setg(errp, "hid-static-config: FIFO getStaticConfig vtable anchor "
+                   "matched %u times in " HID_FIFO_FILESET " __DATA_CONST, "
+                   "expected exactly 1; refusing to patch", hits);
+        return false;
+    }
+    gsc_va = kc_base + gsc_off;
+
+    /*
+     * Verify AppleHIDTransport's OSUnserializeXML import thunk: adrp x17,#page ;
+     * add x17,x17,#imm ; ldr x16,[x17] ; braa x16,x17. Then follow the GOT entry
+     * it loads and confirm the target is really OSUnserializeXML by its
+     * prologue, so the tail branch below provably reaches it.
+     */
+    thunk_va = HID_OSUNSERIALIZE_THUNK_VA;
+    if (thunk_va < kc_base) {
+        error_setg(errp, "hid-static-config: OSUnserializeXML thunk VA below "
+                   "cache base");
+        return false;
+    }
+    thunk_off = thunk_va - kc_base;
+    if (thunk_off < gtx_off || thunk_off > gtx_off + gtx_size - 16) {
+        error_setg(errp, "hid-static-config: OSUnserializeXML thunk VA outside "
+                   "cache __TEXT_EXEC");
+        return false;
+    }
+    if (!rd32(bootkc, len, thunk_off, &w0) ||
+        !rd32(bootkc, len, thunk_off + 4, &w1) ||
+        !rd32(bootkc, len, thunk_off + 8, &w2) ||
+        !rd32(bootkc, len, thunk_off + 12, &w3) ||
+        (w0 & 0x9f000000u) != 0x90000000u || (w0 & 0x1fu) != 17 ||
+        (w1 & 0xffc00000u) != 0x91000000u || (w1 & 0x1fu) != 17 ||
+        ((w1 >> 5) & 0x1fu) != 17 ||
+        (w2 & 0xffc00000u) != 0xf9400000u || ((w2 >> 5) & 0x1fu) != 17 ||
+        (w2 & 0x1fu) != 16 || w3 != INSN_BRAA_X16_X17) {
+        error_setg(errp, "hid-static-config: OSUnserializeXML import thunk shape "
+                   "unexpected at 0x%" PRIx64 ": 0x%08x 0x%08x 0x%08x 0x%08x",
+                   thunk_va, w0, w1, w2, w3);
+        return false;
+    }
+    adrp_imm = (int64_t)((((w0 >> 5) & 0x7ffffu) << 2) | ((w0 >> 29) & 3u));
+    if (adrp_imm & 0x100000) {
+        adrp_imm -= 0x200000;
+    }
+    got_va = (thunk_va & ~UINT64_C(0xfff)) + ((uint64_t)adrp_imm << 12) +
+             ((w1 >> 10) & 0xfffu);
+    if (got_va < kc_base || got_va - kc_base > len - 8) {
+        error_setg(errp, "hid-static-config: OSUnserializeXML GOT slot outside "
+                   "image");
+        return false;
+    }
+    got_off = got_va - kc_base;
+    if (!rd64(bootkc, len, got_off, &raw)) {
+        error_setg(errp, "hid-static-config: cannot read OSUnserializeXML GOT "
+                   "slot");
+        return false;
+    }
+    osu_off = raw & KC_FIXUP_TARGET_MASK;
+    if (osu_off > len - 16 ||
+        !rd32(bootkc, len, osu_off, &p0) || !rd32(bootkc, len, osu_off + 4, &p1) ||
+        !rd32(bootkc, len, osu_off + 8, &p2) ||
+        !rd32(bootkc, len, osu_off + 12, &p3) ||
+        p0 != INSN_BTI_C || p1 != INSN_MOV_X4_X1 || p2 != INSN_MOVZ_X1_0 ||
+        p3 != INSN_MOVZ_X2_0) {
+        error_setg(errp, "hid-static-config: OSUnserializeXML thunk target "
+                   "prologue unexpected: 0x%08x 0x%08x 0x%08x 0x%08x",
+                   p0, p1, p2, p3);
+        return false;
+    }
+
+    /*
+     * Code cave: the trailing zero padding of the cache __TEXT_EXEC segment.
+     * Scan backward from the segment end for the contiguous zero run, align the
+     * start, require room for the 16-byte sequence plus the NUL-terminated XML,
+     * and prove every byte it will occupy is zero so nothing live is clobbered.
+     */
+    seg_end = gtx_off + gtx_size;
+    run_start = seg_end;
+    while (run_start > gtx_off && bootkc[run_start - 1] == 0) {
+        run_start--;
+    }
+    cave_off = (run_start + 3) & ~UINT64_C(3);
+    if (cave_off > seg_end) {
+        error_setg(errp, "hid-static-config: no trailing __TEXT_EXEC zero "
+                   "padding for a code cave");
+        return false;
+    }
+    avail = seg_end - cave_off;
+    if (avail < need) {
+        error_setg(errp, "hid-static-config: trailing __TEXT_EXEC zero padding "
+                   "is %" PRIu64 " bytes, need %" PRIu64, avail, need);
+        return false;
+    }
+    for (uint64_t i = 0; i < need; i++) {
+        if (bootkc[cave_off + i] != 0) {
+            error_setg(errp, "hid-static-config: candidate code cave at file "
+                       "0x%" PRIx64 " is not zero at +%" PRIu64, cave_off, i);
+            return false;
+        }
+    }
+    cave_va = kc_base + cave_off;
+    xml_off = cave_off + 16;
+    xml_va = kc_base + xml_off;
+
+    /* adrp x0, page(xml) ; add x0, x0, #pageoff(xml) ; movz x1,#0 ; b thunk. */
+    adrp_pages = ((int64_t)(xml_va & ~UINT64_C(0xfff)) -
+                  (int64_t)(cave_va & ~UINT64_C(0xfff))) >> 12;
+    if (adrp_pages < -ADRP_IMM_LIMIT || adrp_pages >= ADRP_IMM_LIMIT) {
+        error_setg(errp, "hid-static-config: XML out of ADRP range of the cave");
+        return false;
+    }
+    adrp = 0x90000000u | ((uint32_t)(adrp_pages & 3) << 29) |
+           ((uint32_t)((adrp_pages >> 2) & 0x7ffff) << 5);
+    add = 0x91000000u | ((uint32_t)(xml_va & 0xfff) << 10);
+    movz = INSN_MOVZ_X1_0;
+    bdelta = (int64_t)thunk_va - (int64_t)(cave_va + 12);
+    if (bdelta & 3) {
+        error_setg(errp, "hid-static-config: cave->thunk branch unaligned");
+        return false;
+    }
+    binsns = bdelta >> 2;
+    if (binsns < -B_IMM_LIMIT || binsns >= B_IMM_LIMIT) {
+        error_setg(errp, "hid-static-config: OSUnserializeXML thunk out of "
+                   "branch range of the cave");
+        return false;
+    }
+    b_thunk = 0x14000000u | ((uint32_t)binsns & 0x03ffffffu);
+
+    /* The stub's second word (b <cave>); the first word (bti c) is kept as the
+     * indirect-call landing pad. */
+    sdelta = (int64_t)cave_va - (int64_t)(gsc_va + 4);
+    if (sdelta & 3) {
+        error_setg(errp, "hid-static-config: stub->cave branch unaligned");
+        return false;
+    }
+    sinsns = sdelta >> 2;
+    if (sinsns < -B_IMM_LIMIT || sinsns >= B_IMM_LIMIT) {
+        error_setg(errp, "hid-static-config: code cave out of branch range of "
+                   "the stub");
+        return false;
+    }
+    stub_b = 0x14000000u | ((uint32_t)sinsns & 0x03ffffffu);
+
+    /* Verify the exact word being overwritten before touching anything. */
+    if (!rd32(bootkc, len, gsc_off + 4, &stub_before) ||
+        stub_before != INSN_MOVZ_X0_0) {
+        error_setg(errp, "hid-static-config: stub second word is 0x%08x, "
+                   "expected movz x0,#0", stub_before);
+        return false;
+    }
+
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->stub_anchor = gsc_off;
+        out->stub_va = gsc_va;
+        out->stub_before = stub_before;
+        out->stub_after = stub_b;
+        out->vtable_va = kc_base + vtable_off;
+        out->cave_off = cave_off;
+        out->cave_va = cave_va;
+        out->xml_off = xml_off;
+        out->xml_va = xml_va;
+        out->xml_len = (uint32_t)xml_len;
+        out->thunk_va = thunk_va;
+        out->cave_insns[0] = adrp;
+        out->cave_insns[1] = add;
+        out->cave_insns[2] = movz;
+        out->cave_insns[3] = b_thunk;
+    }
+
+    /* Fill the cave first, then arm the stub branch into it. */
+    stl_le_p(bootkc + cave_off, adrp);
+    stl_le_p(bootkc + cave_off + 4, add);
+    stl_le_p(bootkc + cave_off + 8, movz);
+    stl_le_p(bootkc + cave_off + 12, b_thunk);
+    memcpy(bootkc + xml_off, apple_modern_hid_static_config_xml, xml_len);
+    bootkc[xml_off + xml_len] = 0;
+    stl_le_p(bootkc + gsc_off + 4, stub_b);
+    return true;
+}
