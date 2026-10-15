@@ -97,6 +97,9 @@ struct AppleModernMachine {
     bool img4_ignition_compat;
     bool trustcache_v2;
     bool md0_width_compat;
+    bool root_rw_compat;
+    bool txm_sc_compat;
+    bool iouc_sandbox_compat;
     /* Declared, opt-in anchored image-patch set (default NULL = none). */
     char *image_patches;
     AppleModernImagePatchResult image_patch_result;
@@ -188,6 +191,12 @@ struct AppleModernMachine {
     AppleModernPMGRFusePlan pmgr_fuse_plan;
     AppleDARTT8110State *sep_mapper;
     AddressSpace *sep_dma_as;
+    AppleDARTT8110State *dcp_mapper;
+    AddressSpace *dcp_dma_as;
+    uint64_t dcp_dart_address, dcp_dart_size;
+    AppleDARTT8110State *disp0_mapper;
+    AddressSpace *disp0_dma_as;
+    uint64_t disp0_dart_address, disp0_dart_size;
     DeviceState *sep_mbox;
     bool aic_trace;
     bool modern_aic;
@@ -719,6 +728,30 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
         !append_pmgr_exclusion(exclusions, &count,
             (AppleModernAddressRange){s->dcp_iop_plan.expert_control_address,
                                      4}, errp)) {
+        return false;
+    }
+    if (s->dcp_iop_mapped && s->dcp_iop_plan.core_address &&
+        !append_pmgr_exclusion(exclusions, &count,
+            (AppleModernAddressRange){s->dcp_iop_plan.core_address,
+                                     s->dcp_iop_plan.core_size}, errp)) {
+        return false;
+    }
+    if (s->dcp_iop_mapped && s->dcp_iop_plan.segment_address &&
+        !append_pmgr_exclusion(exclusions, &count,
+            (AppleModernAddressRange){s->dcp_iop_plan.segment_address,
+                                     s->dcp_iop_plan.segment_size}, errp)) {
+        return false;
+    }
+    if (s->dcp_dart_size &&
+        !append_pmgr_exclusion(exclusions, &count,
+            (AppleModernAddressRange){s->dcp_dart_address,
+                                     s->dcp_dart_size}, errp)) {
+        return false;
+    }
+    if (s->disp0_dart_size &&
+        !append_pmgr_exclusion(exclusions, &count,
+            (AppleModernAddressRange){s->disp0_dart_address,
+                                     s->disp0_dart_size}, errp)) {
         return false;
     }
     for (unsigned i = 0; i < s->disp_trace_plan.count; i++) {
@@ -1296,6 +1329,185 @@ static bool map_modern_smc(AppleModernMachine *s, uint64_t uart,
                 plan.address[0], plan.address[1], plan.address[2], plan.address[3]);
     return true;
 }
+static bool map_dcp_dart(AppleModernMachine *s, Error **errp)
+{
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    AppleModernBlob reg, ints, value, parents;
+    uint64_t dcp_base, dcp_offset, dcp_span;
+    uint64_t disp0_base, disp0_offset, disp0_span;
+    uint32_t dcp_num_streams, dcp_stream, dcp_phandle;
+    uint32_t disp0_num_streams, disp0_streams[2], disp0_phandles[2];
+    static const char *disp0_mapper_paths[] = {
+        "/arm-io/dart-disp0/mapper-disp0",
+        "/arm-io/dart-disp0/mapper-disp0-piodma",
+    };
+
+    if (!s->aic) {
+        error_setg(errp, "dcp-iop v6-resumed DART requires modern-aic");
+        return false;
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/dart-dcp", "reg",
+                                   &reg, errp) ||
+        !apple_modern_adt_property(dtree, "/arm-io/dart-dcp", "interrupts",
+                                   &ints, errp) ||
+        !apple_modern_adt_property(dtree, "/arm-io/dcp", "iommu-parent",
+                                   &parents, errp)) {
+        return false;
+    }
+    if (reg.size != 16 || ints.size != 4 || parents.size != 4) {
+        error_setg(errp, "unsupported DCP DART reg/IRQ/mapper schema");
+        return false;
+    }
+    dcp_offset = ldq_le_p(reg.data);
+    dcp_span = ldq_le_p(reg.data + 8);
+    if (dcp_span < 0x1800 || dcp_span > 0x400000 ||
+        ldl_le_p(ints.data) >= s->aic_num_irqs ||
+        !arm_io_translate(dtree, dcp_offset, dcp_span, &dcp_base, errp)) {
+        if (!errp || !*errp) {
+            error_setg(errp, "modern DCP DART geometry exceeds supported bounds");
+        }
+        return false;
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/dart-dcp", "page-size",
+                                   &value, errp) ||
+        value.size != 4 || ldl_le_p(value.data) != 0x4000) {
+        if (!errp || !*errp) {
+            error_setg(errp, "modern DCP DART supports only 16 KiB pages");
+        }
+        return false;
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/dart-dcp", "sid-count",
+                                   &value, errp) ||
+        value.size != 4 || !(dcp_num_streams = ldl_le_p(value.data)) ||
+        dcp_num_streams > APPLE_DART_T8110_STREAMS) {
+        if (!errp || !*errp) {
+            error_setg(errp, "modern DCP DART sid-count is out of range");
+        }
+        return false;
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/dart-dcp/mapper-dcp",
+                                   "AAPL,phandle", &value, errp) ||
+        value.size != 4) {
+        if (!errp || !*errp) {
+            error_setg(errp, "modern DCP DART mapper phandle must be u32");
+        }
+        return false;
+    }
+    dcp_phandle = ldl_le_p(value.data);
+    if (!apple_modern_adt_property(dtree, "/arm-io/dart-dcp/mapper-dcp",
+                                   "reg", &value, errp) ||
+        value.size != 4 ||
+        (dcp_stream = ldl_le_p(value.data)) >= dcp_num_streams ||
+        ldl_le_p(parents.data) != dcp_phandle) {
+        if (!errp || !*errp) {
+            error_setg(errp, "modern DCP iommu-parent must resolve to "
+                       "mapper-dcp with an in-range stream");
+        }
+        return false;
+    }
+
+    if (!apple_modern_adt_property(dtree, "/arm-io/dart-disp0", "reg",
+                                   &reg, errp) ||
+        !apple_modern_adt_property(dtree, "/arm-io/disp0", "iommu-parent",
+                                   &parents, errp)) {
+        return false;
+    }
+    if (reg.size < 16 || reg.size % 16 || parents.size != 8) {
+        error_setg(errp, "unsupported disp0 DART reg/mapper schema");
+        return false;
+    }
+    disp0_offset = ldq_le_p(reg.data);
+    disp0_span = ldq_le_p(reg.data + 8);
+    if (disp0_span < 0x1800 || disp0_span > 0x400000 ||
+        !arm_io_translate(dtree, disp0_offset, disp0_span, &disp0_base, errp)) {
+        if (!errp || !*errp) {
+            error_setg(errp, "modern disp0 DART geometry exceeds supported bounds");
+        }
+        return false;
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/dart-disp0", "page-size",
+                                   &value, errp) ||
+        value.size != 4 || ldl_le_p(value.data) != 0x4000) {
+        if (!errp || !*errp) {
+            error_setg(errp, "modern disp0 DART supports only 16 KiB pages");
+        }
+        return false;
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/dart-disp0", "sid-count",
+                                   &value, errp) ||
+        value.size != 4 || !(disp0_num_streams = ldl_le_p(value.data)) ||
+        disp0_num_streams > APPLE_DART_T8110_STREAMS) {
+        if (!errp || !*errp) {
+            error_setg(errp, "modern disp0 DART sid-count is out of range");
+        }
+        return false;
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(disp0_mapper_paths); i++) {
+        if (!apple_modern_adt_property(dtree, disp0_mapper_paths[i],
+                                       "AAPL,phandle", &value, errp) ||
+            value.size != 4) {
+            if (!errp || !*errp) {
+                error_setg(errp, "modern disp0 DART mapper phandle must be u32");
+            }
+            return false;
+        }
+        disp0_phandles[i] = ldl_le_p(value.data);
+        if (!apple_modern_adt_property(dtree, disp0_mapper_paths[i],
+                                       "reg", &value, errp) ||
+            value.size != 4 ||
+            (disp0_streams[i] = ldl_le_p(value.data)) >= disp0_num_streams ||
+            ldl_le_p(parents.data + i * 4) != disp0_phandles[i]) {
+            if (!errp || !*errp) {
+                error_setg(errp, "modern disp0 iommu-parent must resolve to "
+                           "mapper-disp0 and mapper-disp0-piodma");
+            }
+            return false;
+        }
+    }
+
+    DeviceState *dcp_dev = qdev_new(TYPE_APPLE_DART_T8110);
+    s->dcp_mapper = APPLE_DART_T8110(dcp_dev);
+    dcp_dev->id = g_strdup("modern-dcp-dart");
+    object_property_add_child(OBJECT(s), "dart-dcp", OBJECT(dcp_dev));
+    qdev_prop_set_uint32(dcp_dev, "mmio-size", dcp_span);
+    qdev_prop_set_uint32(dcp_dev, "num-streams", dcp_num_streams);
+    qdev_prop_set_uint32(dcp_dev, "va-bits", 42);
+    qdev_prop_set_uint32(dcp_dev, "pa-bits", 42);
+    qdev_prop_set_uint32(dcp_dev, "revision", 2);
+    qdev_prop_set_bit(dcp_dev, "trace", true);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dcp_dev), 0,
+                       qdev_get_gpio_in(s->aic, ldl_le_p(ints.data)));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dcp_dev), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dcp_dev), 0, dcp_base);
+    s->dcp_dma_as = apple_dart_t8110_dma_as(s->dcp_mapper, dcp_stream);
+    s->dcp_dart_address = dcp_base;
+    s->dcp_dart_size = dcp_span;
+
+    DeviceState *disp0_dev = qdev_new(TYPE_APPLE_DART_T8110);
+    s->disp0_mapper = APPLE_DART_T8110(disp0_dev);
+    disp0_dev->id = g_strdup("modern-disp0-dart");
+    object_property_add_child(OBJECT(s), "dart-disp0", OBJECT(disp0_dev));
+    qdev_prop_set_uint32(disp0_dev, "mmio-size", disp0_span);
+    qdev_prop_set_uint32(disp0_dev, "num-streams", disp0_num_streams);
+    qdev_prop_set_uint32(disp0_dev, "va-bits", 42);
+    qdev_prop_set_uint32(disp0_dev, "pa-bits", 42);
+    qdev_prop_set_uint32(disp0_dev, "revision", 2);
+    qdev_prop_set_bit(disp0_dev, "trace", true);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(disp0_dev), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(disp0_dev), 0, disp0_base);
+    s->disp0_dma_as = apple_dart_t8110_dma_as(s->disp0_mapper,
+                                              disp0_streams[0]);
+    s->disp0_dart_address = disp0_base;
+    s->disp0_dart_size = disp0_span;
+
+    warn_report("apple-modern: opt-in DCP/disp0 t8110 DARTs at 0x%" PRIx64
+                "+0x%" PRIx64 " (stream %u) and 0x%" PRIx64 "+0x%" PRIx64
+                " (streams %u/%u); 42-bit VA/PA and revision 2 declared",
+                dcp_base, dcp_span, dcp_stream,
+                disp0_base, disp0_span, disp0_streams[0], disp0_streams[1]);
+    return true;
+}
+
 /*
  * Mapped BEFORE map_disp_trace for the same reason map_dcp_asc is: disp0
  * reg[4] contains the /arm-io/dcp windows, and the trace plan must skip it
@@ -1336,6 +1548,12 @@ static bool map_dcp_iop(AppleModernMachine *s, uint64_t uart,
             exclusions, count, &plan, errp)) {
         return false;
     }
+    if (mode == APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED &&
+        !apple_modern_dcp_iop_resumed_plan_build(dtree,
+            s->components.dram_base, s->components.dram_size,
+            exclusions, count, &plan, errp)) {
+        return false;
+    }
     s->dcp_iop_plan = plan;
     if (!apple_modern_dcp_iop_mode_has_peer(mode)) {
         warn_report("apple-modern: opt-in dcp-iop '%s' serves ONLY the two "
@@ -1359,6 +1577,25 @@ static bool map_dcp_iop(AppleModernMachine *s, uint64_t uart,
                     "0x%" PRIx64 " size4 on0x%x/off0x%x, no firmware executes",
                     plan.expert_control_address, plan.expert_control_on,
                     plan.expert_control_off);
+    }
+    if (plan.core_address && plan.segment_address) {
+        sysbus_mmio_map(sbd, 2, plan.core_address);
+        sysbus_mmio_map(sbd, 3, plan.segment_address);
+        warn_report("apple-modern: declared DCP core/segment windows at "
+                    "0x%" PRIx64 "+0x%" PRIx64 " and 0x%" PRIx64 "+0x%" PRIx64
+                    " (dual user endpoints 23/0x37 and 24/0x38)",
+                    plan.core_address, plan.core_size,
+                    plan.segment_address, plan.segment_size);
+    }
+    if (mode == APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED) {
+        if (!map_dcp_dart(s, errp)) {
+            return false;
+        }
+        apple_modern_dcp_iop_set_dma(s->dcp_iop_dev, s->dcp_dma_as,
+                                     s->disp0_dma_as);
+        apple_modern_dcp_iop_set_scanout(s->dcp_iop_dev,
+                                         s->metadata.layout.framebuffer_physical,
+                                         s->metadata.layout.framebuffer_size);
     }
     /*
      * Positional IRQ mapping, in ADT "interrupts" order, exactly as t8030
@@ -2476,6 +2713,25 @@ static void modern_init(MachineState *machine)
                         "RTKit devices set the same pair on their own nub",
                         s->dcp_iop, flag_count);
         }
+        if (apple_modern_dcp_iop_mode_has_segment_map(dcp_iop_mode)) {
+            size_t seg_count = 0;
+            const AppleModernAdtOverride *seg =
+                apple_modern_dcp_iop_segment_overrides(&seg_count);
+            for (size_t i = 0; i < seg_count; i++) {
+                if (override_count >= APPLE_MODERN_MAX_ADT_OVERRIDES) {
+                    error_report("apple-modern: too many ADT overrides");
+                    exit(EXIT_FAILURE);
+                }
+                overrides[override_count++] = seg[i];
+            }
+            warn_report("apple-modern: dcp-iop '%s' serves %zu DECLARED ADT "
+                        "segment properties on /arm-io/dcp/iop-dcp-nub "
+                        "(region-base = 0x%" PRIx64 ", region-size = 0x%" PRIx64
+                        ") following the /arm-io/smc/iop-smc-nub pattern",
+                        s->dcp_iop, seg_count,
+                        APPLE_MODERN_DCP_IOP_SEGMENT_BASE,
+                        APPLE_MODERN_DCP_IOP_SEGMENT_SIZE);
+        }
     }
     if (s->pmgr_voltage_states) {
         profile = apple_modern_pmgr_voltage_profile(s->pmgr_voltage_states,
@@ -2538,6 +2794,20 @@ static void modern_init(MachineState *machine)
                       &error)) {
         error_report_err(error);
         exit(EXIT_FAILURE);
+    }
+    if (s->boot_display && s->dcp_iop &&
+        !strcmp(s->dcp_iop, APPLE_MODERN_DCP_IOP_NAME_V6_RESUMED)) {
+        AppleModernBlob ds;
+        Error *ds_error = NULL;
+        if (apple_modern_adt_property((AppleModernBlob){s->metadata.dtree,
+                s->metadata.dtree_size}, "/chosen", "display-scale",
+                &ds, &ds_error)) {
+            if (ds.size == 4 && ldl_le_p(ds.data) == 0) {
+                stl_le_p((void *)ds.data, 2);
+            }
+        } else {
+            error_free(ds_error);
+        }
     }
     if (s->adt_dart_ids) {
         warn_report("apple-modern: served dart-id 0..%u on %u dart,t8110 "
@@ -2621,6 +2891,67 @@ static void modern_init(MachineState *machine)
                     md0.blockcount_before[0], md0.blockcount_before[1],
                     md0.blockcount_before[2], md0.blockcount_after[0],
                     md0.blockcount_after[1], md0.blockcount_after[2]);
+    }
+    if (s->root_rw_compat) {
+        /*
+         * Declared, opt-in guest-kernel compatibility edit on the private
+         * in-memory boot kernel cache only. See modern-kc-patch.h for the
+         * published-source root cause (xnu bsd/vfs/vfs_subr.c:1145-1150
+         * initializes root mount flags with MNT_RDONLY | MNT_ROOTFS).
+         */
+        AppleModernRootRwPatch rrw = { 0 };
+        uint8_t *bootkc = (uint8_t *)s->blobs[ASSET_BOOTKC].data;
+
+        if (!apple_modern_kc_root_rw_compat(bootkc,
+                                            s->blobs[ASSET_BOOTKC].size,
+                                            &rrw, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: applied opt-in root-rw-compat patch to "
+                    "the in-memory kernel cache: vfs_rootmountalloc_internal "
+                    "at 0x%" PRIx64 " (MOVZ at +12: 0x%08x->0x%08x), "
+                    "__mac_mount root-update check at 0x%" PRIx64 " -> 0x%"
+                    PRIx64 " (TBNZ at +4: 0x%08x->0x%08x). Compatibility, "
+                    "not Apple fidelity",
+                    rrw.rootmountalloc_anchor,
+                    rrw.rootmountalloc_before, rrw.rootmountalloc_after,
+                    rrw.check_anchor, rrw.update_anchor,
+                    rrw.insn_before, rrw.insn_after);
+    }
+    if (s->txm_sc_compat) {
+        AppleModernTxmScPatch tsc = { 0 };
+        uint8_t *txm = (uint8_t *)s->blobs[ASSET_TXM].data;
+
+        if (!apple_modern_txm_sc_compat(txm, s->blobs[ASSET_TXM].size,
+                                        &tsc, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: applied opt-in txm-sc-compat patch to the "
+                    "in-memory TXM image at +0x%" PRIx64 " (prologue 0x%08x, "
+                    "+4/+8: 0x%08x/0x%08x -> 0x%08x/0x%08x). Compatibility, "
+                    "not Apple fidelity",
+                    tsc.anchor, tsc.prologue,
+                    tsc.insn_before[0], tsc.insn_before[1],
+                    tsc.insn_after[0], tsc.insn_after[1]);
+    }
+    if (s->iouc_sandbox_compat) {
+        AppleModernIoucPatch iouc = { 0 };
+        uint8_t *bootkc = (uint8_t *)s->blobs[ASSET_BOOTKC].data;
+
+        if (!apple_modern_kc_iouc_sandbox_compat(bootkc,
+                                                 s->blobs[ASSET_BOOTKC].size,
+                                                 &iouc, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: applied opt-in iouc-sandbox-compat patch to the "
+                    "in-memory kernel cache: sandbox deny at 0x%" PRIx64 " (0x%08x->0x%08x), "
+                    "MACF gate at 0x%" PRIx64 " (0x%08x->0x%08x). Compatibility, not "
+                    "Apple fidelity",
+                    iouc.sandbox_deny_anchor, iouc.sandbox_deny_before, iouc.sandbox_deny_after,
+                    iouc.macf_gate_anchor, iouc.macf_gate_before, iouc.macf_gate_after);
     }
     if (s->image_patches) {
         /*
@@ -2998,6 +3329,9 @@ ASSET_PROPERTY(cryptex_trustcache, ASSET_CRYPTEX_TC)
 BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
 BOOL_PROPERTY(trustcache_v2, trustcache_v2)
 BOOL_PROPERTY(md0_width_compat, md0_width_compat)
+BOOL_PROPERTY(root_rw_compat, root_rw_compat)
+BOOL_PROPERTY(txm_sc_compat, txm_sc_compat)
+BOOL_PROPERTY(iouc_sandbox_compat, iouc_sandbox_compat)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(el0_trap_trace, el0_trap_trace)
 BOOL_PROPERTY(sep_trace, sep_trace)
@@ -3313,6 +3647,15 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "md0-width-compat",
                                    get_md0_width_compat,
                                    set_md0_width_compat);
+    object_class_property_add_bool(oc, "root-rw-compat",
+                                   get_root_rw_compat,
+                                   set_root_rw_compat);
+    object_class_property_add_bool(oc, "txm-sc-compat",
+                                   get_txm_sc_compat,
+                                   set_txm_sc_compat);
+    object_class_property_add_bool(oc, "iouc-sandbox-compat",
+                                   get_iouc_sandbox_compat,
+                                   set_iouc_sandbox_compat);
     object_class_property_add_str(oc, "image-patches", get_image_patches,
                                   set_image_patches);
     object_class_property_add_str(oc, "applied-image-patches",

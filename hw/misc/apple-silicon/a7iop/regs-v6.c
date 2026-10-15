@@ -71,6 +71,12 @@ static uint64_t apple_a7iop_v6_reg_read(void *opaque, hwaddr addr,
     s->diagnostic_mmio_reads++;
     trace_apple_a7iop_wrapper_read(s->role, 6, addr, size);
     switch (addr) {
+    case REG_UNKNOWN_40:
+        /*
+         * /arm-io/dcp carries idle-ctrl-check and AppleA7IOP bit-tests offset
+         * 0x40 when polling for idle on power-down (see modern-dcp-asc.h).
+         */
+        return 1;
     case REG_CPU_CTRL:
         return apple_a7iop_get_cpu_ctrl(s);
     case REG_CPU_STATUS:

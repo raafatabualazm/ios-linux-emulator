@@ -116,18 +116,52 @@ static void check_modes(void)
     CHECK(apple_modern_dcp_iop_mode_has_flags(APPLE_MODERN_DCP_IOP_MODE_V6) !=
           apple_modern_dcp_iop_mode_has_flags(
               APPLE_MODERN_DCP_IOP_MODE_V6_QUIESCED));
+    CHECK(apple_modern_dcp_iop_mode("v6-resumed", &mode) &&
+          mode == APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED);
+    CHECK(apple_modern_dcp_iop_mode_has_peer(
+              APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED));
+    CHECK(apple_modern_dcp_iop_mode_has_flags(
+              APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED));
+    CHECK(apple_modern_dcp_iop_mode_has_segment_map(
+              APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED));
+    CHECK(!apple_modern_dcp_iop_mode_has_segment_map(
+              APPLE_MODERN_DCP_IOP_MODE_V6));
+    CHECK(!apple_modern_dcp_iop_mode_has_segment_map(
+              APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED));
+    CHECK(!apple_modern_dcp_iop_mode_has_segment_map(
+              APPLE_MODERN_DCP_IOP_MODE_V6_EXPERT_START));
 }
 
 /* The two flags are DECLARED additions: neither tree carries either name. */
 static void check_overrides(AppleModernBlob served, AppleModernBlob stock)
 {
-    size_t count = 0;
+    size_t count = 0, seg_count = 0;
     const AppleModernAdtOverride *flags =
         apple_modern_dcp_iop_overrides(&count);
+    const AppleModernAdtOverride *segs =
+        apple_modern_dcp_iop_segment_overrides(&seg_count);
     const char *const names[] = {"pre-loaded", "running"};
+    const char *const seg_names[] = {"region-base", "region-size"};
 
     CHECK(flags != NULL && count == 2);
     CHECK(apple_modern_dcp_iop_overrides(NULL) == flags);
+    CHECK(segs != NULL && seg_count == 2);
+    CHECK(apple_modern_dcp_iop_segment_overrides(NULL) == segs);
+    for (size_t i = 0; i < seg_count; i++) {
+        AppleModernBlob found;
+        Error *error = NULL;
+        CHECK(strcmp(segs[i].path, "/arm-io/dcp/iop-dcp-nub") == 0);
+        CHECK(strcmp(segs[i].name, seg_names[i]) == 0);
+        CHECK(segs[i].size == 8);
+        CHECK(!apple_modern_adt_property(stock, segs[i].path, segs[i].name,
+                                         &found, &error));
+        clear_error(&error);
+        CHECK(!apple_modern_adt_property(served, segs[i].path, segs[i].name,
+                                         &found, &error));
+        clear_error(&error);
+    }
+    CHECK(little64(segs[0].value) == APPLE_MODERN_DCP_IOP_SEGMENT_BASE);
+    CHECK(little64(segs[1].value) == APPLE_MODERN_DCP_IOP_SEGMENT_SIZE);
     for (size_t i = 0; i < count; i++) {
         AppleModernBlob found;
         Error *error = NULL;
@@ -565,6 +599,58 @@ static void check_expert_plan(AppleModernBlob stock)
     free(mutated);
 }
 
+static void check_resumed_plan(AppleModernBlob stock)
+{
+    AppleModernDcpIopPlan plan, peer;
+    AppleModernAddressRange exclusion;
+    Error *error = NULL;
+    uint8_t *mutated = malloc(stock.size);
+    size_t offset, size;
+
+    CHECK(mutated != NULL);
+    CHECK(apple_modern_dcp_iop_plan_build(stock, DRAM_BASE, DRAM_SIZE,
+              NULL, 0, APPLE_MODERN_DCP_IOP_EP_IOMFB, &peer, &error));
+    CHECK(error == NULL);
+    CHECK(apple_modern_dcp_iop_expert_plan_build(stock, DRAM_BASE, DRAM_SIZE,
+                                                NULL, 0, &peer, &error));
+    CHECK(error == NULL);
+
+    plan = peer;
+    CHECK(apple_modern_dcp_iop_resumed_plan_build(stock, DRAM_BASE,
+                                                  DRAM_SIZE, NULL, 0, &plan,
+                                                  &error));
+    CHECK(error == NULL);
+    CHECK(plan.core_address == UINT64_C(0x412850000));
+    CHECK(plan.core_size == APPLE_MODERN_DCP_IOP_CORE_SIZE);
+    CHECK(plan.segment_address == APPLE_MODERN_DCP_IOP_SEGMENT_BASE);
+    CHECK(plan.segment_size == APPLE_MODERN_DCP_IOP_SEGMENT_SIZE);
+
+    /* Mutating reg[1] size is refused. */
+    memcpy(mutated, stock.data, stock.size);
+    offset = property_offset((AppleModernBlob){mutated, stock.size},
+                             "/arm-io/dcp", "reg", &size);
+    CHECK(size == 48);
+    mutated[offset + 24] ^= 0x10;
+    CHECK(!apple_modern_dcp_iop_resumed_plan_build(
+              (AppleModernBlob){mutated, stock.size}, DRAM_BASE, DRAM_SIZE,
+              NULL, 0, &plan, &error));
+    clear_error(&error);
+    CHECK(plan.core_address == 0 && plan.core_size == 0 &&
+          plan.segment_address == 0 && plan.segment_size == 0);
+
+    exclusion = (AppleModernAddressRange){UINT64_C(0x412850000), 4};
+    CHECK(!apple_modern_dcp_iop_resumed_plan_build(stock, DRAM_BASE,
+                                                   DRAM_SIZE, &exclusion, 1,
+                                                   &plan, &error));
+    clear_error(&error);
+    exclusion = (AppleModernAddressRange){APPLE_MODERN_DCP_IOP_SEGMENT_BASE, 4};
+    CHECK(!apple_modern_dcp_iop_resumed_plan_build(stock, DRAM_BASE,
+                                                   DRAM_SIZE, &exclusion, 1,
+                                                   &plan, &error));
+    clear_error(&error);
+    free(mutated);
+}
+
 /*
  * The two trees must agree on everything this model reads except the stripped
  * "compatible" values, because that is what lets the stock tree stand in for
@@ -631,6 +717,7 @@ int main(int argc, char **argv)
     check_trees_agree(served, stock);
     check_plan(stock, served);
     check_expert_plan(stock);
+    check_resumed_plan(stock);
 
     printf("{\"passed\": true, \"checks\": %u, \"firmware_executed\": false,"
            " \"guest_executed\": false, \"endpoint_raw\": %u,"
