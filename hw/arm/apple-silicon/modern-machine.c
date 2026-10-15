@@ -116,6 +116,7 @@ struct AppleModernMachine {
     bool sep_sim;
     bool sep_dart;
     bool modern_ans;
+    bool disp0_panel_id;
     bool modern_pmgr;
     bool modern_mcc_dramcfg;
     uint32_t mcc_dramcfg_reset;
@@ -2933,6 +2934,50 @@ static void modern_init(MachineState *machine)
             overrides[override_count++] = ans_overrides[i];
         }
     }
+    if (s->disp0_panel_id && !s->prepare_only) {
+        /*
+         * iBoot injects the built-in panel's Embedded-Display-Timing (EDT)
+         * identity into /arm-io/disp0; our stock dtree has the geometry/power
+         * data but none of the panel identity, so AppleMobileDispH17P-DCP
+         * set_panel_id logs "missing EDT data raw-panel-serial-number" and
+         * skips Panel_ID, and CoreDisplay never mints a CGDirectDisplayID
+         * (main-display stays 0xFFFFFFFFFFFFFFFF). Supply a minimal valid
+         * 1024x768 internal-panel identity so the synchronous kernel reads
+         * succeed. Data-only; complementary to the D126/D127/D128 mode push.
+         */
+        static const uint8_t fb_w[] = {0x00, 0x04, 0x00, 0x00};   /* 1024 */
+        static const uint8_t fb_h[] = {0x00, 0x03, 0x00, 0x00};   /* 768 */
+        static const uint8_t panel_serial[] = {
+            0x51, 0x45, 0x4d, 0x55, 0x44, 0x34, 0x37, 0x00,       /* "QEMUD47" */
+        };
+        static const uint8_t coverglass_serial[] = {
+            0x43, 0x47, 0x51, 0x45, 0x4d, 0x55, 0x00, 0x00,       /* "CGQEMU" */
+        };
+        static const uint8_t timing_info[] = {
+            0x00, 0x04, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00,
+            0x33, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00,
+            0x58, 0x02, 0x00, 0x00, 0xda, 0x00, 0x00, 0x00,
+            0x06, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00,
+        };
+        static const AppleModernAdtOverride disp0_overrides[] = {
+            {"/arm-io/disp0", "framebuffer-width", fb_w, sizeof(fb_w)},
+            {"/arm-io/disp0", "framebuffer-height", fb_h, sizeof(fb_h)},
+            {"/arm-io/disp0", "raw-panel-serial-number", panel_serial,
+             sizeof(panel_serial)},
+            {"/arm-io/disp0", "coverglass-serial-number", coverglass_serial,
+             sizeof(coverglass_serial)},
+            {"/arm-io/disp0", "display-timing-info", timing_info,
+             sizeof(timing_info)},
+        };
+        if (override_count + ARRAY_SIZE(disp0_overrides) >
+            APPLE_MODERN_MAX_ADT_OVERRIDES) {
+            error_report("disp0-panel-id exceeds ADT override capacity");
+            exit(EXIT_FAILURE);
+        }
+        for (size_t i = 0; i < ARRAY_SIZE(disp0_overrides); i++) {
+            overrides[override_count++] = disp0_overrides[i];
+        }
+    }
     if (s->adt_compat_restore) {
         Error *groups_error = NULL;
         size_t before = override_count;
@@ -3710,6 +3755,7 @@ BOOL_PROPERTY(sep_mailbox, sep_mailbox)
 BOOL_PROPERTY(sep_sim, sep_sim)
 BOOL_PROPERTY(sep_dart, sep_dart)
 BOOL_PROPERTY(modern_ans, modern_ans)
+BOOL_PROPERTY(disp0_panel_id, disp0_panel_id)
 BOOL_PROPERTY(modern_pmgr, modern_pmgr)
 BOOL_PROPERTY(modern_mcc_dramcfg, modern_mcc_dramcfg)
 BOOL_PROPERTY(modern_mcc_quota, modern_mcc_quota)
@@ -3987,6 +4033,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "sep-sim", get_sep_sim, set_sep_sim);
     object_class_property_add_bool(oc, "sep-dart", get_sep_dart, set_sep_dart);
     object_class_property_add_bool(oc, "modern-ans", get_modern_ans, set_modern_ans);
+    object_class_property_add_bool(oc, "disp0-panel-id", get_disp0_panel_id,
+                                   set_disp0_panel_id);
     object_class_property_add_bool(oc, "modern-pmgr", get_modern_pmgr,
                                    set_modern_pmgr);
     object_class_property_add_bool(oc, "modern-mcc-dramcfg", get_modern_mcc_dramcfg,
