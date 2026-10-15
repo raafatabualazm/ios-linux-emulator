@@ -148,6 +148,675 @@ static inline bool ap_nonempty_is_unmasked(uint32_t int_mask)
     return (int_mask & AP_NONEMPTY) == 0;
 }
 
+/* ==== MBOX-PROBE BEGIN: TEMPORARY measurement instrumentation (scratch, never commit) ====
+ *
+ * Observation only: no behaviour of the mailbox changes. Everything is bounded:
+ * at most MBOX_PROBE_MAX_EV_LINES event lines per category plus a counter block
+ * every ~10 s (only when something changed, capped), a final dump at exit, and
+ * a "latest snapshot" file rewritten on every tick.
+ *
+ * Terminology (see the two known defects in regs-v6.c):
+ *   A2I queue  = the inbox of the coprocessor-side mailbox object ("<X>-iop"),
+ *                where mb->iop_mailbox == mb. Fed by the AP, drained by the IOP.
+ *   I2A queue  = the inbox of the AP-side mailbox object ("<X>-ap"), where
+ *                mb->ap_mailbox == mb. Fed by the IOP, drained by the AP.
+ *   Exported lines = the four qemu_irq of the AP-side object (sysbus_pass_irq).
+ *                The two that describe the A2I queue are IOP_NONEMPTY, IOP_EMPTY.
+ *   Latched level  = ap->iop_nonempty / ap->iop_empty, set in the same function
+ *                that calls qemu_set_irq, i.e. the level currently on the wire.
+ *   Expected level = what update_irq_status(ap) would compute right now.
+ *   STALE          = latched != expected, measured right after an A2I operation.
+ */
+#include "qemu/timer.h"
+#include "hw/core/cpu.h"
+#include "hw/intc/apple_aic.h"
+
+#define MBOX_PROBE_MAX_MB 48
+#define MBOX_PROBE_CAP_UNDERFLOW 60
+#define MBOX_PROBE_CAP_STALE 40
+#define MBOX_PROBE_CAP_STALE_ODD 80
+#define MBOX_PROBE_CAP_COINC 20
+#define MBOX_PROBE_CAP_AIC 40
+#define MBOX_PROBE_CAP_EPISODE 60
+#define MBOX_PROBE_CAP_MISC 40
+#define MBOX_PROBE_MAX_DUMPS 300
+#define MBOX_PROBE_TICK_MS 10000
+#define MBOX_PROBE_LATEST \
+    "/tmp/claude-1000/-home-kali-Desktop-Inferno-and-Darwin-VM/f5a0dd67-16db-41c1-85af-26719fda423c/scratchpad/mbox/probe-latest.txt"
+
+typedef struct MboxProbe {
+    AppleA7IOPMailbox *mb;
+    /* per queue (every mailbox object) */
+    uint64_t sent;              /* messages enqueued into this inbox */
+    uint64_t recvd;             /* messages dequeued from this inbox */
+    uint64_t to_nonempty;       /* empty -> non-empty transitions of this inbox */
+    uint64_t to_empty;          /* non-empty -> empty transitions of this inbox */
+    uint64_t max_depth;
+    uint64_t recv_empty_latch;  /* receive on an empty queue: latches underflow */
+    uint64_t recv_sticky_null;  /* receive that returned NULL: underflow already latched */
+    uint64_t recv_dir_off;      /* receive refused: direction not enabled */
+    uint64_t send_dir_off;      /* send dropped: direction not enabled */
+    uint64_t resets;
+    uint64_t resets_with_underflow;
+    uint64_t update_calls;      /* update_irq_status() calls on this object */
+    int64_t first_underflow_ms;
+    /* A2I queue only (the coprocessor-side object): exported AP-side lines */
+    uint64_t a2i_ops;           /* sends + receives on the A2I queue */
+    uint64_t a2i_ops_ap_not_refreshed; /* ops after which the AP object was not refreshed */
+    uint64_t ap_refreshes;      /* update_irq_status() calls on the paired AP object */
+    uint64_t trans_ops;         /* A2I ops that changed empty/non-empty */
+    uint64_t ops_ne_unmasked;   /* ops with IOP_NONEMPTY unmasked in the AP mask */
+    uint64_t ops_e_unmasked;    /* ops with IOP_EMPTY unmasked in the AP mask */
+    uint64_t stale_ops;         /* ops that left either exported line wrong */
+    uint64_t stale_trans_ops;   /* ... of which were empty/non-empty transitions */
+    uint64_t stale_ne_high, stale_ne_low; /* IOP_NONEMPTY: wrongly high / wrongly low */
+    uint64_t stale_e_high, stale_e_low;   /* IOP_EMPTY:    wrongly high / wrongly low */
+    bool ep_open;
+    int64_t ep_start_ns;
+    uint64_t ep_cur_ops;
+    uint64_t ep_count, ep_by_refresh, ep_by_coincidence;
+    uint64_t ep_ops_total, ep_ns_total, ep_ns_max;
+    uint64_t refresh_unexpected_stale; /* self-check: stale at AP refresh with no open episode */
+    uint64_t ap_refresh_changed_ne, ap_refresh_changed_e; /* line levels flipped by a heal */
+    bool reset_pending;         /* the next AP-object refresh is the reset's own */
+    /* v2: can the AP guest observe the exported lines at all? (AIC state) */
+    uint64_t ops_deliv[4];      /* A2I ops with exported line k unmasked+routed in the AIC */
+    uint64_t stale_deliv_ne, stale_deliv_e;   /* stale ops where that wrong line was deliverable */
+    uint64_t stale_deliv_ne_trans, stale_deliv_e_trans;
+    bool ever_deliv[4];
+    uint64_t heal_deliv_ne, heal_deliv_e; /* heal flips while the line was deliverable */
+    /* v2: the AP guest's own writes to the AP-side mailbox interrupt mask */
+    uint64_t mask_set_calls, mask_clr_calls;
+    uint32_t mask_or_ever;
+} MboxProbe;
+
+static MboxProbe mbox_probes[MBOX_PROBE_MAX_MB];
+static int mbox_probe_n;
+static int64_t mbox_probe_t0_ms;
+static uint64_t mbox_probe_events;
+static unsigned mbox_probe_dumps;
+static unsigned mbox_probe_lines_underflow, mbox_probe_lines_stale,
+    mbox_probe_lines_stale_odd, mbox_probe_lines_coinc,
+    mbox_probe_lines_episode, mbox_probe_lines_aic, mbox_probe_lines_misc;
+static GOnce mbox_probe_once = G_ONCE_INIT;
+static int mbox_probe_overflow;
+static uint64_t mbox_probe_last_sum;
+static QEMUTimer *mbox_probe_timer;
+G_LOCK_DEFINE_STATIC(mbox_probe);
+
+static int64_t mbox_probe_now_ms(void)
+{
+    return qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - mbox_probe_t0_ms;
+}
+
+static int mbox_probe_cpu(void)
+{
+    return current_cpu ? (int)current_cpu->cpu_index : -1;
+}
+
+static const char *mbox_probe_dir(AppleA7IOPMailbox *mb)
+{
+    if (mb->iop_mailbox == mb) {
+        return "A2I";
+    }
+    if (mb->ap_mailbox == mb) {
+        return "I2A";
+    }
+    return "???";
+}
+
+/* Is exported line k of the AP object unmasked and routed in the AIC? */
+static bool mbox_probe_line_deliverable(AppleA7IOPMailbox *ap, int k, int *n_out,
+                                        bool *aic_found)
+{
+    qemu_irq irq = ap->irqs[k];
+    AppleAICState *aic;
+    int n;
+
+    *aic_found = false;
+    if (n_out) {
+        *n_out = -1;
+    }
+    if (!irq || !irq->opaque) {
+        return false;
+    }
+    aic = (AppleAICState *)object_dynamic_cast(OBJECT(irq->opaque),
+                                               TYPE_APPLE_AIC);
+    if (!aic || !aic->eir_mask || !aic->eir_dest) {
+        return false;
+    }
+    *aic_found = true;
+    n = irq->n;
+    if (n_out) {
+        *n_out = n;
+    }
+    if (n < 0 || (uint32_t)n >= aic->numIRQ) {
+        return false;
+    }
+    return test_bit32(n, aic->eir_mask) == 0 && aic->eir_dest[n] != 0;
+}
+
+/* caller holds the probe lock */
+static MboxProbe *mbox_probe_get_locked(AppleA7IOPMailbox *mb)
+{
+    int i;
+
+    for (i = 0; i < mbox_probe_n; i++) {
+        if (mbox_probes[i].mb == mb) {
+            return &mbox_probes[i];
+        }
+    }
+    if (mbox_probe_n >= MBOX_PROBE_MAX_MB) {
+        mbox_probe_overflow++;
+        return &mbox_probes[MBOX_PROBE_MAX_MB - 1];
+    }
+    memset(&mbox_probes[mbox_probe_n], 0, sizeof(MboxProbe));
+    mbox_probes[mbox_probe_n].mb = mb;
+    return &mbox_probes[mbox_probe_n++];
+}
+
+static void mbox_probe_print_one(FILE *f, MboxProbe *p)
+{
+    AppleA7IOPMailbox *mb = p->mb;
+    AppleA7IOPMailbox *ap = mb->ap_mailbox;
+
+    fprintf(f,
+            "[mbox-probe] CNT role=%s dir=%s sent=%" PRIu64 " recvd=%" PRIu64
+            " to_nonempty=%" PRIu64 " to_empty=%" PRIu64 " max_depth=%" PRIu64
+            " depth_now=%u underflow_now=%d | UNDERFLOW recv_empty_latch=%" PRIu64
+            " recv_sticky_null=%" PRIu64 " | DIROFF recv=%" PRIu64
+            " send_dropped=%" PRIu64 " | resets=%" PRIu64
+            " resets_with_underflow=%" PRIu64 " update_calls=%" PRIu64 "\n",
+            mb->role, mbox_probe_dir(mb), p->sent, p->recvd, p->to_nonempty,
+            p->to_empty, p->max_depth, mb->count, mb->underflow,
+            p->recv_empty_latch, p->recv_sticky_null, p->recv_dir_off,
+            p->send_dir_off, p->resets, p->resets_with_underflow,
+            p->update_calls);
+    if (mb->iop_mailbox == mb && ap != mb) {
+        fprintf(f,
+                "[mbox-probe] STALE role=%s a2i_ops=%" PRIu64
+                " ap_not_refreshed_by_op=%" PRIu64 " ap_refreshes=%" PRIu64
+                " trans_ops=%" PRIu64 " ops_with_IOP_NONEMPTY_unmasked=%" PRIu64
+                " ops_with_IOP_EMPTY_unmasked=%" PRIu64 " stale_ops=%" PRIu64
+                " stale_trans_ops=%" PRIu64 " ne_wrong_high=%" PRIu64
+                " ne_wrong_low=%" PRIu64 " e_wrong_high=%" PRIu64
+                " e_wrong_low=%" PRIu64 " | EPISODES n=%" PRIu64
+                " healed_by_ap_refresh=%" PRIu64 " ended_by_coincidence=%" PRIu64
+                " open=%d ops_total=%" PRIu64 " ms_total=%" PRIu64
+                " ms_max=%" PRIu64 " heal_flipped_ne=%" PRIu64
+                " heal_flipped_e=%" PRIu64 " selfcheck_unexpected=%" PRIu64
+                "\n",
+                mb->role, p->a2i_ops, p->a2i_ops_ap_not_refreshed,
+                p->ap_refreshes, p->trans_ops, p->ops_ne_unmasked,
+                p->ops_e_unmasked, p->stale_ops, p->stale_trans_ops,
+                p->stale_ne_high, p->stale_ne_low, p->stale_e_high,
+                p->stale_e_low, p->ep_count, p->ep_by_refresh,
+                p->ep_by_coincidence, p->ep_open, p->ep_ops_total,
+                p->ep_ns_total / 1000000, p->ep_ns_max / 1000000,
+                p->ap_refresh_changed_ne, p->ap_refresh_changed_e,
+                p->refresh_unexpected_stale);
+        fprintf(f,
+                "[mbox-probe] WIRING role=%s ap_obj=%s ap_int_mask=0x%x "
+                "exported_lines_connected(IOP_NONEMPTY,IOP_EMPTY,AP_NONEMPTY,"
+                "AP_EMPTY)=%d,%d,%d,%d latched=%d,%d,%d,%d iop_obj_int_mask=0x%x"
+                "\n",
+                mb->role, ap->role, ap->int_mask,
+                ap->irqs[APPLE_A7IOP_IRQ_IOP_NONEMPTY] != NULL,
+                ap->irqs[APPLE_A7IOP_IRQ_IOP_EMPTY] != NULL,
+                ap->irqs[APPLE_A7IOP_IRQ_AP_NONEMPTY] != NULL,
+                ap->irqs[APPLE_A7IOP_IRQ_AP_EMPTY] != NULL, ap->iop_nonempty,
+                ap->iop_empty, ap->ap_nonempty, ap->ap_empty, mb->int_mask);
+        {
+            int k, n[4];
+            bool found[4], deliv[4];
+            MboxProbe *app = mbox_probe_get_locked(ap);
+
+            for (k = 0; k < 4; k++) {
+                deliv[k] = mbox_probe_line_deliverable(ap, k, &n[k], &found[k]);
+            }
+            fprintf(f,
+                    "[mbox-probe] AIC role=%s (order IOP_NONEMPTY,IOP_EMPTY,"
+                    "AP_NONEMPTY,AP_EMPTY) aic_input=%d,%d,%d,%d wired_to_aic="
+                    "%d,%d,%d,%d deliverable_now=%d,%d,%d,%d ever_deliverable="
+                    "%d,%d,%d,%d ops_deliverable=%" PRIu64 ",%" PRIu64 ",%"
+                    PRIu64 ",%" PRIu64 " stale_ops_wrong_NONEMPTY_deliverable="
+                    "%" PRIu64 " stale_ops_wrong_EMPTY_deliverable=%" PRIu64
+                    " stale_trans_NONEMPTY_deliv=%" PRIu64
+                    " stale_trans_EMPTY_deliv=%" PRIu64
+                    " heal_flips_deliverable(ne,e)=%" PRIu64 ",%" PRIu64
+                    " | AP int-mask writes set=%" PRIu64 " clr=%" PRIu64
+                    " or_ever=0x%x\n",
+                    mb->role, n[0], n[1], n[2], n[3], found[0], found[1],
+                    found[2], found[3], deliv[0], deliv[1], deliv[2], deliv[3],
+                    p->ever_deliv[0], p->ever_deliv[1], p->ever_deliv[2],
+                    p->ever_deliv[3], p->ops_deliv[0], p->ops_deliv[1],
+                    p->ops_deliv[2], p->ops_deliv[3], p->stale_deliv_ne,
+                    p->stale_deliv_e, p->stale_deliv_ne_trans,
+                    p->stale_deliv_e_trans, p->heal_deliv_ne, p->heal_deliv_e,
+                    app->mask_set_calls, app->mask_clr_calls,
+                    app->mask_or_ever);
+        }
+    }
+}
+
+/* caller holds the probe lock */
+static void mbox_probe_dump_locked(const char *why)
+{
+    int i;
+    FILE *latest;
+
+    fprintf(stderr, "[mbox-probe] ---- %s t=%" PRId64 "ms events=%" PRIu64
+            " probes=%d overflow=%d ----\n", why, mbox_probe_now_ms(),
+            mbox_probe_events, mbox_probe_n, mbox_probe_overflow);
+    for (i = 0; i < mbox_probe_n; i++) {
+        mbox_probe_print_one(stderr, &mbox_probes[i]);
+    }
+    latest = fopen(MBOX_PROBE_LATEST, "w");
+    if (latest) {
+        fprintf(latest, "[mbox-probe] ---- %s t=%" PRId64 "ms events=%" PRIu64
+                " probes=%d overflow=%d ----\n", why, mbox_probe_now_ms(),
+                mbox_probe_events, mbox_probe_n, mbox_probe_overflow);
+        for (i = 0; i < mbox_probe_n; i++) {
+            mbox_probe_print_one(latest, &mbox_probes[i]);
+        }
+        fclose(latest);
+    }
+}
+
+static uint64_t mbox_probe_sum_locked(void)
+{
+    uint64_t sum = mbox_probe_events;
+    int i;
+
+    for (i = 0; i < mbox_probe_n; i++) {
+        sum += mbox_probes[i].ap_refreshes + mbox_probes[i].update_calls +
+               mbox_probes[i].resets + mbox_probes[i].recv_empty_latch;
+    }
+    return sum;
+}
+
+static void mbox_probe_atexit(void)
+{
+    G_LOCK(mbox_probe);
+    mbox_probe_dump_locked("FINAL (atexit)");
+    G_UNLOCK(mbox_probe);
+}
+
+static void mbox_probe_tick(void *opaque)
+{
+    uint64_t sum;
+
+    G_LOCK(mbox_probe);
+    sum = mbox_probe_sum_locked();
+    if (sum != mbox_probe_last_sum && mbox_probe_dumps < MBOX_PROBE_MAX_DUMPS) {
+        mbox_probe_last_sum = sum;
+        mbox_probe_dumps++;
+        mbox_probe_dump_locked("periodic");
+    }
+    G_UNLOCK(mbox_probe);
+    timer_mod(mbox_probe_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + MBOX_PROBE_TICK_MS);
+}
+
+static gpointer mbox_probe_init_fn(gpointer unused)
+{
+    mbox_probe_t0_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    atexit(mbox_probe_atexit);
+    mbox_probe_timer = timer_new_ms(QEMU_CLOCK_REALTIME, mbox_probe_tick, NULL);
+    timer_mod(mbox_probe_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + MBOX_PROBE_TICK_MS);
+    fprintf(stderr, "[mbox-probe] armed (temporary instrumentation)\n");
+    return NULL;
+}
+
+static void mbox_probe_init_once(void)
+{
+    g_once(&mbox_probe_once, mbox_probe_init_fn, NULL);
+}
+
+/* caller holds the probe lock; also logs the first time each line is seen
+ * deliverable */
+static void mbox_probe_note_deliv(MboxProbe *p, AppleA7IOPMailbox *ap, int k,
+                                  bool deliv)
+{
+    static const char *const names[4] = { "IOP_NONEMPTY", "IOP_EMPTY",
+                                          "AP_NONEMPTY", "AP_EMPTY" };
+    int n;
+    bool found;
+
+    if (!deliv || p->ever_deliv[k]) {
+        return;
+    }
+    p->ever_deliv[k] = true;
+    if (mbox_probe_lines_aic < MBOX_PROBE_CAP_AIC) {
+        mbox_probe_lines_aic++;
+        (void)mbox_probe_line_deliverable(ap, k, &n, &found);
+        fprintf(stderr,
+                "[mbox-probe] AIC-DELIVERABLE-FIRST t=%" PRId64 "ms role=%s "
+                "line=%s aic_input=%d cpu=%d\n", mbox_probe_now_ms(),
+                p->mb->role, names[k], n, mbox_probe_cpu());
+    }
+}
+
+/* Expected vs latched exported IOP_* levels for the A2I queue of `iop`. */
+static void mbox_probe_a2i_levels(AppleA7IOPMailbox *iop, bool *exp_ne,
+                                  bool *exp_e, bool *act_ne, bool *act_e,
+                                  bool *ne_unm, bool *e_unm)
+{
+    AppleA7IOPMailbox *ap = iop->ap_mailbox;
+    bool empty = QTAILQ_EMPTY(&iop->inbox);
+
+    *ne_unm = iop_nonempty_is_unmasked(ap->int_mask);
+    *e_unm = iop_empty_is_unmasked(ap->int_mask);
+    *exp_ne = (*ne_unm && !empty) || iop->underflow;
+    *exp_e = *e_unm && empty;
+    *act_ne = ap->iop_nonempty;
+    *act_e = ap->iop_empty;
+}
+
+/* caller holds the probe lock */
+static void mbox_probe_close_episode(MboxProbe *p, bool by_refresh)
+{
+    int64_t dur = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - p->ep_start_ns;
+
+    p->ep_open = false;
+    p->ep_count++;
+    if (by_refresh) {
+        p->ep_by_refresh++;
+    } else {
+        p->ep_by_coincidence++;
+    }
+    p->ep_ops_total += p->ep_cur_ops;
+    p->ep_ns_total += dur;
+    if ((uint64_t)dur > p->ep_ns_max) {
+        p->ep_ns_max = dur;
+    }
+    if (by_refresh ? mbox_probe_lines_episode < MBOX_PROBE_CAP_EPISODE
+                   : mbox_probe_lines_coinc < MBOX_PROBE_CAP_COINC) {
+        if (by_refresh) {
+            mbox_probe_lines_episode++;
+        } else {
+            mbox_probe_lines_coinc++;
+        }
+        fprintf(stderr,
+                "[mbox-probe] EPISODE-END t=%" PRId64 "ms role=%s by=%s "
+                "ops=%" PRIu64 " dur_us=%" PRId64 " cpu=%d\n",
+                mbox_probe_now_ms(), p->mb->role,
+                by_refresh ? "ap-refresh" : "coincidence", p->ep_cur_ops,
+                dur / 1000, mbox_probe_cpu());
+    }
+}
+
+/* Called at the top of update_irq_status(): registers the mailbox and detects
+ * a refresh of the exported (AP-side) object. */
+static void mbox_probe_on_update(AppleA7IOPMailbox *s)
+{
+    MboxProbe *p;
+
+    mbox_probe_init_once();
+    G_LOCK(mbox_probe);
+    p = mbox_probe_get_locked(s);
+    p->update_calls++;
+    if (s->ap_mailbox == s && s->iop_mailbox != s) {
+        MboxProbe *ip = mbox_probe_get_locked(s->iop_mailbox);
+        bool exp_ne, exp_e, act_ne, act_e, ne_unm, e_unm;
+
+        int kk;
+
+        ip->ap_refreshes++;
+        for (kk = 0; kk < 4; kk++) {
+            bool ff;
+
+            mbox_probe_note_deliv(ip, s, kk,
+                                  mbox_probe_line_deliverable(s, kk, NULL, &ff));
+        }
+        mbox_probe_a2i_levels(s->iop_mailbox, &exp_ne, &exp_e, &act_ne, &act_e,
+                              &ne_unm, &e_unm);
+        if (ip->reset_pending) {
+            /* the refresh that reset itself performs after clearing the
+             * latched flags: not a stale-line healing, do not count it */
+            ip->reset_pending = false;
+            ip->ap_refreshes--;
+        } else if (exp_ne != act_ne || exp_e != act_e) {
+            bool d_ne, d_e, f1, f2;
+
+            d_ne = mbox_probe_line_deliverable(s, APPLE_A7IOP_IRQ_IOP_NONEMPTY,
+                                               NULL, &f1);
+            d_e = mbox_probe_line_deliverable(s, APPLE_A7IOP_IRQ_IOP_EMPTY,
+                                              NULL, &f2);
+            ip->heal_deliv_ne += (exp_ne != act_ne) && d_ne;
+            ip->heal_deliv_e += (exp_e != act_e) && d_e;
+            ip->ap_refresh_changed_ne += (exp_ne != act_ne);
+            ip->ap_refresh_changed_e += (exp_e != act_e);
+            if (ip->ep_open) {
+                mbox_probe_close_episode(ip, true);
+            } else {
+                ip->refresh_unexpected_stale++;
+                if (mbox_probe_lines_misc < MBOX_PROBE_CAP_MISC) {
+                    mbox_probe_lines_misc++;
+                    fprintf(stderr,
+                            "[mbox-probe] SELFCHECK stale-at-refresh with no "
+                            "open episode role=%s exp_ne=%d act_ne=%d exp_e=%d "
+                            "act_e=%d\n", s->iop_mailbox->role, exp_ne, act_ne,
+                            exp_e, act_e);
+                }
+            }
+        }
+    }
+    G_UNLOCK(mbox_probe);
+}
+
+/* After an operation on the A2I queue of `iop` (the coprocessor-side object),
+ * check the exported AP-side lines. caller holds the probe lock. */
+static void mbox_probe_check_a2i(MboxProbe *p, AppleA7IOPMailbox *iop,
+                                 const char *op, bool trans)
+{
+    AppleA7IOPMailbox *ap = iop->ap_mailbox;
+    bool exp_ne, exp_e, act_ne, act_e, ne_unm, e_unm, stale;
+    bool d[4], found, ne_bad, e_bad, odd, interesting;
+    int k;
+
+    if (ap == iop) {
+        return;
+    }
+    mbox_probe_a2i_levels(iop, &exp_ne, &exp_e, &act_ne, &act_e, &ne_unm,
+                          &e_unm);
+    for (k = 0; k < 4; k++) {
+        d[k] = mbox_probe_line_deliverable(ap, k, NULL, &found);
+        p->ops_deliv[k] += d[k];
+        mbox_probe_note_deliv(p, ap, k, d[k]);
+    }
+    p->a2i_ops++;
+    p->a2i_ops_ap_not_refreshed++; /* by construction: send/recv on iop obj
+                                      only calls update_irq(iop obj) */
+    p->trans_ops += trans;
+    p->ops_ne_unmasked += ne_unm;
+    p->ops_e_unmasked += e_unm;
+    ne_bad = exp_ne != act_ne;
+    e_bad = exp_e != act_e;
+    stale = ne_bad || e_bad;
+    if (stale) {
+        p->stale_deliv_ne += ne_bad && d[APPLE_A7IOP_IRQ_IOP_NONEMPTY];
+        p->stale_deliv_e += e_bad && d[APPLE_A7IOP_IRQ_IOP_EMPTY];
+        p->stale_deliv_ne_trans += ne_bad && trans &&
+                                   d[APPLE_A7IOP_IRQ_IOP_NONEMPTY];
+        p->stale_deliv_e_trans += e_bad && trans &&
+                                  d[APPLE_A7IOP_IRQ_IOP_EMPTY];
+        /* "odd": the wire is wrongly HIGH for NONEMPTY / wrongly LOW for EMPTY */
+        odd = (act_ne && !exp_ne) || (!act_e && exp_e);
+        interesting = odd || (ne_bad && d[APPLE_A7IOP_IRQ_IOP_NONEMPTY]) ||
+                      (e_bad && d[APPLE_A7IOP_IRQ_IOP_EMPTY]);
+        p->stale_ops++;
+        p->stale_trans_ops += trans;
+        p->stale_ne_high += (act_ne && !exp_ne);
+        p->stale_ne_low += (!act_ne && exp_ne);
+        p->stale_e_high += (act_e && !exp_e);
+        p->stale_e_low += (!act_e && exp_e);
+        if (!p->ep_open) {
+            p->ep_open = true;
+            p->ep_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+            p->ep_cur_ops = 0;
+        }
+        p->ep_cur_ops++;
+        if (interesting ? mbox_probe_lines_stale_odd < MBOX_PROBE_CAP_STALE_ODD
+                        : mbox_probe_lines_stale < MBOX_PROBE_CAP_STALE) {
+            if (interesting) {
+                mbox_probe_lines_stale_odd++;
+            } else {
+                mbox_probe_lines_stale++;
+            }
+            fprintf(stderr,
+                    "[mbox-probe] STALE%s t=%" PRId64 "ms role=%s op=%s trans=%d "
+                    "depth=%u ne(exp=%d act=%d unmasked=%d aic_deliv=%d) "
+                    "e(exp=%d act=%d unmasked=%d aic_deliv=%d) ap_mask=0x%x "
+                    "cpu=%d\n", interesting ? "-ODD" : "",
+                    mbox_probe_now_ms(), iop->role, op, trans, iop->count,
+                    exp_ne, act_ne, ne_unm, d[APPLE_A7IOP_IRQ_IOP_NONEMPTY],
+                    exp_e, act_e, e_unm, d[APPLE_A7IOP_IRQ_IOP_EMPTY],
+                    ap->int_mask, mbox_probe_cpu());
+        }
+    } else if (p->ep_open) {
+        mbox_probe_close_episode(p, false);
+    }
+}
+
+static void mbox_probe_after_send(AppleA7IOPMailbox *s, bool was_empty)
+{
+    MboxProbe *p;
+
+    mbox_probe_init_once();
+    G_LOCK(mbox_probe);
+    mbox_probe_events++;
+    p = mbox_probe_get_locked(s);
+    p->sent++;
+    p->to_nonempty += was_empty;
+    if (s->count > p->max_depth) {
+        p->max_depth = s->count;
+    }
+    if (s->iop_mailbox == s) {
+        mbox_probe_check_a2i(p, s, "send", was_empty);
+    }
+    G_UNLOCK(mbox_probe);
+}
+
+static void mbox_probe_after_recv(AppleA7IOPMailbox *s)
+{
+    MboxProbe *p;
+    bool now_empty = QTAILQ_EMPTY(&s->inbox);
+
+    mbox_probe_init_once();
+    G_LOCK(mbox_probe);
+    mbox_probe_events++;
+    p = mbox_probe_get_locked(s);
+    p->recvd++;
+    p->to_empty += now_empty;
+    if (s->iop_mailbox == s) {
+        mbox_probe_check_a2i(p, s, "recv", now_empty);
+    }
+    G_UNLOCK(mbox_probe);
+}
+
+/* (a) a receive that returned NULL. sticky=false: it latched underflow now. */
+static void mbox_probe_recv_null(AppleA7IOPMailbox *s, bool sticky)
+{
+    MboxProbe *p;
+
+    mbox_probe_init_once();
+    G_LOCK(mbox_probe);
+    mbox_probe_events++;
+    p = mbox_probe_get_locked(s);
+    if (sticky) {
+        p->recv_sticky_null++;
+    } else {
+        p->recv_empty_latch++;
+        if (p->first_underflow_ms == 0) {
+            p->first_underflow_ms = mbox_probe_now_ms() + 1;
+        }
+    }
+    if (!sticky ? mbox_probe_lines_underflow < MBOX_PROBE_CAP_UNDERFLOW :
+                  (p->recv_sticky_null <= 10 &&
+                   mbox_probe_lines_underflow < MBOX_PROBE_CAP_UNDERFLOW)) {
+        mbox_probe_lines_underflow++;
+        fprintf(stderr,
+                "[mbox-probe] UNDERFLOW t=%" PRId64 "ms role=%s dir=%s %s "
+                "sent=%" PRIu64 " recvd=%" PRIu64 " depth=%u cpu=%d\n",
+                mbox_probe_now_ms(), s->role, mbox_probe_dir(s),
+                sticky ? "sticky-null-return" : "LATCHED", p->sent, p->recvd,
+                s->count, mbox_probe_cpu());
+    }
+    G_UNLOCK(mbox_probe);
+}
+
+/* send_ap/send_iop/recv_ap/recv_iop refused because the direction is disabled. */
+static void mbox_probe_dir_off(AppleA7IOPMailbox *queue, bool is_send)
+{
+    MboxProbe *p;
+
+    mbox_probe_init_once();
+    G_LOCK(mbox_probe);
+    p = mbox_probe_get_locked(queue);
+    if (is_send) {
+        p->send_dir_off++;
+    } else {
+        p->recv_dir_off++;
+    }
+    if (mbox_probe_lines_misc < MBOX_PROBE_CAP_MISC) {
+        mbox_probe_lines_misc++;
+        fprintf(stderr,
+                "[mbox-probe] DIR-OFF t=%" PRId64 "ms role=%s dir=%s %s cpu=%d\n",
+                mbox_probe_now_ms(), queue->role, mbox_probe_dir(queue),
+                is_send ? "send-dropped" : "recv-refused", mbox_probe_cpu());
+    }
+    G_UNLOCK(mbox_probe);
+}
+
+static void mbox_probe_on_mask(AppleA7IOPMailbox *s, bool is_set, uint32_t value)
+{
+    MboxProbe *p;
+
+    mbox_probe_init_once();
+    G_LOCK(mbox_probe);
+    p = mbox_probe_get_locked(s);
+    if (is_set) {
+        p->mask_set_calls++;
+        p->mask_or_ever |= value;
+    } else {
+        p->mask_clr_calls++;
+    }
+    if (mbox_probe_lines_misc < MBOX_PROBE_CAP_MISC) {
+        mbox_probe_lines_misc++;
+        fprintf(stderr,
+                "[mbox-probe] INT-MASK t=%" PRId64 "ms role=%s dir=%s %s value=0x%x "
+                "mask_before=0x%x cpu=%d\n", mbox_probe_now_ms(), s->role,
+                mbox_probe_dir(s), is_set ? "SET(mask)" : "CLR(unmask)", value,
+                s->int_mask, mbox_probe_cpu());
+    }
+    G_UNLOCK(mbox_probe);
+}
+
+static void mbox_probe_on_reset(AppleA7IOPMailbox *s)
+{
+    MboxProbe *p;
+
+    mbox_probe_init_once();
+    G_LOCK(mbox_probe);
+    p = mbox_probe_get_locked(s);
+    p->resets++;
+    p->resets_with_underflow += s->underflow;
+    if (s->ap_mailbox == s && s->iop_mailbox != s) {
+        mbox_probe_get_locked(s->iop_mailbox)->reset_pending = true;
+    }
+    if (mbox_probe_lines_misc < MBOX_PROBE_CAP_MISC) {
+        mbox_probe_lines_misc++;
+        fprintf(stderr,
+                "[mbox-probe] RESET t=%" PRId64 "ms role=%s dir=%s underflow_was=%d "
+                "depth_was=%u\n", mbox_probe_now_ms(), s->role,
+                mbox_probe_dir(s), s->underflow, s->count);
+    }
+    G_UNLOCK(mbox_probe);
+}
+/* ==== MBOX-PROBE END ==== */
+
 void apple_a7iop_mailbox_update_irq_status(AppleA7IOPMailbox *s)
 {
     bool iop_empty;
@@ -159,6 +828,7 @@ void apple_a7iop_mailbox_update_irq_status(AppleA7IOPMailbox *s)
     bool ap_nonempty_unmasked;
     bool ap_empty_unmasked;
 
+    mbox_probe_on_update(s); /* MBOX-PROBE */
     iop_empty = QTAILQ_EMPTY(&s->iop_mailbox->inbox);
     ap_empty = QTAILQ_EMPTY(&s->ap_mailbox->inbox);
     iop_underflow = s->iop_mailbox->underflow;
@@ -221,6 +891,8 @@ bool apple_a7iop_mailbox_is_empty(AppleA7IOPMailbox *s)
 static void apple_a7iop_mailbox_send(AppleA7IOPMailbox *s,
                                      AppleA7IOPMessage *msg)
 {
+    bool probe_was_empty = QTAILQ_EMPTY(&s->inbox); /* MBOX-PROBE */
+
     assert_nonnull(msg);
 
     QEMU_LOCK_GUARD(&s->lock);
@@ -231,6 +903,7 @@ static void apple_a7iop_mailbox_send(AppleA7IOPMailbox *s,
     QTAILQ_INSERT_TAIL(&s->inbox, msg, next);
     s->count++;
     apple_a7iop_mailbox_update_irq(s);
+    mbox_probe_after_send(s, probe_was_empty); /* MBOX-PROBE */
 
     if (s->handle_messages_bh != NULL) {
         qemu_bh_schedule(s->handle_messages_bh);
@@ -244,6 +917,7 @@ void apple_a7iop_mailbox_send_ap(AppleA7IOPMailbox *s, AppleA7IOPMessage *msg)
         if (!s->ap_dir_en) {
             qemu_log_mask(LOG_GUEST_ERROR, "%s: %s direction not enabled.\n",
                           __FUNCTION__, s->role);
+            mbox_probe_dir_off(s->ap_mailbox, true); /* MBOX-PROBE */
             return;
         }
     }
@@ -258,6 +932,7 @@ void apple_a7iop_mailbox_send_iop(AppleA7IOPMailbox *s, AppleA7IOPMessage *msg)
         if (!s->iop_dir_en) {
             qemu_log_mask(LOG_GUEST_ERROR, "%s: %s direction not enabled.\n",
                           __FUNCTION__, s->role);
+            mbox_probe_dir_off(s->iop_mailbox, true); /* MBOX-PROBE */
             return;
         }
     }
@@ -275,12 +950,14 @@ static AppleA7IOPMessage *apple_a7iop_mailbox_recv(AppleA7IOPMailbox *s)
     AppleA7IOPMessage *msg;
 
     if (s->underflow) {
+        mbox_probe_recv_null(s, true); /* MBOX-PROBE */
         return NULL;
     }
 
     msg = QTAILQ_FIRST(&s->inbox);
     if (msg == NULL) {
         s->underflow = true;
+        mbox_probe_recv_null(s, false); /* MBOX-PROBE */
         qemu_log_mask(LOG_GUEST_ERROR, "%s: %s underflowed.\n", __FUNCTION__,
                       s->role);
         apple_a7iop_mailbox_update_irq(s);
@@ -293,6 +970,7 @@ static AppleA7IOPMessage *apple_a7iop_mailbox_recv(AppleA7IOPMailbox *s)
                                    ldq_le_p(msg->data + sizeof(uint64_t)));
     s->count--;
     apple_a7iop_mailbox_update_irq(s);
+    mbox_probe_after_recv(s); /* MBOX-PROBE */
 
     return msg;
 }
@@ -304,6 +982,7 @@ AppleA7IOPMessage *apple_a7iop_mailbox_recv_iop(AppleA7IOPMailbox *s)
     if (!s->iop_dir_en) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: %s direction not enabled.\n",
                       __FUNCTION__, s->role);
+        mbox_probe_dir_off(s->iop_mailbox, false); /* MBOX-PROBE */
         return NULL;
     }
 
@@ -319,6 +998,7 @@ AppleA7IOPMessage *apple_a7iop_mailbox_recv_ap(AppleA7IOPMailbox *s)
     if (!s->ap_dir_en) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: %s direction not enabled.\n",
                       __FUNCTION__, s->role);
+        mbox_probe_dir_off(s->ap_mailbox, false); /* MBOX-PROBE */
         return NULL;
     }
 
@@ -338,6 +1018,7 @@ void apple_a7iop_mailbox_set_int_mask(AppleA7IOPMailbox *s, uint32_t value)
 {
     QEMU_LOCK_GUARD(&s->lock);
 
+    mbox_probe_on_mask(s, true, value); /* MBOX-PROBE */
     s->int_mask |= value;
     apple_a7iop_mailbox_update_irq(s);
 }
@@ -346,6 +1027,7 @@ void apple_a7iop_mailbox_clear_int_mask(AppleA7IOPMailbox *s, uint32_t value)
 {
     QEMU_LOCK_GUARD(&s->lock);
 
+    mbox_probe_on_mask(s, false, value); /* MBOX-PROBE */
     s->int_mask &= ~value;
     apple_a7iop_mailbox_update_irq(s);
 }
@@ -611,6 +1293,7 @@ static void apple_a7iop_mailbox_reset(DeviceState *dev)
 
     assert_false(s->iop_mailbox == s->ap_mailbox);
 
+    mbox_probe_on_reset(s); /* MBOX-PROBE */
     s->count = 0;
     s->iop_dir_en = true;
     s->ap_dir_en = true;
