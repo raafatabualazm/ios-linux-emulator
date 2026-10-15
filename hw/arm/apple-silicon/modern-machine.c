@@ -86,6 +86,24 @@ struct AppleModernMachine {
     AppleDARTT8110State *sep_mapper;
     AddressSpace *sep_dma_as;
     DeviceState *sep_mbox;
+    /*
+     * Diagnostic catch-all over the /arm-io window, opt-in (unmapped-trace),
+     * default off. NOT a device: reads return zero, writes are discarded, and
+     * the FIRST access to each distinct address is logged. It exists to answer
+     * one question -- how many registers a boot still wants -- by letting the
+     * guest run past an unmapped access instead of taking the external abort
+     * that normally stops it at the first one.
+     */
+    bool unmapped_trace;
+#define APPLE_MODERN_UNMAPPED_WINDOWS 8
+    MemoryRegion unmapped_trace_mr[APPLE_MODERN_UNMAPPED_WINDOWS];
+    uint64_t unmapped_base[APPLE_MODERN_UNMAPPED_WINDOWS];
+    unsigned unmapped_windows;
+    uint64_t unmapped_seen[4096];
+    uint32_t unmapped_distinct;
+    uint64_t unmapped_total;
+    uint64_t unmapped_reads;
+    uint64_t unmapped_writes;
     bool aic_trace;
     bool modern_aic;
     DeviceState *aic;
@@ -1232,6 +1250,139 @@ static bool map_sep_mailbox(AppleModernMachine *s, Error **errp)
     return true;
 }
 
+/*
+ * Record a first sighting. Open addressing over a fixed table: bounded memory,
+ * no allocation on the MMIO path, and a full table degrades to "log it again"
+ * rather than losing the access entirely.
+ */
+static bool unmapped_first_sight(AppleModernMachine *s, uint64_t address)
+{
+    uint64_t key = address | (UINT64_C(1) << 63);
+    size_t mask = ARRAY_SIZE(s->unmapped_seen) - 1;
+    size_t slot = (size_t)((address >> 2) * UINT64_C(0x9E3779B97F4A7C15) >> 50) & mask;
+
+    for (size_t probe = 0; probe <= mask; probe++) {
+        uint64_t *cell = &s->unmapped_seen[(slot + probe) & mask];
+
+        if (*cell == key) {
+            return false;
+        }
+        if (*cell == 0) {
+            *cell = key;
+            s->unmapped_distinct++;
+            return true;
+        }
+    }
+    return true;
+}
+
+typedef struct AppleModernUnmappedWindow {
+    AppleModernMachine *machine;
+    uint64_t base;
+} AppleModernUnmappedWindow;
+
+static uint64_t unmapped_trace_read(void *opaque, hwaddr offset, unsigned size)
+{
+    AppleModernUnmappedWindow *w = opaque;
+    AppleModernMachine *s = w->machine;
+    uint64_t address = w->base + offset;
+
+    s->unmapped_total++;
+    s->unmapped_reads++;
+    if (unmapped_first_sight(s, address)) {
+        qemu_log_mask(LOG_UNIMP, "UNMAPPED-TRACE read  0x%" PRIx64 " size %u "
+                      "(first sight, distinct %u)\n", address, size,
+                      s->unmapped_distinct);
+    }
+    return 0;
+}
+
+static void unmapped_trace_write(void *opaque, hwaddr offset, uint64_t value,
+                                 unsigned size)
+{
+    AppleModernUnmappedWindow *w = opaque;
+    AppleModernMachine *s = w->machine;
+    uint64_t address = w->base + offset;
+
+    s->unmapped_total++;
+    s->unmapped_writes++;
+    if (unmapped_first_sight(s, address)) {
+        qemu_log_mask(LOG_UNIMP, "UNMAPPED-TRACE write 0x%" PRIx64 " size %u "
+                      "value 0x%" PRIx64 " (first sight, distinct %u)\n",
+                      address, size, value, s->unmapped_distinct);
+    }
+}
+
+static const MemoryRegionOps unmapped_trace_ops = {
+    .read = unmapped_trace_read,
+    .write = unmapped_trace_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .impl = { .min_access_size = 1, .max_access_size = 8 },
+};
+
+/*
+ * Lowest priority, so every real device mapped inside /arm-io still wins and
+ * only genuinely unmapped offsets reach this. Returning zero is a declared
+ * simplification: a driver that reads a status word can be misled by it, so a
+ * boot that gets further under this aperture does NOT show that those
+ * registers are correctly modelled.
+ */
+static bool map_unmapped_trace(AppleModernMachine *s, Error **errp)
+{
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    AppleModernBlob ranges;
+
+    if (!apple_modern_adt_property(dtree, "/arm-io", "ranges", &ranges, errp)) {
+        return false;
+    }
+    if (!ranges.size || ranges.size % 24) {
+        error_setg(errp, "unsupported /arm-io ranges schema");
+        return false;
+    }
+    /* One aperture per range the ADT declares, so coverage follows the tree
+     * rather than a hardcoded window. */
+    for (size_t i = 0; i < ranges.size; i += 24) {
+        uint64_t parent = ldq_le_p(ranges.data + i + 8);
+        uint64_t length = ldq_le_p(ranges.data + i + 16);
+        AppleModernUnmappedWindow *w;
+        g_autofree char *name = NULL;
+
+        if (!length) {
+            continue;
+        }
+        if (s->unmapped_windows >= APPLE_MODERN_UNMAPPED_WINDOWS) {
+            error_setg(errp, "/arm-io declares more ranges than the trace "
+                       "aperture supports");
+            return false;
+        }
+        w = g_new0(AppleModernUnmappedWindow, 1);
+        w->machine = s;
+        w->base = parent;
+        s->unmapped_base[s->unmapped_windows] = parent;
+        name = g_strdup_printf("apple-modern.unmapped%u", s->unmapped_windows);
+        memory_region_init_io(&s->unmapped_trace_mr[s->unmapped_windows],
+                              OBJECT(s), &unmapped_trace_ops, w, name, length);
+        memory_region_add_subregion_overlap(
+            get_system_memory(), parent,
+            &s->unmapped_trace_mr[s->unmapped_windows], -1);
+        s->unmapped_windows++;
+    }
+    object_property_add_uint32_ptr(OBJECT(s), "unmapped-distinct",
+                                   &s->unmapped_distinct, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(OBJECT(s), "unmapped-total",
+                                   &s->unmapped_total, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(OBJECT(s), "unmapped-reads",
+                                   &s->unmapped_reads, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(OBJECT(s), "unmapped-writes",
+                                   &s->unmapped_writes, OBJ_PROP_FLAG_READ);
+    warn_report("apple-modern: opt-in unmapped-trace over %u /arm-io range(s) "
+                "(diagnostic: reads return zero, writes discarded; a boot that "
+                "advances under it is NOT evidence those registers work)",
+                s->unmapped_windows);
+    return true;
+}
+
 static uint64_t sep_trace_read(void *opaque, hwaddr offset, unsigned size)
 {
     AppleModernSEPTrace *t = opaque;
@@ -1474,7 +1625,8 @@ static void modern_init(MachineState *machine)
         (s->modern_mcc_socni && !map_mcc_socni(s, uart, uart_span, &error)) ||
         (s->pmgr_aon_fuse_image &&
          !map_pmgr_fuse(s, uart, uart_span, &error)) ||
-        (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error))) {
+        (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error)) ||
+        (s->unmapped_trace && !map_unmapped_trace(s, &error))) {
         error_report_err(error);
         exit(EXIT_FAILURE);
     }
@@ -1623,6 +1775,7 @@ BOOL_PROPERTY(modern_mcc_dramcfg, modern_mcc_dramcfg)
 BOOL_PROPERTY(modern_mcc_quota, modern_mcc_quota)
 BOOL_PROPERTY(modern_mcc_perf, modern_mcc_perf)
 BOOL_PROPERTY(modern_mcc_socni, modern_mcc_socni)
+BOOL_PROPERTY(unmapped_trace, unmapped_trace)
 BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
 BOOL_PROPERTY(boot_display, boot_display)
@@ -1782,6 +1935,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                               get_display_geometry, set_display_geometry,
                               NULL, (void *)offsetof(AppleModernMachine,
                                                      mcc_quota_reset));
+    object_class_property_add_bool(oc, "unmapped-trace", get_unmapped_trace,
+                                   set_unmapped_trace);
     object_class_property_add_bool(oc, "aic-trace", get_aic_trace,
                                    set_aic_trace);
     object_class_property_add_bool(oc, "modern-aic", get_modern_aic,
