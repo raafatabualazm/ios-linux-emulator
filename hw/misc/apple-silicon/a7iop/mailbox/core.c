@@ -218,6 +218,25 @@ bool apple_a7iop_mailbox_is_empty(AppleA7IOPMailbox *s)
     return s->underflow || QTAILQ_EMPTY(&s->inbox);
 }
 
+/*
+ * `queue` is a mailbox object whose queue just changed. If it is the
+ * coprocessor-side object, its A2I queue feeds two of the four lines that
+ * leave the device, and those belong to the AP-side object (a7iop/core.c passes
+ * only the AP-side object's IRQs through sysbus_pass_irq), so re-derive them.
+ *
+ * It MUST be the status-only function: update_irq(ap) cascades into
+ * update_irq(iop) for role "SEP-ap" (the strcmp above), so calling update_irq
+ * here would recurse. The ap_mailbox != queue test covers construction, before
+ * a7iop/core.c wires ap_mailbox, when the iop-side object points at itself.
+ */
+static void apple_a7iop_mailbox_refresh_ap_lines(AppleA7IOPMailbox *queue)
+{
+    if (queue->refresh_ap_lines_on_a2i && queue == queue->iop_mailbox &&
+        queue->ap_mailbox != queue) {
+        apple_a7iop_mailbox_update_irq_status(queue->ap_mailbox);
+    }
+}
+
 static void apple_a7iop_mailbox_send(AppleA7IOPMailbox *s,
                                      AppleA7IOPMessage *msg)
 {
@@ -231,6 +250,7 @@ static void apple_a7iop_mailbox_send(AppleA7IOPMailbox *s,
     QTAILQ_INSERT_TAIL(&s->inbox, msg, next);
     s->count++;
     apple_a7iop_mailbox_update_irq(s);
+    apple_a7iop_mailbox_refresh_ap_lines(s);
 
     if (s->handle_messages_bh != NULL) {
         qemu_bh_schedule(s->handle_messages_bh);
@@ -280,6 +300,11 @@ static AppleA7IOPMessage *apple_a7iop_mailbox_recv(AppleA7IOPMailbox *s)
 
     msg = QTAILQ_FIRST(&s->inbox);
     if (msg == NULL) {
+        if (s->empty_recv_no_latch) {
+            /* Refreshed even when empty, as the v6 register workaround did. */
+            apple_a7iop_mailbox_refresh_ap_lines(s);
+            return NULL;
+        }
         s->underflow = true;
         qemu_log_mask(LOG_GUEST_ERROR, "%s: %s underflowed.\n", __FUNCTION__,
                       s->role);
@@ -293,6 +318,7 @@ static AppleA7IOPMessage *apple_a7iop_mailbox_recv(AppleA7IOPMailbox *s)
                                    ldq_le_p(msg->data + sizeof(uint64_t)));
     s->count--;
     apple_a7iop_mailbox_update_irq(s);
+    apple_a7iop_mailbox_refresh_ap_lines(s);
 
     return msg;
 }
@@ -580,6 +606,13 @@ AppleA7IOPMailbox *apple_a7iop_mailbox_new(const char *role,
         apple_a7iop_mailbox_init_mmio_v4(s, name);
         break;
     case APPLE_A7IOP_V6:
+        /*
+         * The only writer of these two fields. new() runs once per object and
+         * a7iop/core.c calls it for both the iop-side and the AP-side object,
+         * so both are flagged.
+         */
+        s->refresh_ap_lines_on_a2i = true;
+        s->empty_recv_no_latch = true;
         apple_a7iop_mailbox_init_mmio_v6(s, name);
         break;
     }
@@ -646,6 +679,15 @@ static void apple_a7iop_mailbox_reset(DeviceState *dev)
     s->timer1_masked = 0;
     s->sepd_enabled = 0;
     apple_a7iop_mailbox_update_irq_status(s);
+    /*
+     * A system reset resets the AP-side object first, while a pending A2I
+     * message is still queued, and the iop-side object second, which clears it.
+     * Measured on the v6 board: the exported lines are left at IOP_NONEMPTY
+     * high / IOP_EMPTY low where the empty queue wants the opposite. Re-derive
+     * them now that the iop-side queue is cleared; for the AP-side object this
+     * does nothing, so the result is exact in either order.
+     */
+    apple_a7iop_mailbox_refresh_ap_lines(s);
 }
 
 const VMStateDescription vmstate_apple_a7iop_message = {

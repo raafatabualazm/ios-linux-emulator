@@ -20,12 +20,23 @@ touches and which is therefore declared, not measured. It checks:
   - provider interrupt index 2 (AP_NONEMPTY, AIC 346): the message doorbell;
   - both message directions round-trip, with the remaining-count stamp in
     bytes 12-15 that XNU's getMailboxBulk relies on;
-  - an empty receive returns zero and wedges nothing.
+  - an empty receive returns zero and wedges nothing, on BOTH the AP side (an
+    empty OUTBOX0 read) and the coprocessor side (an empty read of the A2I
+    queue, which the core keeps in the other mailbox object). The coprocessor
+    side matters because only the core, not the register file, may be what
+    stops that read from latching underflow;
+  - a message left queued in A2I across a system reset must not leave the
+    exported IOP_EMPTY / IOP_NONEMPTY lines stale (the next pass waits for
+    IOP_EMPTY, so a stale line hangs it).
 
 The CPU takes real IRQ exceptions through the modern AIC, at the acknowledge
 offset the board publishes. The whole sequence repeats across a system reset.
-Firmware is never executed. This qualifies THIS model; several pieces are
-declared rather than Apple-sourced, and report.json says which.
+Every pass starts with zeroed result cells: the loaded blob is padded over them
+(the loader re-copies it on each system reset, and a pmemsave check proves it
+before `cont`) and the ROM also clears them itself, so the second pass can only
+pass on what it actually did, not on the first pass's leftovers. Firmware is
+never executed. This qualifies THIS model; several pieces are declared rather
+than Apple-sourced, and report.json says which.
 """
 import argparse
 import hashlib
@@ -83,6 +94,7 @@ I2A_RECV = AP_MBOX + 0x730   # +0x8830, XNU's 16-byte ldp
 IDLE_STATUS = SEP_WRAP + 0x8000
 IOP_A2I_RECV = IOP_MBOX + 0x710
 IOP_I2A_SEND = IOP_MBOX + 0x720
+LINE_IOP_NONEMPTY = 344      # provider index 0; XNU registers no handler for it
 LINE_IOP_EMPTY = 343         # provider index 1, used by XNU
 LINE_AP_NONEMPTY = 346       # provider index 2, used by XNU: the doorbell
 CTRL_ENABLE = 1
@@ -92,6 +104,8 @@ def ctrl_count(n):
     return (n & 0xf) << 20
 LO1, HI1 = 0x1111222233334444, 0x5555666677778888
 LO2, HI2 = 0x0123456789abcdef, 0xfedcba9876543210
+LO3, HI3 = 0x0f1e2d3c4b5a6978, 0x8796a5b4c3d2e1f0
+LABEL_SLOTS = 48             # result cells the ROM clears at start; must cover every label
 def stamped(hi, remaining):
     """Upper 64 bits after the core writes the remaining count at byte 12."""
     return (hi & 0xffffffff) | (ctrl_count(remaining) << 32)
@@ -186,8 +200,17 @@ class ROM:
         self.emit(0xf10002bf | (count << 10))  # cmp x21,#count
         self.branch(poll, 1)                   # b.ne
 
-    def build(self):
+    def build(self, leave_pending=True):
         self.mov(20, SCRATCH)
+        # Clear every result cell and the fault counter first, so the second
+        # pass cannot be satisfied by the first pass's values (and completion
+        # sentinel) rather than by running. This alone is not sufficient, since
+        # the poll can look before these stores execute; run() also zeroes the
+        # cells through the loaded blob. Straight-line stores through x20 (xzr),
+        # the same helper as the trace stores.
+        for slot in range(LABEL_SLOTS):
+            self.store(31, slot * 8)
+        self.store(31, 0x500)
         self.mov(21, 0)                        # interrupts taken
         self.mov(22, 0)                        # last acknowledged event
         self.mov(24, 0)                        # unexpected exceptions
@@ -275,6 +298,33 @@ class ROM:
         self.window()
         self.trace('no_storm_after_empty_read', 3, register=21)
 
+        # The same stray read on the COPROCESSOR side. The A2I queue is drained
+        # at this point, and the queue is stored in the other mailbox object than
+        # the AP-side one checked above, so this is the only check that sees
+        # that object's behaviour on an empty receive: the read returns zero, the
+        # AP's view of INBOX0_CTRL still says enabled and empty (a latched
+        # underflow would read 0x80001), and IOP_NONEMPTY (index 0, forced high
+        # by a latch) stays quiet.
+        self.read64(IOP_A2I_RECV, 23)
+        self.trace('a2i_empty_read_value', 0, register=23)
+        self.read32(A2I_CTRL, 23)
+        self.trace('inbox_ctrl_after_empty_read', CTRL_ENABLE | CTRL_EMPTY, register=23)
+        self.unmask(LINE_IOP_NONEMPTY)
+        self.window()
+        self.trace('no_iop_nonempty_after_a2i_empty_read', 3, register=21)
+
+        if leave_pending:
+            # Leave one A2I message queued and do not drain it: the system reset
+            # between the passes then finds a pending message. The core resets
+            # the AP-side object first, while the queue is still full, and the
+            # coprocessor-side object second, which empties it; the exported
+            # lines must be re-derived after that, or the next pass's first wait
+            # (IOP_EMPTY) never sees its line.
+            self.write64(A2I_SEND, LO3)
+            self.write64(A2I_SEND + 8, HI3)
+            self.read32(A2I_CTRL, 23)
+            self.trace('inbox_ctrl_left_queued', CTRL_ENABLE | ctrl_count(1), register=23)
+
         self.mov(0, 0xfeedfacecafebeef)
         self.trace('completion', 0xfeedfacecafebeef)
         terminal = len(self.words)
@@ -298,7 +348,8 @@ class ROM:
         for offset in (0x4300, 0x4380):
             fault(offset)
 
-        require(len(self.words) * 4 < 0x10000 and len(self.expected) * 8 < 0x500,
+        require(len(self.words) * 4 < 0x10000 and len(self.expected) <= LABEL_SLOTS
+                and LABEL_SLOTS * 8 < 0x500,
                 'Owned ROM and scratch ranges remain separate')
         return b''.join(struct.pack('<I', w) for w in self.words)
 
@@ -316,7 +367,7 @@ def child_limits():
     resource.setrlimit(resource.RLIMIT_AS, (16 << 30, 16 << 30))
 
 
-def run(binary, components, output):
+def run(binary, components, output, leave_pending=True):
     started = time.monotonic()
     asset_paths = {name: components / name for name in board.ASSETS}
     before = {name: digest(path) for name, path in asset_paths.items()}
@@ -334,7 +385,15 @@ def run(binary, components, output):
             'Minimum evidence free space')
 
     rom = ROM()
-    content = rom.build()
+    content = rom.build(leave_pending)
+    # Pad the loaded blob with zeros over the result cells and the fault counter.
+    # The loader copies the whole blob back on every system reset, so each pass
+    # starts with scratch zeroed by the machine, and the pmemsave check before
+    # `cont` below proves it. The ROM's own clearing prologue is not enough on its
+    # own: the poll can stop the CPU before the prologue has run and read the
+    # previous pass's completion sentinel. Measured: with only the prologue, two
+    # binaries that hang in pass 2 still passed 4 of 24 runs between them.
+    content = content.ljust(SCRATCH - BASE + 0x508, b'\0')
     rom_path = output / 'sep-mailbox.rom'
     rom_path.write_bytes(content)
     report = {'scope': 'SEP ASC v6 mailbox transport and doorbells; owned ROM only',
@@ -355,6 +414,8 @@ def run(binary, components, output):
               'unused_line_assignment_is_apple_documented': False,
               'empty_read_semantics_is_apple_documented': False,
               'guest_driver_exercised': False,
+              'reset_pending_phase': leave_pending,
+              'labels': list(rom.expected),
               'owned_range': {'start': hex(BASE), 'end': hex(PROBE_END)},
               'limits': {'wall_seconds': MAX_WALL, 'cpu_seconds': 30,
                          'log_bytes': MAX_LOG}}
@@ -428,16 +489,31 @@ def run(binary, components, output):
                             '<Q', raw, (len(rom.expected) - 1) * 8)[0] == 0xfeedfacecafebeef
                         if done:
                             break
-                        require(time.monotonic() < deadline, 'Owned ROM did not complete')
+                        progress = [label for index, label in enumerate(rom.expected)
+                                    if struct.unpack_from('<Q', raw, index * 8)[0]]
+                        require(time.monotonic() < deadline,
+                                'Owned ROM did not complete in pass %d; last nonzero '
+                                'label: %s' % (iteration + 1,
+                                               progress[-1] if progress else None))
                         qmp.request('cont')
+                        # Each stop/cont pair queues two QMP events, and the board
+                        # gate's helper stops at 64 of them, which is a second or so
+                        # of polling: a hung pass would die with "QMP event count
+                        # bound" instead of the 10 s deadline's message below, which
+                        # says which check was last reached. Nothing here reads them.
+                        qmp.events.clear()
                         time.sleep(0.05)
 
-                    observed = {}
+                    observed, failures = {}, []
                     for index, (label, expect) in enumerate(rom.expected.items()):
                         value = struct.unpack_from('<Q', raw, index * 8)[0]
                         observed[label] = hex(value)
-                        require(expect is None or value == expect,
-                                f'{label}: expected {expect!r}, observed {value:#x}')
+                        if expect is not None and value != expect:
+                            failures.append(f'{label}: expected {expect!r}, observed {value:#x}')
+                    # Every mismatch, in label order: the first is the first check to
+                    # fail, and the rest say what else the same fault disturbed.
+                    require(not failures, 'pass %d: %d of %d checks failed: %s' % (
+                        iteration + 1, len(failures), len(rom.expected), '; '.join(failures)))
                     faults = scratch / 'faults.bin'
                     qmp.request('pmemsave', {'val': SCRATCH + 0x500, 'size': 8,
                                              'filename': str(faults)})
@@ -472,9 +548,12 @@ def main():
     parser.add_argument('--binary', required=True, type=Path)
     parser.add_argument('--components', required=True, type=Path)
     parser.add_argument('--output-dir', required=True, type=Path)
+    parser.add_argument('--no-reset-pending', action='store_true',
+                        help='do not leave an A2I message queued across the system reset '
+                             '(for a binary that predates the reset refresh)')
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    return run(args.binary, args.components, args.output_dir)
+    return run(args.binary, args.components, args.output_dir, not args.no_reset_pending)
 
 
 if __name__ == '__main__':

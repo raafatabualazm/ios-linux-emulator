@@ -122,6 +122,30 @@ struct AppleA7IOPMailbox {
     uint32_t timer0_masked;
     uint32_t timer1_masked;
     uint32_t sepd_enabled;
+    /*
+     * Opt-in fixes for two defects of this core, set only by
+     * apple_a7iop_mailbox_new() for APPLE_A7IOP_V6 and false (the zeroed QOM
+     * default) on every V2/V4 object, which keeps the legacy t8030 SEP and its
+     * iOS 14 boot exactly as they were. Construction-time configuration like
+     * `role`: not migrated and not cleared by reset. Do not enable either for
+     * V2/V4 without a measurement and an iOS 14 regression boot.
+     */
+    /*
+     * Updating the AP-side object also refreshes the coprocessor-side one (a
+     * role-name special case in update_irq), but not the reverse, and only the
+     * AP-side object's four lines leave the device. Two of those lines
+     * (IOP_NONEMPTY, IOP_EMPTY) describe the A2I queue, which the iop-side
+     * object owns, so A2I traffic left them stale. Set: re-derive the AP-side
+     * object's lines after every A2I enqueue, dequeue and reset.
+     */
+    bool refresh_ap_lines_on_a2i;
+    /*
+     * Underflow is sticky: a receive on an empty queue latches the flag until
+     * reset, after which every receive returns NULL and NONEMPTY is held high.
+     * Set: an empty receive returns NULL and changes nothing. A declared
+     * choice, since no source says what hardware reports.
+     */
+    bool empty_recv_no_latch;
 };
 
 void apple_a7iop_mailbox_update_irq_status(AppleA7IOPMailbox *s);

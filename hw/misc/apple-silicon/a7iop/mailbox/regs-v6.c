@@ -55,33 +55,19 @@
 #define REG_I2A_RECV3 (0x73C)
 
 /*
- * Two defects in the shared mailbox core are worked around here rather than
- * fixed there, because the legacy t8030 SEP depends on that code and boots.
+ * The shared mailbox core provides two behaviours for this register file
+ * through the refresh_ap_lines_on_a2i and empty_recv_no_latch fields, which
+ * apple_a7iop_mailbox_new() sets for V6 only, so nothing needs to be worked
+ * around here.
  *
- * 1. IRQ fan-out is one-way. Updating the AP mailbox also refreshes the IOP
- *    mailbox, but not the reverse. Only the AP mailbox's four lines leave the
- *    device, and two of them (IOP_EMPTY, IOP_NONEMPTY) describe the A2I queue,
- *    which belongs to the IOP mailbox. So A2I traffic left those exported
- *    lines stale. XNU depends on one of them: provider interrupt index 1, our
- *    IOP_EMPTY, is the line its inbox filter uses to wake a sender blocked in
- *    postMailbox once the coprocessor drains the queue. Refresh the AP
- *    mailbox's lines after every A2I enqueue and dequeue.
- *
- * 2. Underflow is sticky. The core latches underflow on a read of an empty
- *    queue and clears it only at reset; afterwards every receive returns NULL
- *    and the NONEMPTY line is forced high, which is a permanent interrupt
- *    storm. XNU checks EMPTY before reading and so should never trigger it, but
- *    one stray read must not wedge the device. An empty read here returns zero
- *    and latches nothing. That is a declared choice: no source says what the
- *    hardware reports, and XNU's own driver treats a reported underflow as
- *    fatal (it latches a flag that permanently disables postMailbox), so
- *    reporting one would break the guest just as surely.
+ * XNU uses provider interrupt index 1, our IOP_EMPTY, to wake a sender blocked
+ * in postMailbox once the coprocessor drains the A2I queue, so the exported
+ * lines must follow A2I traffic. An empty read returns zero and latches
+ * nothing. That is a declared choice: no source says what the hardware
+ * reports, and XNU's own driver treats a reported underflow as fatal (it
+ * latches a flag that permanently disables postMailbox), so reporting one
+ * would break the guest just as surely.
  */
-static void apple_a7iop_v6_refresh_lines(AppleA7IOPMailbox *s)
-{
-    apple_a7iop_mailbox_update_irq(s->ap_mailbox);
-}
-
 static void apple_a7iop_v6_mailbox_reg_write(void *opaque, hwaddr addr,
                                              const uint64_t data, unsigned size)
 {
@@ -120,7 +106,6 @@ static void apple_a7iop_v6_mailbox_reg_write(void *opaque, hwaddr addr,
             memcpy(msg->data, s->iop_send_reg, sizeof(msg->data));
             qemu_mutex_unlock(&s->lock);
             apple_a7iop_mailbox_send_iop(s, msg);
-            apple_a7iop_v6_refresh_lines(s);
         } else {
             qemu_mutex_unlock(&s->lock);
         }
@@ -163,8 +148,7 @@ static uint64_t apple_a7iop_v6_mailbox_reg_read(void *opaque, hwaddr addr,
     case REG_A2I_RECV0:
         WITH_QEMU_LOCK_GUARD(&s->lock)
         {
-            msg = QTAILQ_EMPTY(&s->iop_mailbox->inbox) ? NULL :
-                  apple_a7iop_mailbox_recv_iop(s);
+            msg = apple_a7iop_mailbox_recv_iop(s);
             if (msg == NULL) {
                 memset(s->iop_recv_reg, 0, sizeof(s->iop_recv_reg));
             } else {
@@ -172,7 +156,6 @@ static uint64_t apple_a7iop_v6_mailbox_reg_read(void *opaque, hwaddr addr,
                 g_free(msg);
             }
         }
-        apple_a7iop_v6_refresh_lines(s);
         QEMU_FALLTHROUGH;
     case REG_A2I_RECV1:
     case REG_A2I_RECV2:
@@ -185,8 +168,7 @@ static uint64_t apple_a7iop_v6_mailbox_reg_read(void *opaque, hwaddr addr,
     case REG_I2A_RECV0:
         WITH_QEMU_LOCK_GUARD(&s->lock)
         {
-            msg = QTAILQ_EMPTY(&s->ap_mailbox->inbox) ? NULL :
-                  apple_a7iop_mailbox_recv_ap(s);
+            msg = apple_a7iop_mailbox_recv_ap(s);
             if (msg == NULL) {
                 memset(s->ap_recv_reg, 0, sizeof(s->ap_recv_reg));
             } else {
