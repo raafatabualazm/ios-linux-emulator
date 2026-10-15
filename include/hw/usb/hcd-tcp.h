@@ -52,6 +52,7 @@ struct USBTCPHostState {
     USBTCPRemoteConnType conn_type;
     char *conn_addr;
     uint16_t conn_port;
+    int conn_fd; /* Owned until the first gadget attachment; never reused. */
 };
 
 #endif /* HW_USB_HCD_TCP_H */

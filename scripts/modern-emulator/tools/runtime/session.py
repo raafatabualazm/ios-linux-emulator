@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -30,6 +31,30 @@ BOOT_FILES = {'trustcache': '038-44135-124.dmg.trustcache',
 
 class SessionError(Exception):
     pass
+
+
+def inherited_socket(fd, consume=False):
+    """Own a validated copy of a connected local stream; optionally consume fd."""
+    if type(fd) is not int or fd < 3:
+        raise SessionError('Inherited socket descriptor must be an integer >= 3')
+    duplicate = os.dup(fd)
+    connection = None
+    try:
+        connection = socket.socket(fileno=duplicate)
+        if (connection.family != socket.AF_UNIX or
+                connection.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM or
+                connection.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)):
+            raise SessionError('Inherited descriptor must be a connected AF_UNIX stream')
+        connection.getpeername()  # Refuse unconnected streams without sending bytes.
+        if consume:
+            os.close(fd)
+        return connection
+    except BaseException:
+        if connection is None:
+            os.close(duplicate)
+        else:
+            connection.close()
+        raise
 
 
 class RunSignals:
@@ -404,12 +429,15 @@ def recover_dead_session(state):
     if (Path('/proc') / str(live['pid'])).exists():
         raise SessionError('Recorded guest PID exists (possibly reused); recovery refused')
     previous_run = Path(live.get('run', ''))
+    fd_transport = live.get('qmp_transport') == 'fd'
     if (previous_run.parent != state / 'runs' or not re.fullmatch('[0-9a-f]{32}', previous_run.name)
             or previous_run.is_symlink() or not previous_run.is_dir()
-            or live.get('qmp') != str(endpoint)):
+            or live.get('qmp') != (None if fd_transport else str(endpoint))):
         raise SessionError('Stale markers do not identify this state; recovery refused')
     endpoint_info = None
     if endpoint.exists() or endpoint.is_symlink():
+        if fd_transport:
+            raise SessionError('Inherited QMP session has an unexpected pathname endpoint')
         endpoint_info = endpoint.lstat()
         if not stat.S_ISSOCK(endpoint_info.st_mode):
             raise SessionError('Stale QMP endpoint is not a socket; recovery refused')
@@ -495,6 +523,33 @@ class QMP:
         self.close()
 
 
+class SocketQMP(QMP):
+    """Consume an already-connected control socket with one protocol deadline."""
+    def __init__(self, connection, timeout=2):
+        if not math.isfinite(timeout) or not 0 < timeout <= 8:
+            raise SessionError('Inherited QMP timeout must be positive and <= 8 seconds')
+        self.deadline = time.monotonic() + timeout
+        self.socket = connection
+        self.stream = None
+        self.identifier = 0
+        try:
+            self.socket.settimeout(timeout)
+            self.stream = self.socket.makefile('rwb')
+            if 'QMP' not in self.read():
+                raise SessionError('Missing inherited QMP greeting')
+            self.request('qmp_capabilities')
+        except BaseException:
+            self.close()
+            raise
+
+    def read(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('Inherited QMP protocol deadline reached')
+        self.socket.settimeout(remaining)
+        return super().read()
+
+
 def pointer(x, y, width, height):
     if any(type(v) is not int for v in (x, y, width, height)):
         raise SessionError('Touch positions and dimensions must be integers')
@@ -544,8 +599,13 @@ def checked_qemu_data(value=None):
     return directory
 
 
-def argv_for(state, manifest, display, run_dir, vnc=None, qemu_data=None, usb=False):
+def argv_for(state, manifest, display, run_dir, vnc=None, qemu_data=None, usb=False,
+             usb_fd=None, qmp_fd=None):
     vnc = checked_vnc(vnc)
+    if usb and usb_fd is not None:
+        raise SessionError('Choose pathname USB or inherited USB, not both')
+    if any(type(fd) is not int or fd < 3 for fd in (usb_fd, qmp_fd) if fd is not None):
+        raise SessionError('Inherited socket descriptors must be integers >= 3')
     assets = {name: item['path'] for name, item in manifest['assets'].items()}
     machine = 't8030,' + ','.join(f'{name}={assets[name]}'
                                  for name in ('trustcache', 'ticket', 'sep-fw', 'sep-rom'))
@@ -553,13 +613,19 @@ def argv_for(state, manifest, display, run_dir, vnc=None, qemu_data=None, usb=Fa
     if usb:
         endpoint = checked_path(state) / 'usb.sock'
         machine += ',usb-conn-type=unix,usb-conn-addr=' + str(endpoint)
+    elif usb_fd is not None:
+        machine += ',usb-conn-type=fd,usb-conn-addr=' + str(usb_fd)
+    qmp = ('chardev:pair-qmp' if qmp_fd is not None else
+           f'unix:{state / "qmp.sock"},server=on,wait=off')
     args = [manifest['binary']['path'], '-M', machine, '-kernel', assets['kernel'],
             '-dtb', assets['dtb'], '-append',
             'tlto_us=-1 mtxspin=-1 agm-genuine=1 agm-authentic=1 agm-trusted=1 '
             'serial=3 launchd_unsecure_cache=1 wdt=-1 -vm_compressor_wk_sw',
             '-smp', '7', '-m', '4G', '-display', display, '-monitor', 'none',
-            '-qmp', f'unix:{state / "qmp.sock"},server=on,wait=off',
+            '-qmp', qmp,
             '-serial', f'file:{run_dir / "serial.log"}']
+    if qmp_fd is not None:
+        args += ['-chardev', f'socket,id=pair-qmp,fd={qmp_fd},server=off']
     for name in DISKS[-2:]:
         args += ['-drive', f'file={state / name},if=pflash,format=raw']
     for nsid, (name, nstype) in enumerate(zip(DISKS[:7], (1, 2, 3, 4, 5, 6, 8)), 1):
@@ -574,7 +640,33 @@ def argv_for(state, manifest, display, run_dir, vnc=None, qemu_data=None, usb=Fa
     return args
 
 
-def run(state, seconds=900, display='none', vnc=None, qemu_data=None, trace_touch=False, usb=False):
+def run(state, seconds=900, display='none', vnc=None, qemu_data=None, trace_touch=False, usb=False,
+        usb_fd=None, qmp_fd=None, qmp_socket=None, qmp_control_fd=None):
+    """Run unchanged state policy; new inherited FD inputs transfer ownership."""
+    if usb and usb_fd is not None:
+        raise SessionError('Choose pathname USB or inherited USB, not both')
+    controls = (qmp_socket is not None) + (qmp_control_fd is not None)
+    if (qmp_fd is None and controls) or (qmp_fd is not None and controls != 1):
+        raise SessionError('Inherited QMP needs one child FD and exactly one control peer')
+    descriptors = [fd for fd in (usb_fd, qmp_fd, qmp_control_fd) if fd is not None]
+    if qmp_socket is not None:
+        descriptors.append(qmp_socket.fileno())
+    if any(type(fd) is not int or fd < 3 for fd in descriptors):
+        raise SessionError('Inherited socket descriptors must be integers >= 3')
+    if len({(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in descriptors}) != len(descriptors):
+        raise SessionError('Inherited socket roles must use distinct endpoints')
+    with contextlib.ExitStack() as owned:
+        usb_stream = owned.enter_context(inherited_socket(usb_fd, consume=True)) if usb_fd is not None else None
+        qmp_stream = owned.enter_context(inherited_socket(qmp_fd, consume=True)) if qmp_fd is not None else None
+        control = (owned.enter_context(inherited_socket(qmp_control_fd, consume=True))
+                   if qmp_control_fd is not None else
+                   owned.enter_context(inherited_socket(qmp_socket.fileno())) if qmp_socket is not None else None)
+        return _run(state, seconds, display, vnc, qemu_data, trace_touch, usb,
+                    usb_stream, qmp_stream, control)
+
+
+def _run(state, seconds, display, vnc, qemu_data, trace_touch, usb,
+         usb_stream, qmp_stream, qmp_control):
     vnc = checked_vnc(vnc)
     if qemu_data is not None and vnc is None:
         raise SessionError('The QEMU data directory option requires VNC')
@@ -610,8 +702,10 @@ def run(state, seconds=900, display='none', vnc=None, qemu_data=None, trace_touc
         usb_endpoint = USBEndpoint(state) if usb else None
         run_dir = state / 'runs' / uuid.uuid4().hex
         run_dir.mkdir(parents=True)
-        args = (argv_for(state, manifest, display, run_dir) if vnc is None and not usb
-                else argv_for(state, manifest, display, run_dir, vnc, qemu_data, usb))
+        args = (argv_for(state, manifest, display, run_dir) if vnc is None and not usb and usb_stream is None and qmp_stream is None
+                else argv_for(state, manifest, display, run_dir, vnc, qemu_data, usb,
+                              usb_stream.fileno() if usb_stream is not None else None,
+                              qmp_stream.fileno() if qmp_stream is not None else None))
         if trace_touch:
             args += ['-trace', 'enable=apple_mt_spi_*']
         write_json(run_dir / 'argv.json', args)
@@ -625,6 +719,11 @@ def run(state, seconds=900, display='none', vnc=None, qemu_data=None, trace_touc
                   'usb_companion_managed': False,
                   'usb_wait_limit_seconds': USBEndpoint.WAIT_SECONDS if usb else None,
                   'ipa_result': 'not attempted', 'gui_result': 'requires visual/semantic evidence'}
+        if usb_stream is not None:
+            record.update(usb_transport='inherited-fd', usb_stream_connected=True,
+                          usb_enumerated=False, usb_wait_limit_seconds=None)
+        if qmp_stream is not None:
+            record['qmp_transport'] = 'fd'
         with RunSignals() as interruptions, (run_dir / 'emulator.log').open('wb') as output:
             process = None
             try:
@@ -637,8 +736,17 @@ def run(state, seconds=900, display='none', vnc=None, qemu_data=None, trace_touc
                     print(json.dumps(startup), flush=True)
                     record['usb_listener_ready'] = usb_endpoint.wait(interruptions)
                 if interruptions.received is None:
-                    process = subprocess.Popen(args, cwd=manifest['bundle'], stdout=output, stderr=subprocess.STDOUT)
-                    live = {'pid': process.pid, 'run': str(run_dir), 'qmp': str(socket_path)}
+                    inherited = tuple(stream.fileno() for stream in (usb_stream, qmp_stream) if stream is not None)
+                    options = {'pass_fds': inherited} if inherited else {}
+                    process = subprocess.Popen(args, cwd=manifest['bundle'], stdout=output, stderr=subprocess.STDOUT, **options)
+                    # A wrapper-held child endpoint would mask real transport EOF.
+                    for stream in (usb_stream, qmp_stream):
+                        if stream is not None:
+                            stream.close()
+                    live = {'pid': process.pid, 'run': str(run_dir),
+                            'qmp': None if qmp_control is not None else str(socket_path)}
+                    if qmp_control is not None:
+                        live['qmp_transport'] = 'fd'
                     if usb_endpoint:
                         live['usb_endpoint'] = str(usb_endpoint.path)
                     write_json(state / 'live.json', live)
@@ -672,7 +780,7 @@ def run(state, seconds=900, display='none', vnc=None, qemu_data=None, trace_touc
                 try:
                     if process is not None and process.poll() is None:
                         try:
-                            with QMP(socket_path) as qmp:
+                            with (SocketQMP(qmp_control) if qmp_control is not None else QMP(socket_path)) as qmp:
                                 qmp.request('quit')
                         except (OSError, ValueError, SessionError) as error:
                             record['quit_error'] = str(error)
@@ -719,7 +827,7 @@ def run(state, seconds=900, display='none', vnc=None, qemu_data=None, trace_touc
                             (state / 'live.json').unlink(missing_ok=True)
                     finally:
                         # Only this runner's stopped QMP endpoint is removed.
-                        if process is not None and process.poll() is not None:
+                        if process is not None and process.poll() is not None and qmp_control is None:
                             socket_path.unlink(missing_ok=True)
         return record
 
@@ -743,6 +851,9 @@ def main():
     launch.add_argument('--qemu-data', type=Path, help='QEMU data directory for VNC keymaps; defaults to integration pc-bios')
     launch.add_argument('--trace-touch', action='store_true', help='trace input/report/delivery to the bounded emulator log (requires trace-capable binary)')
     launch.add_argument('--usb', action='store_true', help='reserve state/usb.sock and wait up to 30 seconds for a companion listener before phone launch')
+    launch.add_argument('--usb-fd', type=int, help='consume one inherited connected AF_UNIX stream for USB')
+    launch.add_argument('--qmp-fd', type=int, help='consume the inherited QEMU-end QMP stream')
+    launch.add_argument('--qmp-control-fd', type=int, help='consume its runner-owned QMP control peer')
     ctl = sub.add_parser('control')
     ctl.add_argument('--state', type=Path, required=True)
     ctl.add_argument('action', choices=('status', 'side', 'home', 'screenshot', 'tap', 'swipe', 'quit'))
@@ -764,7 +875,8 @@ def main():
             print(json.dumps({'profile': result['profile'], 'state': str(args.state.resolve()),
                               'source_state': result['fork']['source_state']}))
         elif args.command == 'run':
-            result = run(args.state, args.seconds, args.display, args.vnc, args.qemu_data, args.trace_touch, args.usb)
+            result = run(args.state, args.seconds, args.display, args.vnc, args.qemu_data, args.trace_touch, args.usb,
+                         args.usb_fd, args.qmp_fd, qmp_control_fd=args.qmp_control_fd)
             if result['status'] == 'interrupted':
                 disposition = ('no phone started' if not result.get('phone_started') else
                                'guest reaped' if result.get('child_reaped') else 'guest could not be reaped')
@@ -773,6 +885,9 @@ def main():
             if result['exit_code'] != 0 or result['status'] in ('unexpected-exit', 'runner-error', 'startup-error'):
                 raise SessionError(f'Emulator exited unexpectedly: {result["exit_code"]}')
         else:
+            live_path = args.state.resolve() / 'live.json'
+            if live_path.exists() and json.loads(live_path.read_text()).get('qmp_transport') == 'fd':
+                raise SessionError('Inherited QMP control belongs to the active runner; pathname control is unavailable')
             with QMP(args.state.resolve() / 'qmp.sock') as qmp:
                 if args.action == 'status':
                     result = qmp.request('query-status')

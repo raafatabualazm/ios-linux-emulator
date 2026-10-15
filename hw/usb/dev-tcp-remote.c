@@ -351,6 +351,23 @@ static void *usb_tcp_remote_read_thread(void *opaque)
     return NULL;
 }
 
+static void usb_tcp_remote_handle_attach(USBDevice *dev)
+{
+    USBTCPRemoteState *s = USB_TCP_REMOTE(dev);
+
+    if (s->conn_type != TCP_REMOTE_CONN_TYPE_FD) {
+        return;
+    }
+    /* A connected endpoint is consumed once; it cannot reconnect like a listener. */
+    if (s->fd < 0 || s->read_thread_started) {
+        return;
+    }
+    migrate_add_blocker(&s->migration_blocker, NULL);
+    s->read_thread_started = true;
+    qemu_thread_create(&s->read_thread, TYPE_USB_TCP_REMOTE ".read",
+                       usb_tcp_remote_read_thread, s, QEMU_THREAD_JOINABLE);
+}
+
 static void *usb_tcp_remote_thread(void *arg)
 {
     USBTCPRemoteState *s = arg;
@@ -539,6 +556,15 @@ static void usb_tcp_remote_bind_ipv6(USBTCPRemoteState *s, Error **errp)
 static void usb_tcp_remote_realize(USBDevice *dev, Error **errp)
 {
     USBTCPRemoteState *s = USB_TCP_REMOTE(dev);
+    int connected_fd = -1;
+
+    /* Resolve before allocating thread/BH state so validation fails cleanly. */
+    if (s->conn_type == TCP_REMOTE_CONN_TYPE_FD) {
+        connected_fd = usb_tcp_take_connected_fd(s->conn_addr, s->conn_port, errp);
+        if (connected_fd < 0) {
+            return;
+        }
+    }
 
     dev->speed = USB_SPEED_HIGH;
     dev->speedmask = USB_SPEED_MASK_HIGH;
@@ -563,6 +589,16 @@ static void usb_tcp_remote_realize(USBDevice *dev, Error **errp)
     s->socket = -1;
     s->fd = -1;
     s->closed = true;
+
+    if (s->conn_type == TCP_REMOTE_CONN_TYPE_FD) {
+        s->fd = connected_fd;
+        s->closed = false;
+        dev->auto_attach = 1;
+        error_setg(&s->migration_blocker,
+                   "%s does not support migration while connected",
+                   TYPE_USB_TCP_REMOTE);
+        return;
+    }
 
     switch (s->conn_type) {
     case TCP_REMOTE_CONN_TYPE_UNIX:
@@ -599,6 +635,31 @@ static void usb_tcp_remote_unrealize(USBDevice *dev)
 {
     USBTCPRemoteState *s = USB_TCP_REMOTE(dev);
 
+    if (s->conn_type == TCP_REMOTE_CONN_TYPE_FD) {
+        bool locked = bql_locked();
+
+        s->stopped = true;
+        s->closed = true;
+        if (s->fd >= 0) {
+            /* Wake a blocking recv before joining, including a quiet peer. */
+            shutdown(s->fd, SHUT_RDWR);
+        }
+        if (s->read_thread_started) {
+            /* The read thread reacquires BQL after recv and before returning. */
+            if (locked) {
+                bql_unlock();
+            }
+            qemu_thread_join(&s->read_thread);
+            if (locked) {
+                bql_lock();
+            }
+            s->read_thread_started = false;
+        }
+        qemu_bh_cancel(s->cleanup_bh);
+        qemu_bh_cancel(s->completed_bh);
+        qemu_bh_cancel(s->addr_bh);
+    }
+
     if (s->socket >= 0) {
         close(s->socket);
         s->socket = -1;
@@ -616,6 +677,19 @@ static void usb_tcp_remote_unrealize(USBDevice *dev)
     s->stopped = true;
     usb_tcp_remote_clean_inflight_queue(s);
     usb_tcp_remote_clean_completed_queue(s);
+
+    if (s->conn_type == TCP_REMOTE_CONN_TYPE_FD) {
+        migrate_del_blocker(&s->migration_blocker);
+        qemu_bh_delete(s->cleanup_bh);
+        qemu_bh_delete(s->completed_bh);
+        qemu_bh_delete(s->addr_bh);
+        qemu_cond_destroy(&s->cond);
+        qemu_mutex_destroy(&s->thr_mutex);
+        qemu_mutex_destroy(&s->request_mutex);
+        qemu_mutex_destroy(&s->queue_mutex);
+        qemu_mutex_destroy(&s->completed_queue_mutex);
+        qemu_cond_destroy(&s->completed_queue_cond);
+    }
 }
 
 static void usb_tcp_remote_handle_reset(USBDevice *dev)
@@ -814,7 +888,7 @@ static void usb_tcp_remote_dev_class_init(ObjectClass *klass, const void *data)
 
     uc->realize = usb_tcp_remote_realize;
     uc->unrealize = usb_tcp_remote_unrealize;
-    uc->handle_attach = NULL;
+    uc->handle_attach = usb_tcp_remote_handle_attach;
     uc->handle_detach = NULL;
     uc->cancel_packet = usb_tcp_remote_cancel_packet;
     uc->handle_reset = usb_tcp_remote_handle_reset;

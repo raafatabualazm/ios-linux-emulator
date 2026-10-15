@@ -29,11 +29,15 @@ typedef enum {
     TCP_REMOTE_CONN_TYPE_UNIX,
     TCP_REMOTE_CONN_TYPE_IPV4,
     TCP_REMOTE_CONN_TYPE_IPV6,
+    TCP_REMOTE_CONN_TYPE_FD,
     TCP_REMOTE_CONN_TYPE__MAX,
 } USBTCPRemoteConnType;
 
 extern const QEnumLookup USBTCPRemoteConnType_lookup;
 extern const PropertyInfo qdev_usb_tcp_remote_conn_type;
+
+/* Takes ownership once resolved; the caller owns a successful return value. */
+int usb_tcp_take_connected_fd(const char *fdname, uint16_t port, Error **errp);
 
 #define DEFINE_PROP_USB_TCP_REMOTE_CONN_TYPE(_name, _state, _fld, _default) \
     DEFINE_PROP_UNSIGNED(_name, _state, _fld, _default,                     \

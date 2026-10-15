@@ -23,13 +23,14 @@ and firmware handoff through display/input and the application lifecycle.
   passes ASan and UBSan; the retained base fails that same test. The A13 IPI
   regression also passes. Migration and snapshot fidelity are not established.
 - The iOS 14.0/18A5351d guest reaches interactive SpringBoard Home, reproduced
-  on three retained boots; Settings opened by touch. Signed per-report deltas,
+  on four retained boots. A fresh private state verified Home → Settings → Home
+  → Notes → Home, including Notes Continue and its empty list. F6 returns Home;
+  the bottom-edge swipe still scrolls Settings. Signed per-report deltas,
   60 Hz sampling and stationary frames form an empirical working configuration.
   The wake/swipe order also affects the result, so the comparisons do not isolate
-  one cause or establish Apple wire units. A fresh nine-store copied state
-  verified Home → Settings → Home → Notes → Home, with Notes Continue accepted
-  and its empty list visible. F6 returns Home; the measured bottom-edge swipe
-  still scrolls Settings. IPA installation and modern iOS GUI remain unverified.
+  one cause or establish Apple wire units. The copied state includes all nine
+  writable stores, and the source state remained unchanged. IPA installation
+  and modern iOS GUI remain unverified.
 - Strict firmware selection prepared unchanged iPhone17,3/d47ap iOS27.0/24A437
   kernel, device tree, SPTM, TXM and stock restore trustcache with hashes.
   Explicit optional extraction also prepares the matched restore ramdisk;
@@ -231,6 +232,18 @@ hashed with the BIOS resources. The profile is pinned in the manifest; it cannot
 be switched at run time. Existing states and the default `isolated` profile keep
 their `max`/2 GiB/two CPU/no-default-devices command. The historical comparison
 has not yet established Linux boot or USB service acceptance in this runner.
+
+To qualify companion Linux separately when Unix socket binding is unavailable:
+
+```sh
+python3 modern-emulator/tools/runtime/companion.py run \
+  --state modern-emulator/runtime/NEW_COMPANION \
+  --linux-only --ssh-port 0 --seconds 1200
+```
+
+This mode uses private QMP FIFOs, keeps the EHCI controller, and omits the
+remote USB device. It does not connect a phone or qualify USB services. Console
+output and controlled shutdown stay under the same log/time/disk limits.
 
 In one terminal, start a separately forked phone state with `--usb`. It reserves
 `PHONE_STATE/usb.sock` and waits up to 30 seconds for the companion listener;

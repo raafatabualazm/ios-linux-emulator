@@ -26,6 +26,21 @@ if mode=='early':
  print('fixture-startup-error',file=sys.stderr,flush=True)
  sys.exit(0)
 args=sys.argv[1:]
+qmp_arg=args[args.index('-qmp')+1]
+if qmp_arg.startswith('pipe:'):
+ qmp=qmp_arg.removeprefix('pipe:')
+ with open(qmp+'.in','rb',buffering=0) as incoming, open(qmp+'.out','wb',buffering=0) as outgoing:
+  outgoing.write(b'{"QMP": {}}\n')
+  print('SIZE_LIMIT='+str(resource.getrlimit(resource.RLIMIT_FSIZE)[1]),flush=True)
+  print('fixture-linux-only-serial',flush=True)
+  if mode=='flood':os.write(1,b'x'*(1<<20))
+  while True:
+   line=incoming.readline()
+   if not line:break
+   request=json.loads(line)
+   outgoing.write((json.dumps({'return':{},'id':request['id']})+'\n').encode())
+   if request['execute']=='quit':sys.exit(0)
+ sys.exit(1)
 qmp=args[args.index('-qmp')+1].split(',')[0].removeprefix('unix:')
 dev=next(x for x in args if x.startswith('usb-tcp-remote,'))
 usb=next(x.split('=',1)[1] for x in dev.split(',') if x.startswith('conn-addr='))
@@ -83,7 +98,83 @@ class CompanionTests(unittest.TestCase):
 
     def run_short(self, **kwargs):
         with patch.object(companion, 'MIN_SECONDS', 0.01):
-            return companion.run(self.state, self.usb, seconds=0.2, **kwargs)
+            usb = None if kwargs.get('linux_only') else self.usb
+            return companion.run(self.state, usb, seconds=0.2, **kwargs)
+
+    def test_linux_only_uses_private_pipes_and_reaps_without_usb_or_socket_bind(self):
+        self.prepare()
+        with patch.object(companion.socket, 'socket', side_effect=AssertionError('socket forbidden')):
+            record = self.run_short(linux_only=True, ssh_port=0)
+        self.assertEqual(record['status'], 'stopped')
+        self.assertEqual(record['exit_code'], 0)
+        self.assertTrue(record['originals_unchanged'])
+        self.assertEqual(record['qmp_transport'], 'pipe')
+        self.assertIsNone(record['usb_endpoint'])
+        self.assertFalse(record['usb_listener_ready'])
+        self.assertFalse(self.usb.exists())
+        self.assertFalse(Path('/proc').joinpath(str(record['pid'])).exists())
+        run_dir = Path(record['run'])
+        self.assertFalse((run_dir / 'qmp.in').exists())
+        self.assertFalse((run_dir / 'qmp.out').exists())
+        self.assertIn(b'fixture-linux-only-serial', (run_dir / 'console.log').read_bytes())
+        self.assertFalse(any('usb-tcp-remote' in arg for arg in record['command']))
+        self.assertIn('usb-ehci,id=ehci', record['command'])
+        self.assertFalse((self.state / 'live.json').exists())
+
+    def test_linux_only_refuses_phone_endpoint_or_ssh_forward(self):
+        self.prepare()
+        for usb, port in ((self.usb, 0), (None, 32222)):
+            with self.assertRaises(companion.CompanionError):
+                companion.run(self.state, usb, seconds=30, ssh_port=port, linux_only=True)
+        self.assertEqual(list((self.state / 'runs').iterdir()), [])
+
+    def test_linux_only_retains_output_budget_and_clean_shutdown(self):
+        self.prepare()
+        with patch.dict(os.environ, COMPANION_FIXTURE_MODE='flood'), \
+                patch.object(companion, 'MAX_LOG_BYTES', 4096):
+            record = self.run_short(linux_only=True, ssh_port=0)
+        self.assertEqual(record['stop_reason'], 'log size limit')
+        self.assertEqual(record['log_bytes'], 4096)
+        self.assertTrue(record['originals_unchanged'])
+        self.assertFalse(Path('/proc').joinpath(str(record['pid'])).exists())
+
+    def test_inherited_argv_uses_native_connected_qmp_chardev_and_usb_fd(self):
+        manifest = self.prepare()
+        args = companion.argv_for(self.state, manifest, None, self.state / 'runs',
+                                  ssh_port=0, usb_fd=7, qmp_fd=8)
+        self.assertIn('socket,id=pair-qmp,fd=8,server=off', args)
+        self.assertEqual(args[args.index('-qmp') + 1], 'chardev:pair-qmp')
+        self.assertIn('usb-tcp-remote,bus=ehci.0,conn-type=fd,conn-addr=7', args)
+        self.assertFalse(any('unix:' in arg for arg in args))
+        for invalid in (True, -1, 2, '7'):
+            with self.assertRaises(companion.CompanionError):
+                companion.argv_for(self.state, manifest, None, self.state / 'runs',
+                                   ssh_port=0, usb_fd=invalid)
+
+    def test_inherited_mode_conflicts_refuse_before_descriptor_consumption(self):
+        self.prepare()
+        connection, peer = socket.socketpair()
+        with connection, peer:
+            # No inspection/connection/bind is needed to reject these modes.
+            fd = connection.fileno()
+            for options in (
+                    {'usb': self.usb, 'usb_fd': fd},
+                    {'usb': None, 'usb_fd': fd, 'linux_only': True},
+                    {'usb': None, 'usb_fd': fd, 'qmp_fd': fd},
+                    {'usb': None, 'usb_fd': fd, 'qmp_fd': fd, 'qmp_control_fd': fd}):
+                with self.assertRaises(companion.CompanionError):
+                    companion.run(self.state, seconds=30, ssh_port=0, **options)
+                os.fstat(fd)  # Refused configuration did not consume the caller's fd.
+        self.assertEqual(list((self.state / 'runs').iterdir()), [])
+
+    def test_linux_only_diagnostics_share_owned_control_before_clean_quit(self):
+        self.prepare()
+        record = self.run_short(linux_only=True, ssh_port=0, diagnostics=True)
+        self.assertEqual(record['status'], 'stopped')
+        report = json.loads(Path(record['diagnostics']).read_text())
+        self.assertEqual(set(report), {'status', 'cpus', 'registers', 'screen'})
+        self.assertFalse((Path(record['run']) / 'qmp.in').exists())
+        self.assertFalse((Path(record['run']) / 'qmp.out').exists())
 
     def test_listener_remains_ready_when_phone_connects_before_first_poll(self):
         self.prepare()

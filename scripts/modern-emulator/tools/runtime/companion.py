@@ -197,9 +197,19 @@ def load(state):
     return state, manifest
 
 
-def argv_for(state, manifest, usb, run_dir, ssh_port=32222):
+def argv_for(state, manifest, usb, run_dir, ssh_port=32222, linux_only=False,
+             usb_fd=None, qmp_fd=None):
     if type(ssh_port) is not int or not 0 <= ssh_port <= 65535:
         raise CompanionError('SSH port must be 0 (disabled) or 1..65535')
+    if linux_only and ssh_port:
+        raise CompanionError('Linux qualification requires SSH forwarding disabled')
+    for fd in (usb_fd, qmp_fd):
+        if fd is not None and (type(fd) is not int or fd < 3):
+            raise CompanionError('Inherited descriptors must be integers >= 3')
+    if linux_only and (usb_fd is not None or qmp_fd is not None):
+        raise CompanionError('Linux qualification cannot use inherited USB/QMP descriptors')
+    if usb_fd is not None and usb is not None:
+        raise CompanionError('Choose a USB endpoint or inherited descriptor')
     network = 'user,id=isolated,restrict=on'
     if ssh_port:
         network += f',hostfwd=tcp:127.0.0.1:{ssh_port}-:22'
@@ -214,16 +224,25 @@ def argv_for(state, manifest, usb, run_dir, ssh_port=32222):
     if historical:
         drive += ',cache=unsafe'
     nic = 'virtio-net-pci,netdev=isolated' + ('' if historical else ',romfile=')
+    qmp_args = (['-chardev', f'socket,id=pair-qmp,fd={qmp_fd},server=off',
+                 '-qmp', 'chardev:pair-qmp'] if qmp_fd is not None else
+                ['-qmp', f'pipe:{run_dir / "qmp"}'] if linux_only else
+                ['-qmp', f'unix:{state / "qmp.sock"},server=on,wait=off'])
+    devices = ['-device', 'usb-ehci,id=ehci']
+    if not linux_only:
+        address = (f'conn-type=fd,conn-addr={usb_fd}' if usb_fd is not None else
+                   f'conn-type=unix,conn-addr={usb}')
+        devices += ['-device',
+                    f'usb-tcp-remote,bus=ehci.0,{address}']
     return [manifest['originals']['binary']['path'], '-L', str(state / 'resources'),
             '-M', 'q35', '-m', '3G' if historical else '2G', '-smp', '4' if historical else '2',
             '-accel', 'tcg,thread=multi', '-cpu', 'qemu64' if historical else 'max',
             *hardware, '-display', 'none', '-monitor', 'none',
-            '-serial', 'stdio', '-qmp', f'unix:{state / "qmp.sock"},server=on,wait=off',
+            '-serial', 'stdio', *qmp_args,
             '-drive', drive,
             '-drive', f'file={state / "seed.iso"},if=virtio,format=raw,readonly=on',
             '-netdev', network, '-device', nic,
-            '-device', 'usb-ehci,id=ehci', '-device',
-            f'usb-tcp-remote,bus=ehci.0,conn-type=unix,conn-addr={usb}']
+            *devices]
 
 
 def limit_child():
@@ -246,6 +265,79 @@ class CleanupQMP(session.QMP):
         return super().read()
 
 
+class PipeQMP(session.QMP):
+    """Private FIFO control for a Linux-only boot where sockets are unavailable."""
+    def __init__(self, path):
+        self.paths = [Path(str(path) + suffix) for suffix in ('.in', '.out')]
+        self.identities = {}
+        self.fds = []
+        self.buffer = bytearray()
+        self.identifier = 0
+        self.stream = self
+        try:
+            for fifo in self.paths:
+                os.mkfifo(fifo, 0o600)
+                info = fifo.lstat()
+                self.identities[fifo] = (info.st_dev, info.st_ino)
+                # RDWR keeps QEMU's pipe backend from blocking during startup.
+                self.fds.append(os.open(fifo, os.O_RDWR | os.O_NONBLOCK))
+        except BaseException:
+            self.close()
+            raise
+
+    def __enter__(self):
+        self.deadline = time.monotonic() + 2
+        if 'QMP' not in self.read():
+            raise CompanionError('Missing pipe QMP greeting')
+        self.request('qmp_capabilities')
+        return self
+
+    def read(self):
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.fds[1], selectors.EVENT_READ)
+            while b'\n' not in self.buffer:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise TimeoutError('Pipe QMP deadline reached')
+                self.buffer.extend(os.read(self.fds[1], 65536))
+                if len(self.buffer) > 1 << 20:
+                    raise CompanionError('Pipe QMP message exceeds its framing bound')
+        line, _, rest = self.buffer.partition(b'\n')
+        self.buffer = bytearray(rest)
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise CompanionError('Invalid pipe QMP object')
+        return value
+
+    def write(self, data):
+        if len(data) > 4096 or os.write(self.fds[0], data) != len(data):
+            raise CompanionError('Pipe QMP command exceeds its atomic write bound')
+
+    def flush(self):
+        pass
+
+    def __exit__(self, *_):
+        # The runner removes the captured FIFOs after reaping QEMU.
+        pass
+
+    def close(self):
+        for fd in self.fds:
+            os.close(fd)
+        self.fds = []
+        outcomes = []
+        for path, identity in self.identities.items():
+            try:
+                info = path.lstat()
+                if stat.S_ISFIFO(info.st_mode) and (info.st_dev, info.st_ino) == identity:
+                    path.unlink()
+                    outcomes.append(path.name + ': removed captured FIFO')
+                else:
+                    outcomes.append(path.name + ': preserved replacement')
+            except FileNotFoundError:
+                outcomes.append(path.name + ': already absent')
+        return '; '.join(outcomes)
+
+
 def drain_output(outputs, budget):
     """Reaped child pipes only; bounded nonblocking reads retain final errors."""
     total = 0
@@ -265,7 +357,24 @@ def drain_output(outputs, budget):
     return total, False
 
 
-def run(state, usb, seconds=600, ssh_port=32222):
+def capture_diagnostics(qmp, run_dir):
+    result = {}
+    for key, command, arguments in (
+            ('status', 'query-status', None),
+            ('cpus', 'query-cpus-fast', None),
+            ('registers', 'human-monitor-command', {'command-line': 'info registers'}),
+            ('screen', 'screendump', {'filename': str(run_dir / 'screen.ppm')})):
+        try:
+            result[key] = qmp.request(command, arguments)
+        except Exception as error:
+            result[key + '_error'] = type(error).__name__
+    session.write_json(run_dir / 'diagnostics.json', result)
+    return str(run_dir / 'diagnostics.json')
+
+
+def run(state, usb=None, seconds=600, ssh_port=32222, linux_only=False,
+        usb_fd=None, qmp_fd=None, qmp_socket=None, qmp_control_fd=None,
+        diagnostics=False):
     if not math.isfinite(seconds) or not MIN_SECONDS <= seconds <= MAX_SECONDS:
         raise CompanionError('Companion duration must be 30..1800 seconds')
     state = private_directory(state)
@@ -276,29 +385,62 @@ def run(state, usb, seconds=600, ssh_port=32222):
         for name in ('live.json', 'qmp.sock'):
             if (state / name).exists() or (state / name).is_symlink():
                 raise CompanionError('Companion live marker/endpoint exists; inspect before reuse')
-        usb = session.checked_path(usb)
-        if usb.name != 'usb.sock':
-            raise CompanionError('Use the exact phone USB waiting-state endpoint')
-        endpoint = session.USBEndpoint(usb.parent)
+        endpoint = None
+        if linux_only:
+            if (usb is not None or ssh_port or usb_fd is not None or
+                    qmp_fd is not None or qmp_socket is not None or qmp_control_fd is not None):
+                raise CompanionError('Linux qualification requires no USB endpoint or SSH forward')
+        elif usb_fd is not None:
+            if usb is not None:
+                raise CompanionError('Choose a USB endpoint or inherited descriptor')
+        else:
+            if usb is None:
+                raise CompanionError('A phone USB waiting-state endpoint is required')
+            usb = session.checked_path(usb)
+            if usb.name != 'usb.sock':
+                raise CompanionError('Use the exact phone USB waiting-state endpoint')
+            endpoint = session.USBEndpoint(usb.parent)
+        control_count = int(qmp_socket is not None) + int(qmp_control_fd is not None)
+        if (qmp_fd is None and control_count) or (qmp_fd is not None and control_count != 1):
+            raise CompanionError('Inherited QMP requires one runner control peer')
+        if qmp_socket is not None and not isinstance(qmp_socket, socket.socket):
+            raise CompanionError('QMP control peer must be a connected socket')
+        descriptors = [fd for fd in (usb_fd, qmp_fd, qmp_control_fd) if fd is not None]
+        if qmp_socket is not None:
+            descriptors.append(qmp_socket.fileno())
+        identities = []
+        for fd in descriptors:
+            if type(fd) is not int or fd < 3:
+                raise CompanionError('Inherited descriptors must be integers >= 3')
+            info = os.fstat(fd)
+            identities.append((info.st_dev, info.st_ino))
+        if len(set(identities)) != len(identities):
+            raise CompanionError('USB and QMP endpoints must be distinct')
         if shutil.disk_usage(state).free < MIN_FREE_BYTES:
             raise CompanionError('Insufficient free space to start the companion')
         if (state / 'disk.qcow2').stat().st_size >= MAX_IMAGE_BYTES:
             raise CompanionError('Companion overlay already meets the disk limit')
         run_dir = state / 'runs' / uuid.uuid4().hex
         run_dir.mkdir(mode=0o700)
-        command = argv_for(state, manifest, usb, run_dir, ssh_port)
-        record = {'command': command, 'run': str(run_dir), 'seconds_limit': seconds,
+        command = None
+        record = {'run': str(run_dir), 'seconds_limit': seconds,
                   'hardware_profile': manifest.get('hardware_profile', 'isolated'),
-                  'usb_endpoint': str(usb), 'ssh_loopback_port': ssh_port,
+                  'usb_endpoint': str(usb) if usb is not None else None,
+                  'linux_only': linux_only,
+                  'usb_transport': 'disabled' if linux_only else 'fd' if usb_fd is not None else 'unix',
+                  'qmp_transport': 'fd' if qmp_fd is not None else 'pipe' if linux_only else 'unix',
+                  'ssh_loopback_port': ssh_port,
                   'usb_listener_ready': False, 'usb_enumerated': False,
                   'installed_apps': False, 'status': 'starting',
                   'max_image_bytes': MAX_IMAGE_BYTES, 'max_log_bytes': MAX_LOG_BYTES}
-        session.write_json(run_dir / 'start.json', record)
         process = None
         qmp_identity = None
         selector = selectors.DefaultSelector()
         log_stack = contextlib.ExitStack()
         outputs = {}
+        pipe_qmp = None
+        fd_stack = contextlib.ExitStack()
+        owned_usb = owned_qmp = owned_control = None
         started = time.monotonic()
         total_log = 0
         try:
@@ -306,9 +448,32 @@ def run(state, usb, seconds=600, ssh_port=32222):
                 try:
                     console = log_stack.enter_context((run_dir / 'console.log').open('xb'))
                     errors = log_stack.enter_context((run_dir / 'stderr.log').open('xb'))
+                    if linux_only:
+                        pipe_qmp = PipeQMP(run_dir / 'qmp')
+                    if usb_fd is not None:
+                        owned_usb = fd_stack.enter_context(session.inherited_socket(usb_fd, consume=True))
+                    if qmp_fd is not None:
+                        owned_qmp = fd_stack.enter_context(session.inherited_socket(qmp_fd, consume=True))
+                        if qmp_control_fd is not None:
+                            owned_control = fd_stack.enter_context(
+                                session.inherited_socket(qmp_control_fd, consume=True))
+                        else:
+                            if not isinstance(qmp_socket, socket.socket):
+                                raise CompanionError('QMP control peer must be a connected socket')
+                            owned_control = fd_stack.enter_context(session.inherited_socket(qmp_socket.fileno()))
+                    command = argv_for(state, manifest, usb, run_dir, ssh_port, linux_only,
+                                       owned_usb.fileno() if owned_usb is not None else None,
+                                       owned_qmp.fileno() if owned_qmp is not None else None)
+                    record['command'] = command
+                    session.write_json(run_dir / 'start.json', record)
+                    inherited = tuple(sock.fileno() for sock in (owned_usb, owned_qmp) if sock is not None)
                     process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                               preexec_fn=limit_child)
+                                               preexec_fn=limit_child, pass_fds=inherited)
+                    # Only QEMU keeps its endpoints; wrapper duplicates would mask EOF.
+                    for sock in (owned_usb, owned_qmp):
+                        if sock is not None:
+                            sock.close()
                     record['pid'] = process.pid
                     session.write_json(state / 'live.json', {'pid': process.pid, 'run': str(run_dir)})
                     for stream, output in ((process.stdout, console), (process.stderr, errors)):
@@ -329,12 +494,12 @@ def run(state, usb, seconds=600, ssh_port=32222):
                             record['stop_reason'] = 'overlay size limit'
                             break
                         qmp = state / 'qmp.sock'
-                        if qmp_identity is None and qmp.exists():
+                        if qmp_fd is None and not linux_only and qmp_identity is None and qmp.exists():
                             qi = qmp.lstat()
                             if not stat.S_ISSOCK(qi.st_mode) or qi.st_uid != os.getuid():
                                 raise CompanionError('Companion QMP endpoint is not an owned socket')
                             qmp_identity = (qi.st_dev, qi.st_ino)
-                        if not record['usb_listener_ready'] and endpoint._capture():
+                        if endpoint is not None and not record['usb_listener_ready'] and endpoint._capture():
                             entries = endpoint._entries()
                             # The phone may connect before this runner's first
                             # poll. Linux then lists the listener and its
@@ -350,7 +515,7 @@ def run(state, usb, seconds=600, ssh_port=32222):
                                                    {'pid': process.pid, 'endpoint': str(usb),
                                                     'identity': endpoint.identity,
                                                     'enumeration_proven': False})
-                        if not record['usb_listener_ready'] and time.monotonic() - started > 10:
+                        if endpoint is not None and not record['usb_listener_ready'] and time.monotonic() - started > 10:
                             record['stop_reason'] = 'USB listener startup timeout'
                             break
                         for key, _ in selector.select(timeout=0.05):
@@ -360,6 +525,7 @@ def run(state, usb, seconds=600, ssh_port=32222):
                                 continue
                             remaining = MAX_LOG_BYTES - total_log
                             key.data.write(chunk[:remaining])
+                            key.data.flush()
                             total_log += min(len(chunk), remaining)
                             if len(chunk) > remaining:
                                 record['stop_reason'] = 'log size limit'
@@ -376,10 +542,11 @@ def run(state, usb, seconds=600, ssh_port=32222):
                         # endpoints before stopping the child, retaining the
                         # same identity checks used during ordinary polling.
                         try:
-                            endpoint._capture()
+                            if endpoint is not None:
+                                endpoint._capture()
                         except (CompanionError, OSError):
                             record['usb_capture_error'] = True
-                        if qmp_identity is None:
+                        if qmp_fd is None and not linux_only and qmp_identity is None:
                             try:
                                 qi = (state / 'qmp.sock').lstat()
                                 if stat.S_ISSOCK(qi.st_mode) and qi.st_uid == os.getuid():
@@ -388,7 +555,16 @@ def run(state, usb, seconds=600, ssh_port=32222):
                                 record['qmp_capture_error'] = True
                         if process.poll() is None:
                             try:
-                                with CleanupQMP(state / 'qmp.sock') as qmp:
+                                control = (session.SocketQMP(owned_control, timeout=8 if diagnostics else 2)
+                                           if qmp_fd is not None else pipe_qmp if linux_only
+                                           else CleanupQMP(state / 'qmp.sock'))
+                                with control as qmp:
+                                    if diagnostics:
+                                        # Pipe/Unix cleanup normally shares a short deadline;
+                                        # explicitly requested bounded captures get eight seconds.
+                                        if hasattr(qmp, 'deadline'):
+                                            qmp.deadline = time.monotonic() + 8
+                                        record['diagnostics'] = capture_diagnostics(qmp, run_dir)
                                     qmp.request('quit')
                                 process.wait(timeout=3)
                             except Exception:
@@ -430,7 +606,9 @@ def run(state, usb, seconds=600, ssh_port=32222):
                         record['status'] = 'error'
                     if process is None or process.poll() is not None:
                         try:
-                            record['usb_cleanup'] = endpoint.cleanup(child_reaped=True)
+                            record['usb_cleanup'] = (endpoint.cleanup(child_reaped=True)
+                                                     if endpoint is not None else 'closed inherited endpoint'
+                                                     if usb_fd is not None else 'disabled for Linux qualification')
                         except (CompanionError, OSError):
                             record.update(status='error', usb_cleanup='metadata unavailable; preserved')
                         if qmp_identity is not None:
@@ -447,8 +625,16 @@ def run(state, usb, seconds=600, ssh_port=32222):
                             except OSError:
                                 record.update(status='error', qmp_cleanup='metadata unavailable; preserved')
                         (state / 'live.json').unlink(missing_ok=True)
+                        if pipe_qmp is not None:
+                            record['qmp_cleanup'] = pipe_qmp.close()
+                            pipe_qmp = None
+                        if qmp_fd is not None:
+                            record['qmp_cleanup'] = 'closed inherited endpoints'
                     session.write_json(run_dir / 'result.json', record)
         finally:
+            if pipe_qmp is not None:
+                pipe_qmp.close()
+            fd_stack.close()
             selector.close()
             log_stack.close()
         return record
@@ -465,9 +651,16 @@ def main():
                       default='isolated', help='pin hardware/resources; historical matches the retained local launcher')
     runner = modes.add_parser('run')
     runner.add_argument('--state', required=True, type=Path)
-    runner.add_argument('--usb-socket', required=True, type=Path)
+    runner.add_argument('--usb-socket', type=Path)
+    runner.add_argument('--usb-fd', type=int, help='consume an inherited connected Unix stream endpoint')
+    runner.add_argument('--qmp-fd', type=int, help='consume QEMU\'s inherited connected QMP endpoint')
+    runner.add_argument('--qmp-control-fd', type=int, help='consume the runner\'s connected QMP peer')
+    runner.add_argument('--linux-only', action='store_true',
+                        help='qualify Linux with private QMP pipes, no remote USB device or SSH forward')
     runner.add_argument('--seconds', type=float, default=600)
     runner.add_argument('--ssh-port', type=int, default=32222)
+    runner.add_argument('--diagnostics', action='store_true',
+                        help='capture bounded status/registers/VGA through owned QMP before stopping')
     args = parser.parse_args()
     try:
         if args.mode == 'prepare':
@@ -475,7 +668,9 @@ def main():
                              args.qemu_img, args.hardware_profile)
             print(json.dumps({'prepared': result['state'], 'backing_format': result['backing_format']}))
             return 0
-        result = run(args.state, args.usb_socket, args.seconds, args.ssh_port)
+        result = run(args.state, args.usb_socket, args.seconds, args.ssh_port, args.linux_only,
+                     args.usb_fd, args.qmp_fd, qmp_control_fd=args.qmp_control_fd,
+                     diagnostics=args.diagnostics)
         print(json.dumps({key: result.get(key) for key in
                           ('run', 'status', 'stop_reason', 'exit_code', 'usb_listener_ready', 'originals_unchanged')}))
         if result.get('interruption_signal_number'):

@@ -484,6 +484,14 @@ static void usb_tcp_host_attach(USBPort *port)
     }
 
     switch (s->conn_type) {
+    case TCP_REMOTE_CONN_TYPE_FD:
+        sock = s->conn_fd;
+        s->conn_fd = -1;
+        if (sock < 0) {
+            error_setg(&err, "Inherited USB endpoint was already consumed; "
+                       "a new device/run is required after disconnect");
+        }
+        break;
     case TCP_REMOTE_CONN_TYPE_UNIX:
         sock = usb_tcp_host_connect_unix(s, &err);
         break;
@@ -554,6 +562,13 @@ static void usb_tcp_host_realize(DeviceState *dev, Error **errp)
 
     s = USB_TCP_HOST(dev);
 
+    if (s->conn_type == TCP_REMOTE_CONN_TYPE_FD) {
+        s->conn_fd = usb_tcp_take_connected_fd(s->conn_addr, s->conn_port, errp);
+        if (s->conn_fd < 0) {
+            return;
+        }
+    }
+
     usb_bus_new(&s->bus, sizeof(s->bus), &usb_tcp_bus_ops, dev);
     for (i = 0; i < G_N_ELEMENTS(s->ports); i++) {
         usb_register_port(&s->bus, &s->ports[i], s, i, &usb_tcp_host_port_ops,
@@ -569,6 +584,11 @@ static void usb_tcp_host_unrealize(DeviceState *dev)
 {
     USBTCPHostState *s = USB_TCP_HOST(dev);
 
+    if (s->conn_fd >= 0) {
+        close(s->conn_fd);
+        s->conn_fd = -1;
+    }
+
     if (s->ioc) {
         qio_channel_shutdown(s->ioc, QIO_CHANNEL_SHUTDOWN_BOTH, NULL);
         qio_channel_close(s->ioc, NULL);
@@ -583,6 +603,7 @@ static void usb_tcp_host_init(Object *obj)
 {
     USBTCPHostState *s = USB_TCP_HOST(obj);
     s->closed = true;
+    s->conn_fd = -1;
     error_setg(&s->migration_blocker,
                "%s does not support migration while connected",
                TYPE_USB_TCP_HOST);

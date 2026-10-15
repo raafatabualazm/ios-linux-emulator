@@ -65,6 +65,7 @@ struct USBTCPRemoteState {
     uint8_t addr;
     bool closed;
     bool stopped;
+    bool read_thread_started; /* Used only for the one-shot inherited FD mode. */
 };
 
 #define TYPE_USB_TCP_REMOTE "usb-tcp-remote"
