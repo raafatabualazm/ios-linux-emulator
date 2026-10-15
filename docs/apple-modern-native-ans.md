@@ -38,6 +38,20 @@ writes, TCB length disagreement, crypto refusal, tag reuse, CQ phase wrap,
 mailbox/NVMe interrupt delivery and a complete second sequence after reset.
 This is process-crash persistence on the host backend, not host power-loss proof.
 
+With `prepare-only=off`, the board also maps the declared core-loaded register,
+SART register storage and segment SRAM, and supplies the ANS nub metadata. The
+SART bank stores 32-bit words; QEMU splits valid 64-bit accesses into two words
+so the high half is retained. These registers do not enforce SART DMA permissions
+and the loaded/running metadata does not mean an ANS firmware core executes.
+The matched SART node has three apertures (0xc000, 0x4000, 0x4000); the current
+adapter covers only the first 0x4000 bytes of reg[0]. The other ranges remain
+unimplemented and the width/reset test covers only the mapped subset.
+
+`scripts/test-apple-modern-ans-sart-qemu.py` uses normal board mappings and an
+owned ARM64 ROM. It verifies the exact PC/code before execution, tests mixed
+32/64-bit accesses, neighbor preservation, the bank end and reset. The older
+block-I/O fixture uses `prepare-only=on` and therefore cannot qualify this bank.
+
 ## Quiet PMP command receipt
 
 For platform investigation, the existing opt-in PTD board can additionally use:
@@ -74,8 +88,16 @@ They do not enforce voltage, frequency or thermal policy.
 The wrapper maps validated sparse MemoryRegions directly. More than32 windows
 must never be passed to sysbus_init_mmio: SysBusDevice has a fixed32-entry array,
 and NDEBUG hides its overflow assertion. The actual CPU gate caught that old
-wrapper defect and now checks all56 mapped regions and zero SysBus slots across
+wrapper defect and now checks all57 mapped regions and zero SysBus slots across
 reset. The ACC accounting-enable register at +0x178 in each cluster accepts the
 recovered 64-bit read-modify-write without generating hardware events. Missing
 words, holes and window boundaries still fault. Core and CPU
 qualification is recorded under the workspace native-storage evidence directory.
+
+The additional eight-byte P-cluster region at `0x211e440f8` follows the matched
+AppleT8140PMGR slot0x9b8/0xe08 call chain and ACC mapping table at `0x77b2000`.
+The actual native fault instruction at linked `0x92ae918` stores the value 1.
+E-cluster's corresponding address already lies in cpm-impl RAM. This narrow
+region provides zero-reset storage with no power/status acknowledgement; both
+adjacent holes still fault. Gemini's optional permissive callback cannot extend
+the mapped address space and is not enabled for this qualification.

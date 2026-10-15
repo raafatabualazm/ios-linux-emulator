@@ -362,6 +362,13 @@ static const FixedWindow acc_counter_windows[] = {
     {11, 0x9000, 0x10, 0, {0}}, {12, 0x9000, 0x10, 0, {0}},
     {13, 0x9000, 0x10, 0, {0}}, {19, 0x9000, 0x10, 0, {0}},
     {20, 0x9000, 0x10, 0, {0}}, {16, 0x8000, 0x10, 0, {0}},
+    /* Slot9b8 (0x9847ce0) and resume (0x9847d84) call slot e08
+     * with cluster 0/1, ACC address 0xe440f8, value 1. The mapping
+     * table at 0x77b2000 selects P-cluster selector22, reg[16].
+     * Generic store 0x92ae918 writes one qword at +0x40f8; measured
+     * native fault agrees. E-cluster is already in cpm-impl RAM.
+     * Declared zero-reset storage only: no ready/status side effects. */
+    {16, 0x40f8, 0x8, 0, {0}},
 };
 static const uint64_t acc_counter_banks[] = {
     UINT64_C(0x210e20000), UINT64_C(0x210e20000), UINT64_C(0x210e20000),
@@ -370,6 +377,7 @@ static const uint64_t acc_counter_banks[] = {
     UINT64_C(0x211e20000),
     UINT64_C(0x210150000), UINT64_C(0x210250000), UINT64_C(0x210350000),
     UINT64_C(0x211050000), UINT64_C(0x211150000), UINT64_C(0x211e40000),
+    UINT64_C(0x211e40000),
 };
 _Static_assert(ARRAY_ENTRIES(acc_counter_banks) == ARRAY_ENTRIES(acc_counter_windows),
                "ACC register windows require matched bank addresses");

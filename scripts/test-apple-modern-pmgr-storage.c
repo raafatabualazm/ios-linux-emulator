@@ -59,7 +59,7 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
 /* PMS_PTS_PTD (reg_index 34, 0x3003c0000): interrupt enable-set / enable-clear banks
  * and the vector-config array, windows 3..5 (tags 0x101..0x103). */
 #define PTD_BASE UINT64_C(0x3003c0000)
-#define FIXED_WINDOWS 48
+#define FIXED_WINDOWS 49
 #define FIXED_REGISTERS (8 + 32 + 32 + 256 + 5 + 2 + 29 + 7 + 1 + 2 + 1 + 2 + 2 + 20)
 /* Five ADT cluster-control registers (reg_index 28): window 6, tag 0x104. */
 #define CLUSTER_BASE UINT64_C(0x300780000)
@@ -146,10 +146,10 @@ static bool expected_valid(unsigned group, uint64_t offset)
     if (group == PMC_TAG + 5) {
         return offset == 0 || offset == 0x3e0;
     }
-    if (group >= 0x200 && group < 0x20f) {
-        const unsigned sizes[15] = {
+    if (group >= 0x200 && group < 0x210) {
+        const unsigned sizes[16] = {
             0x40, 0x40, 0x1d0, 0x40, 0x40, 0x90, 0x90, 0x1d0,
-            0x90, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+            0x90, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 8,
         };
         return offset < sizes[group - 0x200];
     }
@@ -178,7 +178,7 @@ static void plan_exact(AppleModernBlob tree)
     Error *error = NULL;
     unsigned counted = 0;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &plan, &error));
-    CHECK(plan.count == 8 + FIXED_WINDOWS && plan.registers == 1787 + 428 + FIXED_REGISTERS);
+    CHECK(plan.count == 8 + FIXED_WINDOWS && plan.registers == 1787 + 430 + FIXED_REGISTERS);
     CHECK(plan.windows[0].group == 6 && plan.windows[0].address == G6_BASE &&
           plan.windows[0].size == G6_END);
     CHECK(plan.windows[1].group == 7 && plan.windows[1].address == G7_BASE &&
@@ -213,7 +213,10 @@ static void plan_exact(AppleModernBlob tree)
               plan.windows[ACG_WINDOW + k].address == ACG_BASE[k] + 0x104 &&
               plan.windows[ACG_WINDOW + k].size == 8);
     }
-    CHECK(plan.count == ACG_WINDOW + 10 + 6 + 15);
+    CHECK(plan.count == ACG_WINDOW + 10 + 6 + 16);
+    CHECK(plan.windows[56].group == 0x20f &&
+          plan.windows[56].address == UINT64_C(0x211e440f8) &&
+          plan.windows[56].size == 8);
     for (unsigned k = 0; k < 3; k++) {
         CHECK(plan.windows[3 + k].group == WAKE_TAG + 1 + k &&
               plan.windows[3 + k].address == PTD_BASE + PTD[k].offset &&
@@ -308,12 +311,12 @@ static void plan_tamper(AppleModernBlob tree)
     /* Group flags change placement order, not the later enable-register set. */
     g6[8] = 0;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    CHECK(junk.count == 8 + FIXED_WINDOWS && junk.registers == 1787 + 428 + FIXED_REGISTERS &&
+    CHECK(junk.count == 8 + FIXED_WINDOWS && junk.registers == 1787 + 430 + FIXED_REGISTERS &&
           junk.windows[0].group == 7 && junk.windows[1].group == WAKE_TAG);
     /* Neither initially programmed: fixed windows precede all eight groups. */
     g7[8] = 0;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    CHECK(junk.count == 8 + FIXED_WINDOWS && junk.registers == 1787 + 428 + FIXED_REGISTERS &&
+    CHECK(junk.count == 8 + FIXED_WINDOWS && junk.registers == 1787 + 430 + FIXED_REGISTERS &&
           junk.windows[0].group == WAKE_TAG);
     g6[8] = 2; g7[8] = 2;
     /* Flag bit 0 alone defers a group to the appended enable groups. */

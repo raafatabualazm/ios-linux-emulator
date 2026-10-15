@@ -43,7 +43,10 @@ Validation:
 - The previous integrated binary fails the behavioral v1 reply-length oracle:
   88 bytes observed versus 80 expected for the four-byte response body.
 
-The latest bounded native iOS observation still stops before SEP traffic at the
-PMGR store `0x211e440f8`. The framing tests establish transport correctness only;
+The bounded native iOS observation now passes the PMGR store `0x211e440f8`
+and stops at the DPE counter high-word read `0x30020a70c`, linked instruction
+`0xfffffff0092a778c`. Its helper reads high/low/high until the high words agree;
+this is a coherent counter snapshot, not a SEP bootstrap request. PMGR has not
+Started and native ANS/SEP traffic remains zero. The framing tests establish transport correctness only;
 they do not establish native SEP bootstrap, a wrapped VEK, keychain keys or
 encrypted APFS persistence.

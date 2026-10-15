@@ -94,7 +94,7 @@ def main():
                 maps = {name: qmp.request('qom-get', {
                     'path': '/machine/pmgr-storage', 'property': name}) for name in
                     ['mapped-window-count', 'sysbus-mmio-count']}
-                assert maps == {'mapped-window-count': 56, 'sysbus-mmio-count': 0}
+                assert maps == {'mapped-window-count': 57, 'sysbus-mmio-count': 0}
                 ans = {name: qmp.request('qom-get', {
                     'path': '/machine/ans', 'property': name}) for name in
                     ['submission-count', 'guest-message-count']}

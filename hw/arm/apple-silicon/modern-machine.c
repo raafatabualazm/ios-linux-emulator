@@ -105,6 +105,7 @@ struct AppleModernMachine {
     bool root_rw_compat;
     bool txm_sc_compat;
     bool iouc_sandbox_compat;
+    bool hid_static_config;
     /* Declared, opt-in anchored image-patch set (default NULL = none). */
     char *image_patches;
     AppleModernImagePatchResult image_patch_result;
@@ -3105,6 +3106,35 @@ static void modern_init(MachineState *machine)
                     "kernel can no longer clock- or power-gate any /arm-io "
                     "device through /arm-io/pmgr)");
     }
+    if (s->hid_static_config) {
+        /*
+         * Declared, opt-in. Give /arm-io/dockchannel-mtp/mtp-transport a
+         * presence-only "use-static-config" property so
+         * AppleHIDTransportDevice::startGated takes its static-config branch:
+         * the guard is copyProperty("use-static-config", gIOServicePlane,
+         * iterate-parents) != NULL, searched up the IOService plane, and the
+         * FIFO device attaches under this node. The node carries no
+         * "bootloader-type" (so device+0xb8 is already 0 and the branch is
+         * taken regardless), but this forces it deterministically. Only
+         * presence is tested, so the value is a single declared byte: the
+         * override ABI has no zero-length form (the stock siblings
+         * ttw-supported / auth-required are 0-length in the raw ADT).
+         */
+        static const uint8_t use_static_config[] = {1};
+
+        if (override_count >= APPLE_MODERN_MAX_ADT_OVERRIDES) {
+            error_report("apple-modern: hid-static-config exceeds ADT override "
+                         "capacity");
+            exit(EXIT_FAILURE);
+        }
+        overrides[override_count++] = (AppleModernAdtOverride){
+            "/arm-io/dockchannel-mtp/mtp-transport", "use-static-config",
+            use_static_config, sizeof(use_static_config)};
+        warn_report("apple-modern: hid-static-config serves "
+                    "/arm-io/dockchannel-mtp/mtp-transport use-static-config "
+                    "(presence-only, 1 declared byte; the distribution tree "
+                    "file is never written)");
+    }
     if (override_count) {
         metadata_input.overrides = overrides;
         metadata_input.override_count = override_count;
@@ -3273,6 +3303,34 @@ static void modern_init(MachineState *machine)
                     "Apple fidelity",
                     iouc.sandbox_deny_anchor, iouc.sandbox_deny_before, iouc.sandbox_deny_after,
                     iouc.macf_gate_anchor, iouc.macf_gate_before, iouc.macf_gate_after);
+    }
+    if (s->hid_static_config) {
+        /*
+         * Declared, opt-in guest-kernel compatibility edit on the board's
+         * private in-memory boot kernel cache only. See modern-kc-patch.h. The
+         * copy is the one load_prepared_memory() writes into guest RAM at every
+         * reset. It replaces the AppleHIDTransportDeviceFIFO getStaticConfig
+         * NULL stub with a branch to a code cave that returns the MTP Config
+         * dict via OSUnserializeXML, clearing "No protocol specified" without a
+         * live firmware download. It touches no signing/trust/AMFI material.
+         */
+        AppleModernHidStaticConfigPatch hid = { 0 };
+        uint8_t *bootkc = (uint8_t *)s->blobs[ASSET_BOOTKC].data;
+
+        if (!apple_modern_kc_hid_static_config(bootkc,
+                                               s->blobs[ASSET_BOOTKC].size,
+                                               &hid, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: applied opt-in hid-static-config patch to "
+                    "the in-memory kernel cache: FIFO getStaticConfig stub at "
+                    "0x%" PRIx64 " keeps bti c, +4 (0x%08x->0x%08x) branches to "
+                    "a code cave at 0x%" PRIx64 " that builds the %u-byte MTP "
+                    "Config dict via OSUnserializeXML (thunk 0x%" PRIx64 "). "
+                    "Compatibility, not Apple fidelity",
+                    hid.stub_va, hid.stub_before, hid.stub_after, hid.cave_va,
+                    hid.xml_len, hid.thunk_va);
     }
     if (s->image_patches) {
         /*
@@ -3703,6 +3761,7 @@ BOOL_PROPERTY(md0_width_compat, md0_width_compat)
 BOOL_PROPERTY(root_rw_compat, root_rw_compat)
 BOOL_PROPERTY(txm_sc_compat, txm_sc_compat)
 BOOL_PROPERTY(iouc_sandbox_compat, iouc_sandbox_compat)
+BOOL_PROPERTY(hid_static_config, hid_static_config)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(el0_trap_trace, el0_trap_trace)
 BOOL_PROPERTY(sep_trace, sep_trace)
@@ -4065,6 +4124,9 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "iouc-sandbox-compat",
                                    get_iouc_sandbox_compat,
                                    set_iouc_sandbox_compat);
+    object_class_property_add_bool(oc, "hid-static-config",
+                                   get_hid_static_config,
+                                   set_hid_static_config);
     object_class_property_add_str(oc, "image-patches", get_image_patches,
                                   set_image_patches);
     object_class_property_add_str(oc, "applied-image-patches",

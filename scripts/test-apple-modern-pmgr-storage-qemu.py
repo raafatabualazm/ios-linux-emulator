@@ -69,7 +69,8 @@ ACC_RANGES = [(0x210e20000,0x400,0x40),(0x210e20000,0x500,0x40),
         (0x211e20000,0x400,0x90),(0x211e20000,0x500,0x90),(0x211e20000,0x680,0x1d0),
         (0x211e20000,0x11e8,0x90),
         (0x210150000,0x9000,0x10),(0x210250000,0x9000,0x10),(0x210350000,0x9000,0x10),
-        (0x211050000,0x9000,0x10),(0x211150000,0x9000,0x10),(0x211e40000,0x8000,0x10)]
+        (0x211050000,0x9000,0x10),(0x211150000,0x9000,0x10),(0x211e40000,0x8000,0x10),
+        (0x211e40000,0x40f8,8)]
 
 def storage_registers():
     spec = json.loads(Path(__file__).with_name('apple-modern-pmgr-counter-table.json').read_text())
@@ -437,6 +438,15 @@ for _g in _counter_spec['groups']:
 for _base,_off,_span in ACC_RANGES:
     PROGRAM.extend([('r32',_base+_off,None),('r32',_base+_off+_span-4,None)])
 
+# Matched BootKC slot9b8 writes 1 at P_ACC_CPM_PWRCTL+0x40f8.
+# Wide storage and both adjacent holes must remain precise across reset.
+PROGRAM.extend([
+    ('w64', 0x211e440f8, 1), ('r64', 0x211e440f8, None),
+    ('w64', 0x211e440f8, 0x1122334455667788),
+    ('r32', 0x211e440f8, None), ('r32', 0x211e440fc, None),
+    ('r64', 0x211e440f0, None), ('r64', 0x211e44100, None),
+])
+
 def expected_results(enabled):
     """Per-probe expected (value or None, faulted) plus the final counters."""
     model = Model(enabled)
@@ -586,7 +596,7 @@ def run(binary, components, output, no_device):
                             f'Last fault is not a synchronous external data abort: {esr:#x}')
                 counters = {}
                 if enabled:
-                    require(qmp.request('qom-get',{'path':'/machine/pmgr-storage','property':'mapped-window-count'})==56,'All 56 sparse regions mapped')
+                    require(qmp.request('qom-get',{'path':'/machine/pmgr-storage','property':'mapped-window-count'})==57,'All 57 sparse regions mapped')
                     require(qmp.request('qom-get',{'path':'/machine/pmgr-storage','property':'sysbus-mmio-count'})==0,'No overflow of SysBus MMIO slots')
                     for path, kind in (('/machine/cpu-dvfm', 'dvfm'),
                                        ('/machine/pmgr-storage', 'storage')):

@@ -987,7 +987,15 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
             const char *which = "none";
             uint64_t cb_dva = 0;
             if (ctx == 0 && s->shmem_dva != 0) {
-                dcp_iop_select_dma_as(s, s->shmem_dva + 0x60000 + 12,
+                /*
+                 * The AP writes its return value after the input payload, so the
+                 * reply is at +12+in_len. Reading at +12 returned our own input
+                 * back, which made D575's connected=1 byte look like a success
+                 * status of 0x1.
+                 */
+                uint32_t cb_in_len = s->cb_index < ARRAY_SIZE(s->active_cbs) ?
+                                     s->active_cbs[s->cb_index].in_len : 0;
+                dcp_iop_select_dma_as(s, s->shmem_dva + 0x60000 + 12 + cb_in_len,
                                       &cb_out, sizeof(cb_out), &which,
                                       &cb_dva);
             }
@@ -1117,6 +1125,7 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                          !strcmp(tag_str, "A204") ||
                          !strcmp(tag_str, "A352") ||
                          !strcmp(tag_str, "A381") ||
+                         !strcmp(tag_str, "A384") ||
                          !strcmp(tag_str, "A401") ||
                          /*
                           * A410/A411 = is_main_display family. In this BootKC
@@ -1206,6 +1215,17 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                                hdr.out_len == 4) {
                         /* display_height() -> uint */
                         stl_le_p(zeros, 768);
+                    } else {
+                        /*
+                         * Nothing claimed this tag, so the guest gets an all-zero
+                         * reply that reads identically in the log to a deliberate
+                         * zero. Name it instead, so real gaps stop hiding.
+                         */
+                        warn_report("apple-modern: dcp-iop v6-resumed RPC #%"
+                                    PRIu64 " tag='%s' UNHANDLED (in_len=0x%x"
+                                    " out_len=0x%x), replying zeros",
+                                    s->messages, tag_str, hdr.in_len,
+                                    hdr.out_len);
                     }
                     dma_memory_write(as, out_dva, zeros, hdr.out_len,
                                      MEMTXATTRS_UNSPECIFIED);

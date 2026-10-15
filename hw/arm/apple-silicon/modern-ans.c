@@ -370,7 +370,9 @@ static const MemoryRegionOps ans_sart_ops = {
     .read = ans_sart_read, .write = ans_sart_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 8 },
-    .impl = { .min_access_size = 4, .max_access_size = 8 },
+    /* Storage is word-sized. Let QEMU split wide little-endian accesses so
+     * both halves survive, including the final aligned qword in the bank. */
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
 };
 
 static void ans_reset(DeviceState *dev)
