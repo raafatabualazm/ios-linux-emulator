@@ -36,6 +36,8 @@
 #include "hw/arm/apple-silicon/modern-disp-trace.h"
 #include "hw/arm/apple-silicon/modern-compat-groups.h"
 #include "hw/arm/apple-silicon/modern-smc.h"
+#include "hw/arm/apple-silicon/modern-dockchannel.h"
+#include "hw/gpio/apple_gpio.h"
 #include "hw/misc/apple-silicon/buttons.h"
 #include "hw/arm/apple-silicon/modern-pmgr-storage.h"
 #include "hw/arm/apple-silicon/modern-mcc-dsid.h"
@@ -152,6 +154,8 @@ struct AppleModernMachine {
     char *adt_compat_restore;
     bool modern_smc;
     bool modern_smc_buttons;
+    /* Declared touch-path register blocks; see map_modern_mtp_input(). */
+    bool modern_mtp_input;
     AppleModernSMCPlan smc_plan;
     AppleModernDispTracePlan disp_trace_plan;
     /*
@@ -1341,6 +1345,7 @@ static bool map_modern_smc(AppleModernMachine *s, uint64_t uart,
                 plan.address[0], plan.address[1], plan.address[2], plan.address[3]);
     return true;
 }
+
 static bool map_dcp_dart(AppleModernMachine *s, Error **errp)
 {
     AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
@@ -1517,6 +1522,136 @@ static bool map_dcp_dart(AppleModernMachine *s, Error **errp)
                 " (streams %u/%u); 42-bit VA/PA and revision 2 declared",
                 dcp_base, dcp_span, dcp_stream,
                 disp0_base, disp0_span, disp0_streams[0], disp0_streams[1]);
+    return true;
+}
+
+/* Refuse to map over anything already placed in the system address space. */
+static bool mtp_window_free(uint64_t address, uint64_t size, const char *what,
+                            Error **errp)
+{
+    MemoryRegionSection section = memory_region_find(get_system_memory(),
+                                                     address, size);
+
+    if (section.mr) {
+        error_setg(errp, "modern-mtp-input: %s 0x%" PRIx64 "+0x%" PRIx64
+                   " overlaps mapped region '%s'", what, address, size,
+                   memory_region_name(section.mr));
+        memory_region_unref(section.mr);
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Declared, default-off touch-path register blocks (modern-mtp-input).
+ * With the stock hid-mtp compatible values restored, AppleT8101GPIOIC and
+ * AppleDockChannel each fault forever on their first register read because
+ * /arm-io/mtp-gpio (0x314838000) and /arm-io/dockchannel-mtp (0x314b00000)
+ * are unmapped; the guest re-executes those loads instead of booting
+ * (evidence/features-20261014/claude-input run2).  This maps:
+ *  - /arm-io/mtp-gpio: the existing Apple GPIO model, sized from the ADT
+ *    #gpio-pins / #gpio-int-groups, one AIC line per interrupt group;
+ *  - /arm-io/dockchannel-mtp: the declared FIFO in modern-dockchannel.c.
+ * No MTP firmware or HID peer runs; touch acceptance stays unqualified.
+ */
+static bool map_modern_mtp_input(AppleModernMachine *s, Error **errp)
+{
+    AppleModernBlob tree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleModernBlob reg, ints, pins, groups, fifo, channel;
+    uint64_t address, size;
+    SysBusDevice *sbd;
+
+    if (!s->modern_aic) {
+        error_setg(errp, "modern-mtp-input needs modern-aic=on (the touch-path "
+                   "IRQs 1128-1137 are beyond the legacy AIC)");
+        return false;
+    }
+
+    if (!apple_modern_adt_property(tree, "/arm-io/mtp-gpio", "reg", &reg, errp) ||
+        !apple_modern_adt_property(tree, "/arm-io/mtp-gpio", "interrupts",
+                                   &ints, errp) ||
+        !apple_modern_adt_property(tree, "/arm-io/mtp-gpio", "#gpio-pins",
+                                   &pins, errp) ||
+        !apple_modern_adt_property(tree, "/arm-io/mtp-gpio", "#gpio-int-groups",
+                                   &groups, errp)) {
+        return false;
+    }
+    if (reg.size != 16 || pins.size != 4 || groups.size != 4 || !ints.size ||
+        ints.size % 4 || ints.size / 4 != ldl_le_p(groups.data)) {
+        error_setg(errp, "modern-mtp-input: unexpected /arm-io/mtp-gpio schema");
+        return false;
+    }
+    size = ldq_le_p(reg.data + 8);
+    if (!arm_io_translate(tree, ldq_le_p(reg.data), size, &address, errp) ||
+        !mtp_window_free(address, size, "/arm-io/mtp-gpio", errp)) {
+        return false;
+    }
+    for (size_t i = 0; i < ints.size; i += 4) {
+        if (ldl_le_p(ints.data + i) >= s->aic_num_irqs) {
+            error_setg(errp, "modern-mtp-input: mtp-gpio IRQ %u exceeds the AIC bound",
+                       ldl_le_p(ints.data + i));
+            return false;
+        }
+    }
+    DeviceState *gpio = apple_gpio_new("mtp-gpio", size, ldl_le_p(pins.data),
+                                       ldl_le_p(groups.data));
+    object_property_add_child(OBJECT(s), "modern-mtp-gpio", OBJECT(gpio));
+    sbd = SYS_BUS_DEVICE(gpio);
+    sysbus_realize_and_unref(sbd, &error_fatal);
+    sysbus_mmio_map(sbd, 0, address);
+    for (size_t i = 0; i < ints.size; i += 4) {
+        sysbus_connect_irq(sbd, i / 4, qdev_get_gpio_in(s->aic, ldl_le_p(ints.data + i)));
+    }
+    uint64_t gpio_address = address;
+
+    if (!apple_modern_adt_property(tree, "/arm-io/dockchannel-mtp", "reg", &reg,
+                                   errp) ||
+        !apple_modern_adt_property(tree, "/arm-io/dockchannel-mtp", "interrupts",
+                                   &ints, errp) ||
+        !apple_modern_adt_property(tree, "/arm-io/dockchannel-mtp", "fifo-size",
+                                   &fifo, errp) ||
+        !apple_modern_adt_property(tree, "/arm-io/dockchannel-mtp",
+                                   "channel-number", &channel, errp)) {
+        return false;
+    }
+    if (reg.size != 16 * APPLE_MODERN_DOCKCHANNEL_WINDOWS || ints.size != 4 ||
+        fifo.size != 4 || channel.size != 4 || !ldl_le_p(fifo.data) ||
+        ldl_le_p(fifo.data) > APPLE_MODERN_DOCKCHANNEL_FIFO_MAX ||
+        ldl_le_p(channel.data) >= 7 || ldl_le_p(ints.data) >= s->aic_num_irqs) {
+        error_setg(errp, "modern-mtp-input: unexpected /arm-io/dockchannel-mtp schema");
+        return false;
+    }
+    uint64_t windows[APPLE_MODERN_DOCKCHANNEL_WINDOWS];
+    for (unsigned i = 0; i < APPLE_MODERN_DOCKCHANNEL_WINDOWS; i++) {
+        size = ldq_le_p(reg.data + 16 * i + 8);
+        if (size != APPLE_MODERN_DOCKCHANNEL_WIN_SIZE) {
+            error_setg(errp, "modern-mtp-input: dockchannel-mtp reg[%u] is not a "
+                       "0x%x window", i, APPLE_MODERN_DOCKCHANNEL_WIN_SIZE);
+            return false;
+        }
+        if (!arm_io_translate(tree, ldq_le_p(reg.data + 16 * i), size,
+                              &windows[i], errp) ||
+            !mtp_window_free(windows[i], size, "/arm-io/dockchannel-mtp", errp)) {
+            return false;
+        }
+    }
+    sbd = apple_modern_dockchannel_new(ldl_le_p(fifo.data), ldl_le_p(channel.data));
+    object_property_add_child(OBJECT(s), "modern-dockchannel-mtp", OBJECT(sbd));
+    sysbus_realize_and_unref(sbd, &error_fatal);
+    for (unsigned i = 0; i < APPLE_MODERN_DOCKCHANNEL_WINDOWS; i++) {
+        sysbus_mmio_map(sbd, i, windows[i]);
+    }
+    sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(s->aic, ldl_le_p(ints.data)));
+
+    warn_report("apple-modern: modern-mtp-input maps /arm-io/mtp-gpio (Apple GPIO "
+                "model, %u pins, %u groups) at 0x%" PRIx64 " and a declared "
+                "/arm-io/dockchannel-mtp FIFO (fifo-size 0x%x, channel %u, IRQ %u) "
+                "at 0x%" PRIx64 "; DockChannel semantics from the AppleDockChannel "
+                "driver, no MTP firmware or HID peer runs, touch acceptance "
+                "unqualified",
+                ldl_le_p(pins.data), ldl_le_p(groups.data), gpio_address,
+                ldl_le_p(fifo.data), ldl_le_p(channel.data), ldl_le_p(ints.data),
+                windows[APPLE_MODERN_DOCKCHANNEL_WIN_GLOBAL]);
     return true;
 }
 
@@ -3137,7 +3272,9 @@ static void modern_init(MachineState *machine)
         (s->pmgr_aon_fuse_image &&
          !map_pmgr_fuse(s, uart, uart_span, &error)) ||
         (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error)) ||
-        (s->disp0_pipe && !map_disp0(s, uart, uart_span, &error))) {
+        (s->disp0_pipe && !map_disp0(s, uart, uart_span, &error)) ||
+        /* Last, so its overlap refusal sees every other mapping. */
+        (s->modern_mtp_input && !map_modern_mtp_input(s, &error))) {
         error_report_err(error);
         exit(EXIT_FAILURE);
     }
@@ -3481,6 +3618,7 @@ BOOL_PROPERTY(aic_trace, aic_trace)
 BOOL_PROPERTY(modern_aic, modern_aic)
 BOOL_PROPERTY(modern_smc, modern_smc)
 BOOL_PROPERTY(modern_smc_buttons, modern_smc_buttons)
+BOOL_PROPERTY(modern_mtp_input, modern_mtp_input)
 BOOL_PROPERTY(aic_record_irq_config, aic_record_irq_config)
 BOOL_PROPERTY(boot_display, boot_display)
 BOOL_PROPERTY(disp0_pipe, disp0_pipe)
@@ -3778,6 +3916,13 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_modern_smc_buttons);
     object_class_property_add_bool(oc, "modern-smc", get_modern_smc,
                                    set_modern_smc);
+    object_class_property_add_bool(oc, "modern-mtp-input",
+                                   get_modern_mtp_input,
+                                   set_modern_mtp_input);
+    object_class_property_set_description(oc, "modern-mtp-input",
+        "Declared, default-off: map /arm-io/mtp-gpio (Apple GPIO model) and a "
+        "declared /arm-io/dockchannel-mtp FIFO so the touch drivers stop "
+        "faulting; no MTP firmware or HID peer, touch unqualified");
     object_class_property_add_bool(oc, "modern-aic", get_modern_aic,
                                    set_modern_aic);
     object_class_property_add_bool(oc, "aic-record-irq-config",
