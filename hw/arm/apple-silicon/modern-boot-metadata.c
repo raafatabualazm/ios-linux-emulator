@@ -53,6 +53,7 @@ typedef struct Tree {
     const AppleModernBootLayout *layout;
     unsigned chosen_count, map_count, vram_count, aic_count;
     uint32_t aic_iack_offset;
+    bool chosen_sepfw_absent;
     /*
      * dart-id generation. dart_pending and dart_value describe only the node
      * whose properties are being emitted: walk() sets them after reading the
@@ -195,7 +196,9 @@ static bool normal_property(const Tree *tree, const char *path,
         return !strcmp(name, "reg");
     }
     if (!strcmp(path, "/chosen")) {
-        return !strcmp(name, "dram-base") || !strcmp(name, "dram-size");
+        return !strcmp(name, "dram-base") || !strcmp(name, "dram-size") ||
+               (tree->chosen_sepfw_absent &&
+                !strcmp(name, "sepfw-load-at-boot"));
     }
     if (!strcmp(path, "/chosen/memory-map")) {
         for (size_t i = 0; i < tree->normal_count; i++) {
@@ -241,7 +244,14 @@ static bool emit_normal(Tree *tree, const char *path, Error **errp)
             return false;
         }
         put64(bytes, tree->layout->dram_size);
-        return property(tree, "dram-size", bytes, sizeof(bytes), errp);
+        if (!property(tree, "dram-size", bytes, sizeof(bytes), errp)) {
+            return false;
+        }
+        if (tree->chosen_sepfw_absent) {
+            put32(bytes, 0);
+            return property(tree, "sepfw-load-at-boot", bytes, 4, errp);
+        }
+        return true;
     }
     if (!strcmp(path, "/chosen/memory-map")) {
         for (size_t i = 0; i < tree->normal_count; i++) {
@@ -380,8 +390,8 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
         cursor += size;
     }
     if (tree->output) {
-        size_t added = chosen ? 2 : map ? tree->normal_count : vram ? 1 :
-                       aic ? 1 : 0;
+        size_t added = chosen ? 2 + tree->chosen_sepfw_absent :
+                       map ? tree->normal_count : vram ? 1 : aic ? 1 : 0;
         added += override_nodes_at(tree, path);
         added += tree->dart_pending;
         if (count - replaced + added > 4096) {
@@ -702,6 +712,7 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     tree.output = prepared.dtree;
     tree.capacity = capacity;
     tree.aic_iack_offset = input->aic_iack_offset;
+    tree.chosen_sepfw_absent = input->chosen_sepfw_absent;
     tree.assign_dart_ids = input->assign_dart_ids;
     tree.overrides = input->overrides;
     tree.override_count = input->override_count;

@@ -57,6 +57,23 @@ bool apple_modern_large_ramdisk_map(const char *path,
                                     AppleModernLargeRamdisk *out,
                                     Error **errp);
 
+/*
+ * Declared in-memory edits of a mapped ramdisk (machine option
+ * ramdisk-patches). The list file holds one patch per line:
+ *     <offset> <old-hex> <new-hex>    # optional comment
+ * offset is a byte offset into the image (C syntax, 0x prefix for hex); old
+ * and new are hex strings of equal length, at most
+ * APPLE_MODERN_RAMDISK_PATCH_MAX bytes. Every line is checked against the
+ * mapped bytes before any is written (a line whose bytes already equal the new
+ * value is accepted), so a stale list changes nothing. Writes land in the
+ * private copy-on-write mapping only: the image file is never modified.
+ */
+#define APPLE_MODERN_RAMDISK_PATCH_MAX 512u
+#define APPLE_MODERN_RAMDISK_PATCH_LINES 256u
+bool apple_modern_large_ramdisk_patch(AppleModernLargeRamdisk *map,
+                                      const char *path, unsigned *applied,
+                                      Error **errp);
+
 /* Release the mapping. Safe on an all-zero struct; zeroes *map. */
 void apple_modern_large_ramdisk_unmap(AppleModernLargeRamdisk *map);
 

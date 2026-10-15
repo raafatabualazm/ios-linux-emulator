@@ -87,6 +87,13 @@
 
 /* Attested wrapper-window size; a tree that disagrees is refused. */
 #define APPLE_MODERN_DCP_IOP_WRAPPER_SIZE UINT64_C(0x88000)
+/* Attested ASC core-register window size (/arm-io/dcp reg[1]). */
+#define APPLE_MODERN_DCP_IOP_CORE_SIZE UINT64_C(0x4000)
+/* Declared non-overlapping 1 MiB segment region for /arm-io/dcp/iop-dcp-nub
+ * in v6-resumed mode (immediately after /arm-io/smc/iop-smc-nub's
+ * 0x30de00000+0x100000 SRAM window). */
+#define APPLE_MODERN_DCP_IOP_SEGMENT_BASE UINT64_C(0x30df00000)
+#define APPLE_MODERN_DCP_IOP_SEGMENT_SIZE UINT64_C(0x100000)
 /* Four lines, matching AppleA7IOP's four mailbox interrupts. */
 #define APPLE_MODERN_DCP_IOP_IRQS 4
 /* RTKit reserves raw endpoints below this for its own control channels. */
@@ -98,6 +105,9 @@
 /* Declared raw IOMFB candidate; modern DCP mapping has not been measured. */
 #define APPLE_MODERN_DCP_IOP_EP_IOMFB \
     (APPLE_MODERN_DCP_IOP_EP_NAME_INDEX + APPLE_MODERN_DCP_IOP_EP_NAME_BIAS)
+/* Second candidate raw endpoint (0x38, user-relative 24) for 0-based naming. */
+#define APPLE_MODERN_DCP_IOP_EP_IOMFB_ALT \
+    (APPLE_MODERN_DCP_IOP_EP_USER_START + APPLE_MODERN_DCP_IOP_EP_NAME_INDEX)
 /* What AppleDCPLinkServiceSoC's IONameMatch expects to see. */
 #define APPLE_MODERN_DCP_IOP_NUB_NAME "DCPEndpoint24"
 #define APPLE_MODERN_DCP_IOP_ROLE_MAX 16
@@ -110,6 +120,7 @@ enum {
     APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED,
     APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED_QUIESCED,
     APPLE_MODERN_DCP_IOP_MODE_V6_EXPERT_START,
+    APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED,
 };
 #define APPLE_MODERN_DCP_IOP_NAME_V6 "v6"
 #define APPLE_MODERN_DCP_IOP_NAME_V4 "v4"
@@ -118,12 +129,14 @@ enum {
 #define APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED "v6-prestarted"
 #define APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED_QUIESCED "v6-prestarted-quiesced"
 #define APPLE_MODERN_DCP_IOP_NAME_V6_EXPERT_START "v6-expert-start"
+#define APPLE_MODERN_DCP_IOP_NAME_V6_RESUMED "v6-resumed"
 #define APPLE_MODERN_DCP_IOP_MODE_NAMES \
     APPLE_MODERN_DCP_IOP_NAME_V6 ", " APPLE_MODERN_DCP_IOP_NAME_V4 ", " \
     APPLE_MODERN_DCP_IOP_NAME_V6_QUIESCED ", " APPLE_MODERN_DCP_IOP_NAME_FLAGS ", " \
     APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED ", " \
     APPLE_MODERN_DCP_IOP_NAME_V6_PRESTARTED_QUIESCED ", " \
-    APPLE_MODERN_DCP_IOP_NAME_V6_EXPERT_START
+    APPLE_MODERN_DCP_IOP_NAME_V6_EXPERT_START ", " \
+    APPLE_MODERN_DCP_IOP_NAME_V6_RESUMED
 
 /* Returns false for an unknown name. */
 bool apple_modern_dcp_iop_mode(const char *name, unsigned *mode);
@@ -131,20 +144,35 @@ bool apple_modern_dcp_iop_mode(const char *name, unsigned *mode);
 bool apple_modern_dcp_iop_mode_has_peer(unsigned mode);
 /* True when this mode serves the two declared ADT flags. */
 bool apple_modern_dcp_iop_mode_has_flags(unsigned mode);
+/* True when this mode also serves declared region-base/region-size on the nub. */
+bool apple_modern_dcp_iop_mode_has_segment_map(unsigned mode);
 /*
  * The two declared ADT overrides ("pre-loaded", "running" on
  * /arm-io/dcp/iop-dcp-nub).  The returned pointers are static storage.
  */
 const AppleModernAdtOverride *apple_modern_dcp_iop_overrides(size_t *count);
+/*
+ * The two declared segment-map ADT overrides ("region-base", "region-size" on
+ * /arm-io/dcp/iop-dcp-nub) used by v6-resumed so RTBuddy::getSegmentMap()
+ * succeeds on the pre-loaded/running path just like /arm-io/smc/iop-smc-nub.
+ */
+const AppleModernAdtOverride *
+apple_modern_dcp_iop_segment_overrides(size_t *count);
 
 typedef struct AppleModernDcpIopPlan {
     uint64_t wrapper_address;
     uint64_t wrapper_size;
-    /* Optional expert control, validated from ADT only for v6-expert-start.
-     * On/off readback and control-to-peer start are declared behavior. */
+    /* Optional expert control, validated from ADT for v6-expert-start and
+     * v6-resumed. On/off readback and control-to-peer start are declared. */
     uint64_t expert_control_address;
     uint32_t expert_control_on;
     uint32_t expert_control_off;
+    /* Optional ASC core-register window (/arm-io/dcp reg[1]) and declared
+     * segment-map window, populated for v6-resumed. */
+    uint64_t core_address;
+    uint64_t core_size;
+    uint64_t segment_address;
+    uint64_t segment_size;
     uint32_t interrupts[APPLE_MODERN_DCP_IOP_IRQS];
     /* ADT "role" of /arm-io/dcp, NUL-terminated; the %s of "%sEndpoint%u". */
     char role[APPLE_MODERN_DCP_IOP_ROLE_MAX];
@@ -178,6 +206,13 @@ bool apple_modern_dcp_iop_expert_plan_build(AppleModernBlob tree,
     const AppleModernAddressRange *exclusions, size_t exclusion_count,
     AppleModernDcpIopPlan *plan, Error **errp);
 
+/* Extend a completed peer+expert plan with /arm-io/dcp reg[1] (core register
+ * window) and the declared 1 MiB segment-map window for v6-resumed. */
+bool apple_modern_dcp_iop_resumed_plan_build(AppleModernBlob tree,
+    uint64_t dram_base, uint64_t dram_size,
+    const AppleModernAddressRange *exclusions, size_t exclusion_count,
+    AppleModernDcpIopPlan *plan, Error **errp);
+
 #ifndef APPLE_MODERN_LAYOUT_STANDALONE
 #include "hw/sysbus.h"
 #define TYPE_APPLE_MODERN_DCP_IOP "apple-modern-dcp-iop"
@@ -192,6 +227,21 @@ OBJECT_DECLARE_TYPE(AppleModernDcpIop, AppleModernDcpIopClass,
  */
 DeviceState *apple_modern_dcp_iop_new(const AppleModernDcpIopPlan *plan,
                                       unsigned mode);
+/* Wire the DCP and disp0 DART DMA address spaces for v6-resumed shared-memory RPC. */
+void apple_modern_dcp_iop_set_dma(DeviceState *dev, AddressSpace *dcp_dma_as,
+                                  AddressSpace *disp0_dma_as);
+/*
+ * v6-resumed display-attach callbacks: cbs is a '+'-separated subset of
+ * D575 (hotPlug_notify_gated) and D600 (setSystemConsoleMode_gated), NULL =
+ * none; sent nested in NormalModeEnable, or in the first A453 after it when
+ * after_a453.  Layouts recovered from the BootKC, see the .c file.
+ */
+bool apple_modern_dcp_iop_attach_valid(const char *cbs, Error **errp);
+void apple_modern_dcp_iop_set_attach(DeviceState *dev, const char *cbs,
+                                     bool after_a453);
+/* Wire the boot-display physical framebuffer range for v6-resumed swap scanout. */
+void apple_modern_dcp_iop_set_scanout(DeviceState *dev, uint64_t scanout_pa,
+                                      uint64_t scanout_size);
 /* Observability: messages received on the published user endpoint. */
 uint64_t apple_modern_dcp_iop_messages(DeviceState *dev);
 /* Observability: true once the RTKit roll-call completed (boot_done fired). */
