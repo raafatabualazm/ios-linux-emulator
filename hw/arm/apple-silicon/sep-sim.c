@@ -22,6 +22,7 @@
 #include "crypto/hash.h"
 #include "hw/arm/apple-silicon/dt.h"
 #include "hw/arm/apple-silicon/sep-sim.h"
+#include "hw/arm/apple-silicon/sep-sks-wire.h"
 #include "hw/misc/apple-silicon/a7iop/core.h"
 #include "hw/misc/apple-silicon/a7iop/mailbox/core.h"
 #include "hw/resettable.h"
@@ -286,6 +287,8 @@ typedef struct {
     uint32_t unk_mbz;
 } QEMU_PACKED KeystoreIPCHeader;
 
+G_STATIC_ASSERT(sizeof(KeystoreIPCHeader) == APPLE_SEP_SKS_WIRE_MAX);
+
 enum {
     DISCOVERY_OP_EP_ADVERT = 0,
     DISCOVERY_OP_OOL_ADVERT = 1,
@@ -400,6 +403,14 @@ static void apple_sep_sim_handle_control_msg(AppleSEPSimState *s,
                                              SEPMessage *msg)
 {
     SetOOLMessage *set_ool_msg;
+
+    /* The setters' historical assertions disappear in production builds. */
+    if (msg->op >= CONTROL_OP_SET_OOL_IN_ADDR &&
+        msg->op <= CONTROL_OP_SET_OOL_OUT_SIZE &&
+        ((SetOOLMessage *)msg)->id >= SEP_ENDPOINT_MAX) {
+        s->diagnostic_ool_errors++;
+        return;
+    }
 
     switch (msg->op) {
     case CONTROL_OP_NOP:
@@ -706,20 +717,22 @@ static void apple_sep_sim_handle_bootstrap_msg(AppleSEPSimState *s,
     }
 }
 
-static uint8_t *apple_sep_sim_gen_sks_hash(uint8_t *buf,
-                                           const uint32_t msg_size)
+static uint8_t *apple_sep_sim_gen_sks_hash(uint8_t *buf, uint32_t msg_size,
+                                         bool modern)
 {
-    KeystoreIPCHeader *hdr;
+    AppleSEPSKSWire wire;
 
-    hdr = (KeystoreIPCHeader *)buf;
+    if (!apple_sep_sks_wire_parse(buf, msg_size, modern, &wire)) {
+        return NULL;
+    }
     struct iovec iov[] = {
         {
-            .iov_base = &hdr->ipc_version,
-            .iov_len = hdr->ipc_version == 2 ? 0x40 : 0x38,
+            .iov_base = buf + wire.hash_offset,
+            .iov_len = wire.hash_size,
         },
         {
-            .iov_base = buf + KEYSTORE_IPC_HEADER_SIZE,
-            .iov_len = msg_size - KEYSTORE_IPC_HEADER_SIZE,
+            .iov_base = buf + wire.body_offset,
+            .iov_len = wire.body_size,
         },
     };
     /* Not in an assert: -DNDEBUG would remove the call as well as the check. */
@@ -733,22 +746,41 @@ static uint8_t *apple_sep_sim_gen_sks_hash(uint8_t *buf,
     int ret =
         qcrypto_hash_bytesv(QCRYPTO_HASH_ALGO_SHA256, iov, ARRAY_SIZE(iov),
                             &hash, &hash_len, &error_fatal);
-    assert_cmpuint(ret, ==, 0);
-    assert_nonnull(hash);
-    assert_cmpuint(hash_len, ==, 32);
+    if (ret != 0 || hash == NULL || hash_len != 32) {
+        g_free(hash);
+        return NULL;
+    }
     return hash;
 }
 
 static void apple_sep_sim_keystore_send_ipc_resp(AppleSEPSimState *s,
                                                  const KeystoreMessage *msg,
                                                  uint8_t *resp_buf,
-                                                 const uint32_t resp_size)
+                                                 uint32_t resp_size)
 {
     KeystoreIPCHeader *resp_hdr;
     uint8_t *resp_hash;
 
     resp_hdr = (KeystoreIPCHeader *)resp_buf;
-    resp_hash = apple_sep_sim_gen_sks_hash(resp_buf, resp_size);
+    if (resp_size < sizeof(*resp_hdr) || resp_size > UINT16_MAX) {
+        s->diagnostic_sks_rejected++;
+        return;
+    }
+    /* Handlers use the maximum-size internal header. Only the wire v1
+     * representation omits its final eight bytes on the modern wrapper. */
+    if (s->sks_modern && resp_hdr->ipc_version == 1) {
+        memmove(resp_buf + 76, resp_buf + sizeof(*resp_hdr),
+                resp_size - sizeof(*resp_hdr));
+        stl_le_p(resp_buf, 72);
+        resp_size -= 8;
+    }
+    if (s->sks_modern &&
+        (resp_size > s->ool_state[EP_KEYSTORE].out_size ||
+         s->ool_state[EP_KEYSTORE].out_addr == 0)) {
+        s->diagnostic_sks_rejected++;
+        return;
+    }
+    resp_hash = apple_sep_sim_gen_sks_hash(resp_buf, resp_size, s->sks_modern);
     if (resp_hash == NULL) {
         /* Hashing is unavailable; an unhashed reply would fail validation. */
         return;
@@ -770,12 +802,60 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
                                               KeystoreMessage *msg)
 {
     uint8_t msg_code = msg->tag & KEYSTORE_MSG_TAG_CODE_MASK;
-    uint8_t *msg_buf = g_new0(uint8_t, msg->size);
-    if (!apple_sep_sim_ool_read(s, s->ool_state[EP_KEYSTORE].in_addr, msg_buf,
-                                msg->size, "keystore request")) {
-        g_free(msg_buf);
+    AppleSEPSKSWire wire;
+    size_t body_min = 0;
+    g_autofree uint8_t *wire_buf = NULL;
+
+    if (msg->size < 24 || (s->sks_modern &&
+        (msg->size > s->ool_state[EP_KEYSTORE].in_size ||
+         s->ool_state[EP_KEYSTORE].in_addr == 0))) {
+        s->diagnostic_sks_rejected++;
         return;
     }
+    wire_buf = g_malloc0(msg->size);
+    if (!apple_sep_sim_ool_read(s, s->ool_state[EP_KEYSTORE].in_addr, wire_buf,
+                                msg->size, "keystore request")) {
+        return;
+    }
+    if (!apple_sep_sks_wire_parse(wire_buf, msg->size, s->sks_modern, &wire)) {
+        s->diagnostic_sks_rejected++;
+        return;
+    }
+    if (s->sks_modern) {
+        g_autofree uint8_t *hash = apple_sep_sim_gen_sks_hash(wire_buf, msg->size,
+                                                           true);
+        if (!hash || memcmp(wire_buf + 4, hash, 16) ||
+            (wire.flags & KEYSTORE_IPC_FLAG_ENCRYPTED)) {
+            s->diagnostic_sks_rejected++;
+            return;
+        }
+    }
+    /* Bound every body field consumed by the legacy compatibility handlers.
+     * Framing these handlers correctly does not implement their key service. */
+    switch (msg_code) {
+    case 0x02: body_min = 16; break;
+    case 0x04: body_min = 16; break;
+    case 0x19: body_min = 20; break;
+    case 0x1b: body_min = 4; break;
+    }
+    if (wire.body_size < body_min) {
+        s->diagnostic_sks_rejected++;
+        return;
+    }
+    if (s->sks_modern && msg_code != 0x1b) {
+        /* The legacy handlers below contain placeholder keybags and state.
+         * Correct framing must not turn those into apparent modern SKS
+         * service success. Only the neutral client-terminate compatibility
+         * reply is supported until the actual service contracts are modelled. */
+        apple_sep_sim_note_unsupported(s, msg->ep, msg_code);
+        qemu_log_mask(LOG_UNIMP, "SEP sim: modern SKS operation 0x%02x "
+                      "is not implemented; no reply\n", msg_code);
+        return;
+    }
+    uint8_t *msg_buf = g_malloc0(sizeof(KeystoreIPCHeader) + wire.body_size);
+    memcpy(msg_buf, wire_buf, wire.body_offset);
+    memcpy(msg_buf + sizeof(KeystoreIPCHeader), wire_buf + wire.body_offset,
+           wire.body_size);
     const KeystoreIPCHeader *msg_hdr = (KeystoreIPCHeader *)msg_buf;
 #if 0
     char fn[128];
@@ -793,7 +873,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
         resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
+        resp_hdr->ipc_version = s->sks_modern ? msg_hdr->ipc_version :
+                                KEYSTORE_IPC_VERSION_1;
         resp_hdr->time_msecs = msg_hdr->time_msecs;
         resp_hdr->id = msg_hdr->id;
         resp_hdr->proc_uid = msg_hdr->proc_uid;
@@ -823,7 +904,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
         resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
+        resp_hdr->ipc_version = s->sks_modern ? msg_hdr->ipc_version :
+                                KEYSTORE_IPC_VERSION_1;
         resp_hdr->time_msecs = msg_hdr->time_msecs;
         resp_hdr->id = msg_hdr->id;
         resp_hdr->proc_uid = msg_hdr->proc_uid;
@@ -849,7 +931,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
         resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
+        resp_hdr->ipc_version = s->sks_modern ? msg_hdr->ipc_version :
+                                KEYSTORE_IPC_VERSION_1;
         resp_hdr->time_msecs = msg_hdr->time_msecs;
         resp_hdr->id = msg_hdr->id;
         resp_hdr->proc_uid = msg_hdr->proc_uid;
@@ -874,7 +957,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
         resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
+        resp_hdr->ipc_version = s->sks_modern ? msg_hdr->ipc_version :
+                                KEYSTORE_IPC_VERSION_1;
         resp_hdr->time_msecs = msg_hdr->time_msecs;
         resp_hdr->id = msg_hdr->id;
         resp_hdr->proc_uid = msg_hdr->proc_uid;
@@ -902,7 +986,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
         resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
+        resp_hdr->ipc_version = s->sks_modern ? msg_hdr->ipc_version :
+                                KEYSTORE_IPC_VERSION_1;
         resp_hdr->time_msecs = msg_hdr->time_msecs;
         resp_hdr->id = msg_hdr->id;
         resp_hdr->proc_uid = msg_hdr->proc_uid;
@@ -950,7 +1035,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
         resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
+        resp_hdr->ipc_version = s->sks_modern ? msg_hdr->ipc_version :
+                                KEYSTORE_IPC_VERSION_1;
         resp_hdr->time_msecs = msg_hdr->time_msecs;
         resp_hdr->id = msg_hdr->id;
         resp_hdr->proc_uid = msg_hdr->proc_uid;
@@ -974,7 +1060,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
         resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
+        resp_hdr->ipc_version = s->sks_modern ? msg_hdr->ipc_version :
+                                KEYSTORE_IPC_VERSION_1;
         resp_hdr->time_msecs = msg_hdr->time_msecs;
         resp_hdr->id = msg_hdr->id;
         resp_hdr->proc_uid = msg_hdr->proc_uid;
@@ -998,7 +1085,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
         resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
+        resp_hdr->ipc_version = s->sks_modern ? msg_hdr->ipc_version :
+                                KEYSTORE_IPC_VERSION_1;
         resp_hdr->time_msecs = msg_hdr->time_msecs;
         resp_hdr->id = msg_hdr->id;
         resp_hdr->proc_uid = msg_hdr->proc_uid;
@@ -1029,7 +1117,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
         resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
+        resp_hdr->ipc_version = s->sks_modern ? msg_hdr->ipc_version :
+                                KEYSTORE_IPC_VERSION_1;
         resp_hdr->time_msecs = msg_hdr->time_msecs;
         resp_hdr->id = msg_hdr->id;
         resp_hdr->proc_uid = msg_hdr->proc_uid;
@@ -1059,7 +1148,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
         resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
+        resp_hdr->ipc_version = s->sks_modern ? msg_hdr->ipc_version :
+                                KEYSTORE_IPC_VERSION_1;
         resp_hdr->time_msecs = msg_hdr->time_msecs;
         resp_hdr->id = msg_hdr->id;
         resp_hdr->proc_uid = msg_hdr->proc_uid;
@@ -1080,7 +1170,7 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
                       msg_code);
 
         if (!apple_sep_sim_ool_write(s, s->ool_state[EP_KEYSTORE].out_addr,
-                                     msg_buf, msg->size,
+                                     wire_buf, msg->size,
                                      "keystore unknown-opcode echo")) {
             break;
         }
@@ -1191,6 +1281,7 @@ AppleSEPSimState *apple_sep_sim_new(const char *role, uint64_t mmio_size,
                      apple_sep_sim_handle_messages);
     qemu_mutex_init(&s->lock);
     s->dma_as = dma_as;
+    s->sks_modern = version == APPLE_A7IOP_V6;
     /* Diagnostics contain counts and routing bytes only, never payloads. */
     AppleA7IOP *a7iop = APPLE_A7IOP(s);
     Object *obj = OBJECT(s);
@@ -1211,6 +1302,9 @@ AppleSEPSimState *apple_sep_sim_new(const char *role, uint64_t mmio_size,
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "sim-ool-error-count",
                                    &s->diagnostic_ool_errors,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "sim-sks-rejected-count",
+                                   &s->diagnostic_sks_rejected,
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "wrapper-mmio-read-count",
                                    &a7iop->diagnostic_mmio_reads,
@@ -1308,6 +1402,8 @@ static void apple_sep_sim_reset_hold(Object *obj, ResetType type)
     s->diagnostic_dispatches = 0;
     s->diagnostic_unsupported = 0;
     s->diagnostic_ool_errors = 0;
+    s->diagnostic_sks_rejected = 0;
+    memset(s->ool_state, 0, sizeof(s->ool_state));
     s->diagnostic_last_ep = 0;
     s->diagnostic_last_op = 0;
     s->diagnostic_last_unsupported_ep = 0;
