@@ -19,6 +19,8 @@ typedef struct AppleModernMCCSocniCore {
     uint64_t values[APPLE_MODERN_MCC_SOCNI_BANKS][APPLE_MODERN_MCC_SOCNI_MAX_COUNTERS];
     uint64_t reset_value;
     uint64_t reads, writes, event_updates;
+    bool commands_required;
+    uint32_t active_banks;
 } AppleModernMCCSocniCore;
 
 unsigned apple_modern_mcc_socni_counter_count(unsigned bank);
@@ -44,5 +46,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(AppleModernMCCSocniState, APPLE_MODERN_MCC_SOCNI)
 DeviceState *apple_modern_mcc_socni_new(uint64_t reset_value);
 bool apple_modern_mcc_socni_event(DeviceState *dev, unsigned bank,
                                  unsigned counter, uint64_t amount);
+/* Called during board construction, before CPUs run. */
+AppleModernMCCSocniCore *apple_modern_mcc_socni_attach_commands(DeviceState *dev);
 #endif
 #endif

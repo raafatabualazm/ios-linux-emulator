@@ -187,6 +187,7 @@ void apple_modern_mcc_socni_core_reset(AppleModernMCCSocniCore *core)
         }
     }
     core->reads = core->writes = core->event_updates = 0;
+    core->active_banks = 0;
 }
 
 static bool valid_access(unsigned view, uint64_t offset, unsigned size)
@@ -232,7 +233,8 @@ bool apple_modern_mcc_socni_core_event(AppleModernMCCSocniCore *core,
         counter >= apple_modern_mcc_socni_counter_count(bank)) {
         return false;
     }
-    if (amount && (core->controls[bank][counter] & 3) == 3) {
+    if (amount && (core->controls[bank][counter] & 3) == 3 &&
+        (!core->commands_required || (core->active_banks & (1U << bank)))) {
         /* Enable gating and unsigned modulo-64 arithmetic are virtual choices. */
         core->values[bank][counter] += amount;
         if (core->event_updates != UINT64_MAX) {
@@ -330,6 +332,13 @@ bool apple_modern_mcc_socni_event(DeviceState *dev, unsigned bank,
 {
     return dev && apple_modern_mcc_socni_core_event(&APPLE_MODERN_MCC_SOCNI(dev)->core,
                                                     bank, counter, amount);
+}
+AppleModernMCCSocniCore *apple_modern_mcc_socni_attach_commands(DeviceState *dev)
+{
+    AppleModernMCCSocniCore *core = &APPLE_MODERN_MCC_SOCNI(dev)->core;
+    core->commands_required = true;
+    core->active_banks = 0;
+    return core;
 }
 static const TypeInfo socni_type = {
     .name = TYPE_APPLE_MODERN_MCC_SOCNI, .parent = TYPE_SYS_BUS_DEVICE,
