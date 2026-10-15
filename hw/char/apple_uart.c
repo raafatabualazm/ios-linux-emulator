@@ -162,6 +162,7 @@ struct AppleUartState {
 
     uint32_t channel;
     uint32_t last_irq;
+    int probe_idx; /* TEMP PROBE */
 };
 
 
@@ -225,6 +226,338 @@ static uint32_t apple_uart_Rx_FIFO_trigger_level(const AppleUartState *s)
     return apple_uart_FIFO_trigger_level(s->channel, reg);
 }
 
+
+/* ===================== TEMPORARY MEASUREMENT PROBE =====================
+ * uart-probe worktree only. Never commit. All output goes to stderr with the
+ * prefix "UARTPROBE". Behaviour of the model is NOT changed: the real
+ * functions are only wrapped, and the probe keeps its own "shadow" copy of the
+ * last value the guest wrote to UCON (the model itself drops that write).
+ */
+#define PROBE_MAX_CH 16
+#define PROBE_HIST_N 24
+#define PROBE_GLOBAL_LOG 300      /* first N accesses, all channels */
+#define PROBE_CH_LOG 40           /* first N accesses of each channel */
+#define PROBE_INTERESTING_LOG 300 /* later non-polling accesses (not UTXH/UTRSTAT/UFSTAT reads) */
+#define PROBE_EVERY 5000
+#define PROBE_TICK_NS (5ULL * 1000000000ULL)
+
+typedef struct {
+    uint32_t val[PROBE_HIST_N];
+    uint64_t n[PROBE_HIST_N];
+    uint64_t overflow;
+} ProbeHist;
+
+typedef struct {
+    bool used;
+    AppleUartState *s;
+    uint64_t base;
+    uint64_t acc, last_tick_acc, summaries;
+    uint64_t rd[12], wr[12]; /* per register (offset / 4) */
+    ProbeHist ucon_hist, ufcon_hist, utrstat_w_hist;
+    uint64_t ucon_txthr, ucon_rxthr, ucon_rxto, ucon_rxerr, ucon_any3;
+    uint64_t ucon_modes_irq;
+    uint64_t urxh_data, urxh_empty, urxh_left_line_high;
+    uint64_t utxh_conn, utxh_noconn;
+    uint64_t rx_calls, rx_bytes, can_rx_calls, ioctl_like;
+    uint64_t irq_calls, raise_calls, raise_edges, lower_calls, lower_edges;
+    bool level;
+    uint32_t shadow_ucon;
+    uint64_t shadow_fifo_off, shadow_tx_would, shadow_rx_would, shadow_rxto_en;
+    uint64_t first_acc_ns, first_ucon_ns, first_any3_ns, first_rxbyte_ns, first_urxh_ns;
+} ProbeChan;
+
+static ProbeChan probe_ch[PROBE_MAX_CH];
+static int probe_nch;
+static uint64_t probe_global_acc, probe_interesting_logged, probe_summary_lines;
+static QEMUTimer *probe_timer;
+static int probe_inject_done;
+static const char *probe_regnames[12] = { "ULCON", "UCON", "UFCON", "UMCON",
+    "UTRSTAT", "UERSTAT", "UFSTAT", "UMSTAT", "UTXH", "URXH", "UBRDIV", "UFRACVAL" };
+
+static uint64_t probe_now(void)
+{
+    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+static void probe_hist_add(ProbeHist *h, uint32_t v)
+{
+    for (int i = 0; i < PROBE_HIST_N; i++) {
+        if (h->n[i] && h->val[i] == v) {
+            h->n[i]++;
+            return;
+        }
+        if (!h->n[i]) {
+            h->val[i] = v;
+            h->n[i] = 1;
+            return;
+        }
+    }
+    h->overflow++;
+}
+
+static void probe_hist_print(const char *name, int idx, const ProbeHist *h)
+{
+    fprintf(stderr, "UARTPROBE   ch%d %s:", idx, name);
+    for (int i = 0; i < PROBE_HIST_N && h->n[i]; i++) {
+        fprintf(stderr, " 0x%x*%" PRIu64, h->val[i], h->n[i]);
+    }
+    if (h->overflow) {
+        fprintf(stderr, " (+%" PRIu64 " other)", h->overflow);
+    }
+    fprintf(stderr, "\n");
+}
+
+static ProbeChan *probe_chan(AppleUartState *s)
+{
+    return &probe_ch[s->probe_idx];
+}
+
+static void probe_summary(ProbeChan *p, const char *why)
+{
+    int idx = (int)(p - probe_ch);
+    fprintf(stderr,
+            "UARTPROBE SUM[%s] ch%d id=%s base=0x%" PRIx64 " t=%" PRIu64 "ms acc=%" PRIu64
+            " UCONw=%" PRIu64 " txthr=%" PRIu64 " rxthr=%" PRIu64 " rxto=%" PRIu64
+            " rxerr=%" PRIu64 " any_of_3=%" PRIu64 " modes_irq=%" PRIu64
+            " URXHr=%" PRIu64 " (data=%" PRIu64 " empty=%" PRIu64 " left_line_high=%" PRIu64 ")"
+            " UTXHw=%" PRIu64 " (nobackend=%" PRIu64 ") UTRSTATw=%" PRIu64
+            " rx_calls=%" PRIu64 " rx_bytes=%" PRIu64 " can_rx=%" PRIu64
+            " irq_calls=%" PRIu64 " raise=%" PRIu64 "(edges %" PRIu64 ") lower=%" PRIu64
+            "(edges %" PRIu64 ") level=%d shadow_ucon=0x%x shadow(fifo_off=%" PRIu64
+            " tx_would=%" PRIu64 " rx_would=%" PRIu64 " rxto_en=%" PRIu64 ")\n",
+            why, idx, DEVICE(p->s)->id ? DEVICE(p->s)->id : "?", p->base,
+            probe_now() / 1000000, p->acc, p->wr[I_(UCON)], p->ucon_txthr, p->ucon_rxthr,
+            p->ucon_rxto, p->ucon_rxerr, p->ucon_any3, p->ucon_modes_irq, p->rd[I_(URXH)],
+            p->urxh_data, p->urxh_empty, p->urxh_left_line_high, p->wr[I_(UTXH)],
+            p->utxh_noconn, p->wr[I_(UTRSTAT)], p->rx_calls, p->rx_bytes, p->can_rx_calls,
+            p->irq_calls, p->raise_calls, p->raise_edges, p->lower_calls, p->lower_edges,
+            p->level, p->shadow_ucon, p->shadow_fifo_off, p->shadow_tx_would,
+            p->shadow_rx_would, p->shadow_rxto_en);
+    fprintf(stderr, "UARTPROBE   ch%d first_ns: acc=%" PRIu64 " UCONw=%" PRIu64 " any_of_3=%" PRIu64
+            " rxbyte=%" PRIu64 " URXHread=%" PRIu64 "\n", idx, p->first_acc_ns,
+            p->first_ucon_ns, p->first_any3_ns, p->first_rxbyte_ns, p->first_urxh_ns);
+    fprintf(stderr, "UARTPROBE   ch%d per-reg reads/writes:", idx);
+    for (int i = 0; i < 12; i++) {
+        fprintf(stderr, " %s=%" PRIu64 "/%" PRIu64, probe_regnames[i], p->rd[i], p->wr[i]);
+    }
+    fprintf(stderr, "\n");
+    probe_hist_print("UCON writes", idx, &p->ucon_hist);
+    probe_hist_print("UFCON writes", idx, &p->ufcon_hist);
+    probe_hist_print("UTRSTAT writes", idx, &p->utrstat_w_hist);
+}
+
+static void probe_final(void)
+{
+    for (int i = 0; i < probe_nch; i++) {
+        if (probe_ch[i].used && probe_ch[i].acc) {
+            probe_summary(&probe_ch[i], "final");
+        }
+    }
+}
+
+static void probe_log_access(ProbeChan *p, bool is_write, hwaddr off, uint64_t val,
+                             unsigned size)
+{
+    bool polling = (!is_write && (off == UTRSTAT || off == UFSTAT)) ||
+                   (is_write && off == UTXH);
+    bool log = false;
+
+    probe_global_acc++;
+    p->acc++;
+    p->base = p->s->iomem.addr;
+    if (!p->first_acc_ns) {
+        p->first_acc_ns = probe_now();
+    }
+    if (probe_global_acc <= PROBE_GLOBAL_LOG || p->acc <= PROBE_CH_LOG) {
+        log = true;
+    } else if (!polling && probe_interesting_logged < PROBE_INTERESTING_LOG) {
+        probe_interesting_logged++;
+        log = true;
+    }
+    if (log) {
+        fprintf(stderr, "UARTPROBE acc g%" PRIu64 " ch%d %c %s(0x%02" PRIx64 ") val=0x%" PRIx64
+                " size=%u t=%" PRIu64 "us\n", probe_global_acc, (int)(p - probe_ch),
+                is_write ? 'W' : 'R',
+                off / 4 < 12 ? probe_regnames[off / 4] : "?", (uint64_t)off, val, size,
+                probe_now() / 1000);
+    }
+}
+
+static void probe_after_access(ProbeChan *p)
+{
+    if (p->acc % PROBE_EVERY == 0 &&
+        (p->summaries < 20 || p->acc % (20 * PROBE_EVERY) == 0) &&
+        probe_summary_lines < 400) {
+        p->summaries++;
+        probe_summary_lines++;
+        probe_summary(p, "periodic");
+    }
+}
+
+static void probe_note_write(AppleUartState *s, hwaddr off, uint64_t val, unsigned size)
+{
+    ProbeChan *p = probe_chan(s);
+
+    if (off / 4 < 12) {
+        p->wr[off / 4]++;
+    }
+    probe_log_access(p, true, off, val, size);
+    switch (off) {
+    case UCON: {
+        uint32_t v = (uint32_t)val;
+        bool a = v & UCON_TXTHRESH_ENA, b = v & UCON_RXTHRESH_ENA, c = v & UCON_RXTIMEOUT_ENA;
+        probe_hist_add(&p->ucon_hist, v);
+        p->shadow_ucon = v;
+        p->ucon_txthr += a;
+        p->ucon_rxthr += b;
+        p->ucon_rxto += c;
+        p->ucon_rxerr += !!(v & UCON_RXERR_ENA);
+        p->ucon_any3 += (a || b || c);
+        p->ucon_modes_irq += (((v & UCON_TXMODE) == UCON_TXMODE_IRQ) ||
+                              ((v & UCON_RXMODE) == UCON_RXMODE_IRQ));
+        if (!p->first_ucon_ns) {
+            p->first_ucon_ns = probe_now();
+        }
+        if ((a || b || c) && !p->first_any3_ns) {
+            p->first_any3_ns = probe_now();
+            fprintf(stderr, "UARTPROBE !!! ch%d FIRST UCON write with a threshold/timeout "
+                    "enable: 0x%x at t=%" PRIu64 "us\n", (int)(p - probe_ch), v,
+                    probe_now() / 1000);
+        }
+        break;
+    }
+    case UFCON:
+        probe_hist_add(&p->ufcon_hist, (uint32_t)val);
+        break;
+    case UTRSTAT:
+        probe_hist_add(&p->utrstat_w_hist, (uint32_t)val);
+        break;
+    case UTXH:
+        if (qemu_chr_fe_backend_connected(&s->chr)) {
+            p->utxh_conn++;
+        } else {
+            p->utxh_noconn++;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void probe_note_read_pre(AppleUartState *s, hwaddr off, bool *had_data)
+{
+    *had_data = (off == URXH) && fifo8_num_used(&s->rx) > 0;
+}
+
+static void probe_note_read_post(AppleUartState *s, hwaddr off, uint64_t val, unsigned size,
+                                 bool had_data)
+{
+    ProbeChan *p = probe_chan(s);
+
+    if (off / 4 < 12) {
+        p->rd[off / 4]++;
+    }
+    probe_log_access(p, false, off, val, size);
+    if (off == URXH) {
+        if (!p->first_urxh_ns) {
+            p->first_urxh_ns = probe_now();
+        }
+        if (had_data) {
+            p->urxh_data++;
+            if (fifo8_is_empty(&s->rx) && p->level) {
+                p->urxh_left_line_high++; /* defect 2: drained but line still asserted */
+            }
+        } else {
+            p->urxh_empty++;
+        }
+    }
+}
+
+static void probe_irq_call(AppleUartState *s)
+{
+    ProbeChan *p = probe_chan(s);
+
+    p->irq_calls++;
+    if (!(s->reg[I_(UFCON)] & UFCON_FIFO_ENABLE)) {
+        p->shadow_fifo_off++;
+        return;
+    }
+    if ((p->shadow_ucon & UCON_TXTHRESH_ENA) &&
+        fifo8_num_used(&s->tx) <= apple_uart_Tx_FIFO_trigger_level(s)) {
+        p->shadow_tx_would++;
+    }
+    if ((p->shadow_ucon & UCON_RXTHRESH_ENA) &&
+        fifo8_num_used(&s->rx) >= apple_uart_Rx_FIFO_trigger_level(s)) {
+        p->shadow_rx_would++;
+    }
+    if (p->shadow_ucon & UCON_RXTIMEOUT_ENA) {
+        p->shadow_rxto_en++;
+    }
+}
+
+static void probe_irq_level(AppleUartState *s, bool raise)
+{
+    ProbeChan *p = probe_chan(s);
+
+    if (raise) {
+        p->raise_calls++;
+        p->raise_edges += !p->level;
+        p->level = true;
+    } else {
+        p->lower_calls++;
+        p->lower_edges += p->level;
+        p->level = false;
+    }
+}
+
+static void apple_uart_receive(void *opaque, const uint8_t *buf, int size);
+
+static void probe_tick(void *opaque)
+{
+    uint64_t now = probe_now();
+    const char *inj = getenv("UARTPROBE_INJECT_S");
+
+    for (int i = 0; i < probe_nch; i++) {
+        ProbeChan *p = &probe_ch[i];
+        if (p->used && p->acc != p->last_tick_acc && probe_summary_lines < 400) {
+            p->last_tick_acc = p->acc;
+            probe_summary_lines++;
+            probe_summary(p, "tick");
+        }
+    }
+    /* Optional stimulus: UARTPROBE_INJECT_S=N feeds 3 bytes to uart0, 5 s apart, from
+     * N seconds of virtual time on. Off unless the environment variable is set. */
+    if (inj && probe_nch > 0 && probe_inject_done < 3 && now >= atoll(inj) * 1000000000ULL) {
+        static const uint8_t b = 'x';
+        probe_inject_done++;
+        fprintf(stderr, "UARTPROBE >>> injecting byte %d into ch0 at t=%" PRIu64 "ms\n",
+                probe_inject_done, now / 1000000);
+        apple_uart_receive(probe_ch[0].s, &b, 1);
+    }
+    timer_mod(probe_timer, now + PROBE_TICK_NS);
+}
+
+static void probe_register(AppleUartState *s)
+{
+    static bool once;
+
+    if (probe_nch >= PROBE_MAX_CH) {
+        s->probe_idx = PROBE_MAX_CH - 1;
+        return;
+    }
+    s->probe_idx = probe_nch++;
+    probe_ch[s->probe_idx].used = true;
+    probe_ch[s->probe_idx].s = s;
+    if (!once) {
+        once = true;
+        atexit(probe_final);
+        probe_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, probe_tick, NULL);
+        timer_mod(probe_timer, probe_now() + PROBE_TICK_NS);
+        fprintf(stderr, "UARTPROBE armed (temporary instrumentation)\n");
+    }
+}
+/* =================== END TEMPORARY MEASUREMENT PROBE =================== */
+
 static void apple_uart_update_irq(AppleUartState *s)
 {
     /*
@@ -232,6 +565,7 @@ static void apple_uart_update_irq(AppleUartState *s)
      * transmit FIFO is smaller than the trigger level.
      */
     uint32_t mask = UTRSTAT_Rx_BUFFER_DATA_READY;
+    probe_irq_call(s); /* TEMP PROBE */
     if (s->reg[I_(UFCON)] & UFCON_FIFO_ENABLE) {
         uint32_t count = fifo8_num_used(&s->tx);
 
@@ -265,9 +599,11 @@ static void apple_uart_update_irq(AppleUartState *s)
     if (s->reg[I_(UTRSTAT)] & mask) {
         s->last_irq = s->reg[I_(UTRSTAT)] & mask;
         qemu_irq_raise(s->irq);
+        probe_irq_level(s, true); /* TEMP PROBE */
         trace_apple_uart_irq_raised(s->channel, s->reg[I_(UTRSTAT)]);
     } else {
         qemu_irq_lower(s->irq);
+        probe_irq_level(s, false); /* TEMP PROBE */
         trace_apple_uart_irq_lowered(s->channel);
     }
 }
@@ -343,8 +679,8 @@ static void apple_uart_rx_timeout_set(AppleUartState *s)
     }
 }
 
-static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
-                             unsigned size)
+static void apple_uart_write_real(void *opaque, hwaddr offset, uint64_t val,
+                                  unsigned size)
 {
     AppleUartState *s = opaque;
     uint8_t ch;
@@ -412,7 +748,7 @@ static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
     }
 }
 
-static uint64_t apple_uart_read(void *opaque, hwaddr offset, unsigned size)
+static uint64_t apple_uart_read_real(void *opaque, hwaddr offset, unsigned size)
 {
     AppleUartState *s = opaque;
     uint32_t res;
@@ -468,6 +804,28 @@ static uint64_t apple_uart_read(void *opaque, hwaddr offset, unsigned size)
     return 0;
 }
 
+
+/* TEMP PROBE wrappers: observe, then call the unchanged model code. */
+static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
+                             unsigned size)
+{
+    probe_note_write(opaque, offset, val, size);
+    apple_uart_write_real(opaque, offset, val, size);
+    probe_after_access(probe_chan(opaque));
+}
+
+static uint64_t apple_uart_read(void *opaque, hwaddr offset, unsigned size)
+{
+    bool had_data;
+    uint64_t res;
+
+    probe_note_read_pre(opaque, offset, &had_data);
+    res = apple_uart_read_real(opaque, offset, size);
+    probe_note_read_post(opaque, offset, res, size, had_data);
+    probe_after_access(probe_chan(opaque));
+    return res;
+}
+
 static const MemoryRegionOps apple_uart_ops = {
     .read = apple_uart_read,
     .write = apple_uart_write,
@@ -479,6 +837,8 @@ static int apple_uart_can_receive(void *opaque)
 {
     AppleUartState *s = opaque;
 
+    probe_chan(s)->can_rx_calls++; /* TEMP PROBE */
+
     if (s->reg[I_(UFCON)] & UFCON_FIFO_ENABLE) {
         return fifo8_num_free(&s->rx);
     } else {
@@ -489,6 +849,14 @@ static int apple_uart_can_receive(void *opaque)
 static void apple_uart_receive(void *opaque, const uint8_t *buf, int size)
 {
     AppleUartState *s = opaque;
+
+    /* TEMP PROBE */
+    probe_chan(s)->rx_calls++;
+    probe_chan(s)->rx_bytes += size;
+    if (!probe_chan(s)->first_rxbyte_ns) {
+        probe_chan(s)->first_rxbyte_ns = probe_now();
+    }
+    fprintf(stderr, "UARTPROBE RX ch%d %d byte(s) first=0x%02x\n", s->probe_idx, size, buf[0]);
 
     if (s->reg[I_(UFCON)] & UFCON_FIFO_ENABLE) {
         if (fifo8_num_free(&s->rx) < size) {
@@ -615,6 +983,7 @@ static void apple_uart_realize(DeviceState *dev, Error **errp)
 
     fifo8_create(&s->rx, s->rx_fifo_size);
     fifo8_create(&s->tx, s->tx_fifo_size);
+    probe_register(s); /* TEMP PROBE */
 
     s->fifo_timeout_timer =
         timer_new_ns(QEMU_CLOCK_VIRTUAL, apple_uart_timeout_int, s);
