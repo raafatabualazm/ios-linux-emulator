@@ -2960,12 +2960,21 @@ static void modern_init(MachineState *machine)
             0x06, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00,
         };
         static const AppleModernAdtOverride disp0_overrides[] = {
+            /*
+             * set_panel_id reads the panel serials from the ROOT /product node
+             * (via childFromPath("../../../product")), NOT from the disp0 nub --
+             * confirmed by RE and by v14 (injecting onto disp0 had no effect).
+             */
+            {"/product", "raw-panel-serial-number", panel_serial,
+             sizeof(panel_serial)},
+            {"/product", "coverglass-serial-number", coverglass_serial,
+             sizeof(coverglass_serial)},
+            /*
+             * The native-size / EDT block (read_edt_data, set_ffr_index) is read
+             * from the disp0 nub itself (provider+0x198).
+             */
             {"/arm-io/disp0", "framebuffer-width", fb_w, sizeof(fb_w)},
             {"/arm-io/disp0", "framebuffer-height", fb_h, sizeof(fb_h)},
-            {"/arm-io/disp0", "raw-panel-serial-number", panel_serial,
-             sizeof(panel_serial)},
-            {"/arm-io/disp0", "coverglass-serial-number", coverglass_serial,
-             sizeof(coverglass_serial)},
             {"/arm-io/disp0", "display-timing-info", timing_info,
              sizeof(timing_info)},
         };
