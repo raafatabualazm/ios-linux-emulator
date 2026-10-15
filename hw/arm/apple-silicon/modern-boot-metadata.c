@@ -678,7 +678,14 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     if (prepared.layout.framebuffer_size) {
         AppleModernBootVideo derived = {
             .base_address = prepared.layout.framebuffer_physical,
-            /* XNU PE_create_console selects its text console when zero. */
+            /*
+             * XNU PE_create_console selects its text console when zero.
+             * MEASURED (v16 display=0 vs v18 display=1): 0 is CORRECT. With 0
+             * the kernel inits its fb text console and paints the 8x16 cursor
+             * cell at (0,0) -- 128 real guest-rendered pixels, proving the fb
+             * address/stride/format are right. Setting 1 removed the cursor
+             * entirely (console init stopped). Do not "fix" this to 1.
+             */
             .display = 0,
             .row_bytes = components->framebuffer_stride ?
                          components->framebuffer_stride :

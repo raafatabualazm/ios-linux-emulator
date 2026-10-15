@@ -987,7 +987,21 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
             const char *which = "none";
             uint64_t cb_dva = 0;
             if (ctx == 0 && s->shmem_dva != 0) {
-                dcp_iop_select_dma_as(s, s->shmem_dva + 0x60000 + 12,
+                /*
+                 * The AP writes a callback's return AFTER the input, so the
+                 * status is at header(12) + in_len -- NOT a fixed +12.  The
+                 * RPC-ACK path was corrected for this; the callback path was
+                 * not, so every cb_out logged so far was our OWN payload read
+                 * back: D575 (in 0x58) reported 0x1 (the state word we wrote),
+                 * D127 (in 0x1008) reported 0x6369643c ("<dic" of the pushed
+                 * XML) and D128 (in 0x40) reported 0x70736944 ("Disp" of the
+                 * key).  That made the display-critical callbacks unobservable
+                 * -- an AP rejection was indistinguishable from success.
+                 */
+                uint32_t cb_in_len = s->cb_index < s->cb_count ?
+                                     s->active_cbs[s->cb_index].in_len : 0;
+                dcp_iop_select_dma_as(s,
+                                      s->shmem_dva + 0x60000 + 12 + cb_in_len,
                                       &cb_out, sizeof(cb_out), &which,
                                       &cb_dva);
             }
@@ -1172,6 +1186,34 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                          */
                         stl_le_p(zeros, ldl_le_p(in_preview));
                         stl_le_p(zeros + 4, 0);
+                    } else if (!strcmp(tag_str, "A353")) {
+                        /*
+                         * A353 = display healthcheck RATE, a single uint64 TIME
+                         * PERIOD IN NANOSECONDS (NOT width/height).
+                         *
+                         * Corrected by the Codex lane; confirmed by the H17P
+                         * kext string:
+                         *   "IOMFB: reported 0x%llx (ns) as Time period to
+                         *    exclaves_display_healthcheck_rate"
+                         * and by A353's RE shape at 0xfffffff0091dfda4
+                         * (x2=0, w3=0, w5=8 -> no input, one u64 out).
+                         *
+                         * MEASURED (v21 vs v22): replying 0 wedged the guest --
+                         * A353 was the last RPC it ever issued. A large nonzero
+                         * period let it proceed 14 RPC slots (NormalModeEnable
+                         * property 0x7c 0->1 at #29/#32, A453 at #42, and the
+                         * D127/D128/D575 callback sequence).
+                         *
+                         * DECLARED EMULATION CHOICE, not a measured panel value:
+                         * one hour. The model cannot service display health
+                         * checks yet, and AppleDCP-IOMGF carries
+                         * tconHealthFailures / maxConsecutiveTconHealthFailures,
+                         * so a short period would invite consecutive failures
+                         * and a display teardown. Report "re-check rarely".
+                         */
+                        if (hdr.out_len >= 8) {
+                            stq_le_p(zeros, UINT64_C(3600000000000));
+                        }
                     } else if (!strcmp(tag_str, "A453")) {
                         /*
                          * Native A453 in pinned BootKC a36b9241... is:
