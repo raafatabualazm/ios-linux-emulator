@@ -828,15 +828,16 @@ static void dcp_iop_append_prop_push(AppleModernDcpIop *s, const char *key,
     cb->payload_len = 0x40;
 }
 
-/* Append the selected attach callbacks to active_cbs in the requested order. */
+/* Append the selected attach callbacks to active_cbs, always pushing MODES
+ * (TimingElements + DisplayAttributes via D126/D127/D128) BEFORE D575 so that
+ * IOMobileFramebufferAP::hotPlug_notify_gated(1) never inspects an empty
+ * TimingElements property when D575 fires. */
 static void dcp_iop_append_attach_cbs(AppleModernDcpIop *s)
 {
     g_auto(GStrv) tags = g_strsplit(s->attach_cbs, "+", -1);
 
     for (char **t = tags; *t && s->cb_count < ARRAY_SIZE(s->active_cbs); t++) {
         const char *tag = dcp_attach_tag(*t);
-        typeof(s->active_cbs[0]) *cb;
-
         if (!strcmp(tag, "MODES")) {
             /*
              * The AP hands the reassembled buffer to OSUnserializeXML(buf,
@@ -851,6 +852,14 @@ static void dcp_iop_append_attach_cbs(AppleModernDcpIop *s)
             dcp_iop_append_prop_push(s, "DisplayAttributes",
                                      dcp_av_display_attrs_xml,
                                      sizeof(dcp_av_display_attrs_xml));
+        }
+    }
+
+    for (char **t = tags; *t && s->cb_count < ARRAY_SIZE(s->active_cbs); t++) {
+        const char *tag = dcp_attach_tag(*t);
+        typeof(s->active_cbs[0]) *cb;
+
+        if (!strcmp(tag, "MODES")) {
             continue;
         }
 
@@ -1211,7 +1220,7 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                     g_free(zeros);
                 }
 
-                if (s->attach_cbs && s->attach_after_a453 && !s->attach_sent &&
+                if (s->attach_cbs && !s->attach_sent &&
                     s->normal_mode_seen && !s->a401_pending &&
                     !strcmp(tag_str, "A453")) {
                     memset(s->active_cbs, 0, sizeof(s->active_cbs));
@@ -1275,9 +1284,10 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                         s->cb_count = 2;
                         if (prop_val != 0 && s->attach_cbs &&
                             !s->attach_after_a453) {
-                            /* NormalModeEnable = 1: selected attach callbacks */
+                            /* NormalModeEnable = 1: push MODES+D575 now and
+                             * leave attach_sent false so the subsequent A453
+                             * query also sees a fresh hotplug edge. */
                             dcp_iop_append_attach_cbs(s);
-                            s->attach_sent = true;
                         }
                     }
                     s->a401_pending = true;

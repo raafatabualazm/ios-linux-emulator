@@ -37,7 +37,8 @@ typedef struct AppleModernANS {
     AppleRTKit *rtkit;
     NvmeCtrl *nvme;
     PCIBus *bus;
-    MemoryRegion bar, secure, nvme_alias, pci_mem, pci_io;
+    MemoryRegion bar, secure, core_regs, sart_regs, segment_sram, nvme_alias, pci_mem, pci_io;
+    uint32_t sart_storage[0x4000 / 4];
     MemoryRegion dma_root, dma_ram;
     AddressSpace dma_as;
     qemu_irq irq;
@@ -340,6 +341,38 @@ static const MemoryRegionOps ans_bar_ops = {
     .impl = { .min_access_size = 4, .max_access_size = 8 },
 };
 
+static uint64_t ans_core_read(void *opaque, hwaddr offset, unsigned size)
+{
+    return offset == 0 ? 1 : 0;
+}
+static void ans_core_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
+{
+}
+static const MemoryRegionOps ans_core_ops = {
+    .read = ans_core_read, .write = ans_core_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 8 },
+};
+static uint64_t ans_sart_read(void *opaque, hwaddr offset, unsigned size)
+{
+    AppleModernANS *s = opaque;
+    return (offset / 4 < ARRAY_SIZE(s->sart_storage)) ? s->sart_storage[offset / 4] : 0;
+}
+static void ans_sart_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
+{
+    AppleModernANS *s = opaque;
+    if (offset / 4 < ARRAY_SIZE(s->sart_storage)) {
+        s->sart_storage[offset / 4] = (uint32_t)value;
+    }
+}
+static const MemoryRegionOps ans_sart_ops = {
+    .read = ans_sart_read, .write = ans_sart_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 8 },
+};
+
 static void ans_reset(DeviceState *dev)
 {
     AppleModernANS *s = APPLE_MODERN_ANS(dev);
@@ -347,6 +380,7 @@ static void ans_reset(DeviceState *dev)
     s->occupied = s->tcb_base[0] = s->tcb_base[1] = 0;
     s->linear = s->num_tcbs = s->inval_status = 0;
     s->reads = s->writes = s->submissions = s->rejected = s->crypto_rejected = 0;
+    memset(s->sart_storage, 0, sizeof(s->sart_storage));
 }
 
 static void ans_counter(Object *obj, Visitor *v, const char *name,
@@ -448,10 +482,16 @@ SysBusDevice *apple_modern_ans_create(Object *parent, MemoryRegion *ram,
     memory_region_add_subregion_overlap(&s->bar, 0, &s->nvme_alias, 1);
     memory_region_init_alias(&s->secure, OBJECT(dev), "ans.secure-bar", &s->bar,
                              0, ANS_SECURE_SIZE);
+    memory_region_init_io(&s->core_regs, OBJECT(dev), &ans_core_ops, s, "ans.core", 0x4000);
+    memory_region_init_io(&s->sart_regs, OBJECT(dev), &ans_sart_ops, s, "ans.sart", 0x4000);
+    memory_region_init_ram(&s->segment_sram, OBJECT(dev), "ans.segment", 0x100000, &error_fatal);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->bar);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->secure);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev),
                      sysbus_mmio_get_region(SYS_BUS_DEVICE(s->rtkit), 0));
+    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->core_regs);
+    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->sart_regs);
+    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->segment_sram);
     sysbus_pass_irq(SYS_BUS_DEVICE(dev), SYS_BUS_DEVICE(s->rtkit));
     sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
     if (!sysbus_realize(SYS_BUS_DEVICE(dev), errp)) {

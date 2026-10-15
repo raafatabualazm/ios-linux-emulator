@@ -765,6 +765,8 @@ typedef struct StorageView {
 struct AppleModernPMGRStorageState {
     SysBusDevice parent_obj;
     bool mapped;
+    bool permissive;
+    uint32_t ltr_shadow;
     AppleModernPMGRStorageCore core;
     StorageView views[APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS];
     MemoryRegion regions[APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS];
@@ -800,10 +802,26 @@ static MemTxResult storage_read(void *opaque, hwaddr offset, uint64_t *value,
                                 unsigned size, MemTxAttrs attrs)
 {
     StorageView *view = opaque;
+    AppleModernPMGRStorageState *s = container_of(view->core,
+                                                  AppleModernPMGRStorageState, core);
     bool fresh = !apple_modern_pmgr_storage_core_touched(view->core, view->index, offset);
     if (!apple_modern_pmgr_storage_core_read(view->core, view->index, offset, size,
                                              value)) {
         announce_reject(view, offset, size, "read");
+        if (s->permissive && (size == 4 || size == 8) && !(offset & (size - 1)) &&
+            offset + size <= APPLE_MODERN_PMGR_STORAGE_MAX_SPAN) {
+            uint64_t phys = view->core->plan.windows[view->index].address + offset;
+            uint64_t slot = offset / 4;
+            if (phys == UINT64_C(0x3028a9c1c)) {
+                *value = s->ltr_shadow;
+            } else {
+                *value = view->core->values[view->index][slot];
+                if (size == 8) {
+                    *value |= (uint64_t)view->core->values[view->index][slot + 1] << 32;
+                }
+            }
+            return MEMTX_OK;
+        }
         return MEMTX_ACCESS_ERROR;
     }
     announce(view, fresh, offset, size, "read");
@@ -813,10 +831,25 @@ static MemTxResult storage_write(void *opaque, hwaddr offset, uint64_t value,
                                  unsigned size, MemTxAttrs attrs)
 {
     StorageView *view = opaque;
+    AppleModernPMGRStorageState *s = container_of(view->core,
+                                                  AppleModernPMGRStorageState, core);
     bool fresh = !apple_modern_pmgr_storage_core_touched(view->core, view->index, offset);
     if (!apple_modern_pmgr_storage_core_write(view->core, view->index, offset, size,
                                               value)) {
         announce_reject(view, offset, size, "write");
+        if (s->permissive && (size == 4 || size == 8) && !(offset & (size - 1)) &&
+            offset + size <= APPLE_MODERN_PMGR_STORAGE_MAX_SPAN) {
+            uint64_t phys = view->core->plan.windows[view->index].address + offset;
+            uint64_t slot = offset / 4;
+            view->core->values[view->index][slot] = (uint32_t)value;
+            if (size == 8) {
+                view->core->values[view->index][slot + 1] = (uint32_t)(value >> 32);
+            }
+            if (phys == UINT64_C(0x3028a9c18)) {
+                s->ltr_shadow = (uint32_t)value;
+            }
+            return MEMTX_OK;
+        }
         return MEMTX_ACCESS_ERROR;
     }
     announce(view, fresh, offset, size, "write");
@@ -832,7 +865,16 @@ static void storage_reset(DeviceState *dev)
 {
     AppleModernPMGRStorageState *s = APPLE_MODERN_PMGR_STORAGE(dev);
     apple_modern_pmgr_storage_core_reset(&s->core);
+    s->ltr_shadow = 0;
     memset(s->rejected, 0, sizeof(s->rejected));
+}
+static bool get_permissive(Object *obj, Error **errp)
+{
+    return APPLE_MODERN_PMGR_STORAGE(obj)->permissive;
+}
+static void set_permissive(Object *obj, bool value, Error **errp)
+{
+    APPLE_MODERN_PMGR_STORAGE(obj)->permissive = value;
 }
 static void storage_realize(DeviceState *dev, Error **errp)
 {
@@ -901,6 +943,7 @@ static void storage_class_init(ObjectClass *oc, const void *data)
                               NULL, NULL, NULL);
     object_class_property_add(oc, "sysbus-mmio-count", "uint64", get_mapping_counter,
                               NULL, NULL, (void *)1);
+    object_class_property_add_bool(oc, "permissive", get_permissive, set_permissive);
 }
 DeviceState *apple_modern_pmgr_storage_new(const AppleModernPMGRStoragePlan *plan)
 {

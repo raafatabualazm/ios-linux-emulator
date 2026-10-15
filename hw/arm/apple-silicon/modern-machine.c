@@ -2603,6 +2603,20 @@ static bool map_modern_ans(AppleModernMachine *s, Error **errp)
     for (unsigned i = 0; i < 3; i++) {
         sysbus_mmio_map(dev, i, bases[i]);
     }
+    if (!s->prepare_only) {
+        uint64_t core_base = 0, sart_base = 0;
+        AppleModernBlob sart_reg = {0};
+        if (ldq_le_p(reg.data + 16 + 8) == 0x4000 &&
+            arm_io_translate(dtree, ldq_le_p(reg.data + 16), 0x4000, &core_base, NULL)) {
+            sysbus_mmio_map(dev, 3, core_base);
+        }
+        if (apple_modern_adt_property(dtree, "/arm-io/sart-ans", "reg", &sart_reg, NULL) &&
+            sart_reg.size >= 16 &&
+            arm_io_translate(dtree, ldq_le_p(sart_reg.data), 0x4000, &sart_base, NULL)) {
+            sysbus_mmio_map(dev, 4, sart_base);
+        }
+        sysbus_mmio_map(dev, 5, UINT64_C(0x30dd00000));
+    }
     sysbus_connect_irq(dev, 4, qdev_get_gpio_in(s->aic, ldl_le_p(irq.data + 16)));
     for (unsigned i = 0; i < 4; i++) {
         sysbus_connect_irq(dev, i,
@@ -2893,6 +2907,30 @@ static void modern_init(MachineState *machine)
         }
         for (size_t i = 0; i < count; i++) {
             overrides[override_count++] = flags[i];
+        }
+    }
+    if (s->modern_ans && !s->prepare_only) {
+        static const uint8_t ans_compat[] = "iop,ascwrap-v6";
+        static const uint8_t ans_nub_compat[] = "iop-nub,rtbuddy-v2";
+        static const uint8_t sart_compat[] = "sart,t8140";
+        static const uint8_t ans_one[] = {1, 0, 0, 0};
+        static const uint8_t ans_seg_base[] = {0x00, 0x00, 0xd0, 0x0d, 0x03, 0x00, 0x00, 0x00};
+        static const uint8_t ans_seg_size[] = {0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00};
+        static const AppleModernAdtOverride ans_overrides[] = {
+            {"/arm-io/ans", "compatible", ans_compat, sizeof(ans_compat)},
+            {"/arm-io/ans/iop-ans-nub", "compatible", ans_nub_compat, sizeof(ans_nub_compat)},
+            {"/arm-io/ans/iop-ans-nub", "pre-loaded", ans_one, sizeof(ans_one)},
+            {"/arm-io/ans/iop-ans-nub", "running", ans_one, sizeof(ans_one)},
+            {"/arm-io/ans/iop-ans-nub", "region-base", ans_seg_base, sizeof(ans_seg_base)},
+            {"/arm-io/ans/iop-ans-nub", "region-size", ans_seg_size, sizeof(ans_seg_size)},
+            {"/arm-io/sart-ans", "compatible", sart_compat, sizeof(sart_compat)},
+        };
+        if (override_count + ARRAY_SIZE(ans_overrides) > APPLE_MODERN_MAX_ADT_OVERRIDES) {
+            error_report("modern-ans exceeds ADT override capacity");
+            exit(EXIT_FAILURE);
+        }
+        for (size_t i = 0; i < ARRAY_SIZE(ans_overrides); i++) {
+            overrides[override_count++] = ans_overrides[i];
         }
     }
     if (s->adt_compat_restore) {
