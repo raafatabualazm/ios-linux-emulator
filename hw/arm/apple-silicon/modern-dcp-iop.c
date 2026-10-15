@@ -24,6 +24,7 @@
 #include "system/dma.h"
 #endif
 #include "hw/arm/apple-silicon/modern-dcp-iop.h"
+#include "dcp-av-modes.h"
 
 #ifdef APPLE_MODERN_LAYOUT_STANDALONE
 static void error_setg(Error **errp, const char *format, ...)
@@ -673,7 +674,7 @@ struct AppleModernDcpIop {
         const char *prop_key;
         uint32_t prop_val32;
         uint64_t prop_val64;
-        uint8_t payload[128];
+        uint8_t payload[0x1010];
         uint32_t payload_len;
     } active_cbs[16];
 };
@@ -749,7 +750,7 @@ static AddressSpace *dcp_iop_select_dma_as(AppleModernDcpIop *s, uint64_t dva,
  * those are other callbacks (D593 needs 8 bytes and panicked with 4, see
  * claude-gui/v1-fullsystem-1200s), so they are not offered.
  */
-static const char *const dcp_attach_tags[] = { "D575", "D600" };
+static const char *const dcp_attach_tags[] = { "D575", "D600", "MODES" };
 
 static const char *dcp_attach_tag(const char *name)
 {
@@ -772,11 +773,59 @@ bool apple_modern_dcp_iop_attach_valid(const char *list, Error **errp)
     for (char **t = tags; *t; t++) {
         if (!dcp_attach_tag(*t)) {
             error_setg(errp, "dcp-attach-cbs: unknown callback '%s' (supported: "
-                       "D575+D600, any subset and order)", *t);
+                       "D575+D600+MODES, any subset and order)", *t);
             return false;
         }
     }
     return true;
+}
+
+/*
+ * Append one DCP->AP property push: D126 setDCPAVPropStart, D127
+ * setDCPAVPropChunk, D128 setDCPAVPropEnd.  Tags and record layout recovered
+ * from the pinned BootKC a36b9241 (features-20261014/claude-gui): D126 in=4
+ * (u32 total_length); D127 in=0x1008 (data[0x1000], then u32 offset, u32 length
+ * -- data FIRST, the opposite of the Asahi struct order); D128 in=0x40
+ * (char key[0x40], NUL-terminated).  The AP reassembles the chunks into one
+ * buffer, runs OSUnserializeXML over it and setProperty(key, dict).  Giving the
+ * connector >= 1 non-virtual SDR mode makes nr_modes > 0 so CoreDisplay builds
+ * a connected display and mints a real CGDirectDisplayID (the gate behind the
+ * nil main-display layout / 0xffffffff display id).
+ */
+static void dcp_iop_append_prop_push(AppleModernDcpIop *s, const char *key,
+                                     const char *blob, uint32_t blob_len)
+{
+    typeof(s->active_cbs[0]) *cb;
+
+    if (s->cb_count + 3 > ARRAY_SIZE(s->active_cbs) || blob_len > 0x1000) {
+        return;
+    }
+    /* D126 setDCPAVPropStart(uint32 total_length) */
+    cb = &s->active_cbs[s->cb_count++];
+    memset(cb, 0, sizeof(*cb));
+    cb->tag = "D126";
+    cb->in_len = 4;
+    cb->out_len = 4;
+    stl_le_p(cb->payload, blob_len);
+    cb->payload_len = 4;
+    /* D127 setDCPAVPropChunk: data[0x1000], then u32 offset, u32 length */
+    cb = &s->active_cbs[s->cb_count++];
+    memset(cb, 0, sizeof(*cb));
+    cb->tag = "D127";
+    cb->in_len = 0x1008;
+    cb->out_len = 4;
+    memcpy(cb->payload, blob, blob_len);
+    stl_le_p(cb->payload + 0x1000, 0);
+    stl_le_p(cb->payload + 0x1004, blob_len);
+    cb->payload_len = 0x1008;
+    /* D128 setDCPAVPropEnd(char key[0x40]) */
+    cb = &s->active_cbs[s->cb_count++];
+    memset(cb, 0, sizeof(*cb));
+    cb->tag = "D128";
+    cb->in_len = 0x40;
+    cb->out_len = 4;
+    strncpy((char *)cb->payload, key, 0x3f);
+    cb->payload_len = 0x40;
 }
 
 /* Append the selected attach callbacks to active_cbs in the requested order. */
@@ -786,8 +835,26 @@ static void dcp_iop_append_attach_cbs(AppleModernDcpIop *s)
 
     for (char **t = tags; *t && s->cb_count < ARRAY_SIZE(s->active_cbs); t++) {
         const char *tag = dcp_attach_tag(*t);
-        typeof(s->active_cbs[0]) *cb = &s->active_cbs[s->cb_count];
+        typeof(s->active_cbs[0]) *cb;
 
+        if (!strcmp(tag, "MODES")) {
+            /*
+             * The AP hands the reassembled buffer to OSUnserializeXML(buf,
+             * total_length), whose XML path rejects a buffer whose LAST byte
+             * (buf[total_length - 1]) is not NUL.  v9 sent total_length without
+             * the terminator and logged "OSUnserializeXML failed" twice, so the
+             * length here deliberately includes the trailing NUL.
+             */
+            dcp_iop_append_prop_push(s, "TimingElements",
+                                     dcp_av_timing_xml,
+                                     sizeof(dcp_av_timing_xml));
+            dcp_iop_append_prop_push(s, "DisplayAttributes",
+                                     dcp_av_display_attrs_xml,
+                                     sizeof(dcp_av_display_attrs_xml));
+            continue;
+        }
+
+        cb = &s->active_cbs[s->cb_count];
         memset(cb, 0, sizeof(*cb));
         cb->tag = tag;
         if (!strcmp(tag, "D575")) {
@@ -818,7 +885,7 @@ static void dcp_iop_send_next_startup_cb(AppleModernDcpIop *s)
         uint64_t raw_cb_dva = s->shmem_dva + 0x60000;
         uint64_t cb_dva = raw_cb_dva;
         const char *which = "none";
-        uint8_t pkt_buf[256] = { 0 };
+        uint8_t pkt_buf[0x1020] = { 0 };
         DcpRpcPacketHeader hdr = {
             .tag = { tag[3], tag[2], tag[1], tag[0] },
             .in_len = in_len,
@@ -1042,8 +1109,15 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                          !strcmp(tag_str, "A352") ||
                          !strcmp(tag_str, "A381") ||
                          !strcmp(tag_str, "A401") ||
-                         ((!strcmp(tag_str, "A410") ||
-                           !strcmp(tag_str, "A411")) && hdr.in_len == 0) ||
+                         /*
+                          * A410/A411 = is_main_display family. In this BootKC
+                          * A410 is in=8/out=4 and A411 is in=4/out=4 (never
+                          * in_len==0), so the old "&& hdr.in_len == 0" guard made
+                          * both always return false and the single built-in panel
+                          * was never reported as the main display. Assert true.
+                          */
+                         !strcmp(tag_str, "A410") ||
+                         !strcmp(tag_str, "A411") ||
                          !strcmp(tag_str, "A454") ||
                          !strcmp(tag_str, "A455") ||
                          !strcmp(tag_str, "A456") ||
@@ -1058,8 +1132,13 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                          !strcmp(tag_str, "A485"))) {
                         zeros[0] = 1;
                     } else if (!strcmp(tag_str, "A412") && hdr.out_len >= 4) {
-                        /* V14_7+: get_digital_out_state(InOutPtr(uint)) -> connected (1) / is_main_display */
-                        stl_le_p(zeros, 1);
+                        /*
+                         * A412 get_digital_out_state: in=0/out=4. The single 4-byte
+                         * word is an IOReturn status (the state value travels via an
+                         * in/out pointer this call site passes NULL and discards).
+                         * kIOReturnSuccess = 0; the old value 1 was a non-success code.
+                         */
+                        stl_le_p(zeros, 0);
                     } else if (!strcmp(tag_str, "A437")) {
                         /* V14_7+: get_block_dcp — timing/param blocks: log id, zeros for now */
                         warn_report("apple-modern: dcp-iop v6-resumed A437 get_block id=0x%x",
