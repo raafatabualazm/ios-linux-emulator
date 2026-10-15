@@ -5,9 +5,10 @@
 #include "hw/arm/apple-silicon/modern-boot-metadata.h"
 
 #define APPLE_MODERN_CPU_REGISTER_WINDOWS 2
-/* The full declared apple-modern profile appends at most 68 spans; the PMGR storage
- * option alone adds 19 more windows, so the budget is 128. */
-#define APPLE_MODERN_MAX_BOARD_EXCLUSIONS 128
+/* Combined MCC, 56-window PMGR storage, and DCP tracing exceed the earlier
+ * 128-span budget. Keep a fixed bound for the complete merged profile; every
+ * planner still refuses an exclusion count beyond it. */
+#define APPLE_MODERN_MAX_BOARD_EXCLUSIONS 256
 #define APPLE_MODERN_MAX_REGISTER_WINDOW (UINT64_C(1) << 20)
 #define APPLE_MODERN_MAX_REGISTER_TOTAL (UINT64_C(2) << 20)
 

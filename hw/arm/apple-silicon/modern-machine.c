@@ -639,7 +639,7 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
             return false;
         }
     }
-    /* Every append is bounded; the full declared profile uses at most 68 spans. */
+    /* Every append is bounded by the combined-profile exclusion budget. */
     for (unsigned i = 0; i < APPLE_MODERN_MCC_DCS_COUNT; i++) {
         if (s->mcc_dramcfg_plan.addresses[i] &&
             !append_pmgr_exclusion(exclusions, &count,
@@ -3338,9 +3338,11 @@ static void modern_init(MachineState *machine)
         (s->modern_smc && !map_modern_smc(s, uart, uart_span, &error)) ||
         ((s->dcp_iop || s->dcp_attach_cbs || s->dcp_attach_trigger) &&
          !map_dcp_iop(s, uart, uart_span, &error)) ||
-        (s->disp0_probe && !map_disp_trace(s, uart, uart_span, &error)) ||
+        /* Concrete PMGR windows must exclude the broad disp0 logging
+         * apertures, including reg[5] over the PMC registers. */
         (s->modern_pmgr_storage &&
          !map_pmgr_storage(s, uart, uart_span, &error)) ||
+        (s->disp0_probe && !map_disp_trace(s, uart, uart_span, &error)) ||
         (s->pmgr_aon_fuse_image &&
          !map_pmgr_fuse(s, uart, uart_span, &error)) ||
         (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error)) ||

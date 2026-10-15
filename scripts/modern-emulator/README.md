@@ -5,12 +5,13 @@ workspace `modern-emulator/tools` and `modern-emulator/tests` paths link here.
 Private firmware, IPAs, binaries, guest state and evidence stay outside this
 checkout; `evidence` is an ignored local compatibility link.
 
-The current integration base is `linux-restore` commit
-`38f5665ecfc98ca2e5b32809717b81fc978cbbcd`. The original dirty checkout and both
-publication worktrees remain separate. Combined development is on `modern-ios`
-in `Inferno/integration`. The qualified SPRR extension is isolated on
-`darwin-cpu-verified` in `Inferno/darwin-cpu`; additional integration
-system-register/AMCC/metadata/PTW and USB/runtime edits remain preserved.
+The canonical source is `Inferno/integration`, branch `modern-ios`.
+`modern-emulator/source` points to that checkout; use it for changes and builds.
+Native storage and Claude's display mode-push plus touch register models are
+merged here. Historical worktrees and immutable runtime pins retain earlier
+experiments. The former native-storage worktree path now points to this same
+source. See [source layout and combined gates](../../docs/apple-modern-source-tree.md).
+
 This directory documents operating systems and hardware emulation, from CPU
 and firmware handoff through display/input and the application lifecycle.
 
@@ -109,7 +110,7 @@ Use a fresh out-of-tree build directory. The working build below is persistent;
 `/tmp` is volatile on this host.
 
 ```sh
-task_source="$(pwd)/Inferno/integration"
+task_source="$(pwd)/modern-emulator/source"
 mkdir -p modern-emulator/build
 cd modern-emulator/build
 "$task_source/configure" \
