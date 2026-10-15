@@ -24,7 +24,6 @@
 #include "system/dma.h"
 #endif
 #include "hw/arm/apple-silicon/modern-dcp-iop.h"
-#include "dcp-av-modes.h"
 
 #ifdef APPLE_MODERN_LAYOUT_STANDALONE
 static void error_setg(Error **errp, const char *format, ...)
@@ -657,15 +656,11 @@ struct AppleModernDcpIop {
     uint32_t next_swap_id;
     uint64_t shmem_dva;
     bool a401_pending;
+    bool hotplug_sent;
     uint8_t a401_ep;
     uint8_t pending_rpc_ctx;
     unsigned cb_index;
     unsigned cb_count;
-    bool normal_mode_seen;
-    /* Display-attach callbacks: '+'-separated tags, NULL = none (see below). */
-    char *attach_cbs;
-    bool attach_after_a453;
-    bool attach_sent;
     struct {
         const char *tag;
         uint32_t in_len;
@@ -674,9 +669,7 @@ struct AppleModernDcpIop {
         const char *prop_key;
         uint32_t prop_val32;
         uint64_t prop_val64;
-        uint8_t payload[0x1010];
-        uint32_t payload_len;
-    } active_cbs[16];
+    } active_cbs[12];
 };
 
 typedef struct QEMU_PACKED {
@@ -733,152 +726,76 @@ static AddressSpace *dcp_iop_select_dma_as(AppleModernDcpIop *s, uint64_t dva,
     return NULL;
 }
 
-/*
- * Display-attach callbacks (machine options dcp-attach-cbs and
- * dcp-attach-trigger), default none.  Tags and layouts are recovered from the
- * pinned BootKC a36b9241 (evidence features-20261014/claude-gui/re/README.md):
- * the AP dispatcher at unslid 0xfffffff00a1693ec calls the handler for the
- * record's tag; each handler enforces a minimum in/out length and any non-zero
- * return panics ("callback failed with: 0x%x" @link_protocol_priv.h:994).
- *  - D575 IOMobileFramebufferAP::hotPlug_notify_gated(uint64_t state,
- *    IOMFB_TiledDisplayInfo *, bool): in >= 0x58, out >= 0x4c.  in+0x00 state,
- *    +0x08..+0x52 TiledDisplayInfo, +0x53 bool, +0x54 pointer-null flag.
- *    Sent with state 1 and the TiledDisplayInfo pointer null (its field layout
- *    is not recovered), bool 0.  Pending until a client registers for HPD.
- *  - D600 setSystemConsoleMode_gated(bool): in >= 4, bool in byte 0; sent 0.
- * Antigravity's v17 sent D576/D577/D593/D594 (Mac numbering); in this kernel
- * those are other callbacks (D593 needs 8 bytes and panicked with 4, see
- * claude-gui/v1-fullsystem-1200s), so they are not offered.
- */
-static const char *const dcp_attach_tags[] = { "D575", "D600", "MODES" };
-
-static const char *dcp_attach_tag(const char *name)
+static void dcp_iop_send_probe_cb(AppleModernDcpIop *s, const char *tag,
+                                   uint32_t in_len, uint32_t out_len)
 {
-    for (size_t i = 0; i < ARRAY_SIZE(dcp_attach_tags); i++) {
-        if (!strcmp(name, dcp_attach_tags[i])) {
-            return dcp_attach_tags[i];
-        }
-    }
-    return NULL;
-}
-
-bool apple_modern_dcp_iop_attach_valid(const char *list, Error **errp)
-{
-    g_auto(GStrv) tags = g_strsplit(list, "+", -1);
-
-    if (!tags[0]) {
-        error_setg(errp, "dcp-attach-cbs is empty");
-        return false;
-    }
-    for (char **t = tags; *t; t++) {
-        if (!dcp_attach_tag(*t)) {
-            error_setg(errp, "dcp-attach-cbs: unknown callback '%s' (supported: "
-                       "D575+D600+MODES, any subset and order)", *t);
-            return false;
-        }
-    }
-    return true;
-}
-
-/*
- * Append one DCP->AP property push: D126 setDCPAVPropStart, D127
- * setDCPAVPropChunk, D128 setDCPAVPropEnd.  Tags and record layout recovered
- * from the pinned BootKC a36b9241 (features-20261014/claude-gui): D126 in=4
- * (u32 total_length); D127 in=0x1008 (data[0x1000], then u32 offset, u32 length
- * -- data FIRST, the opposite of the Asahi struct order); D128 in=0x40
- * (char key[0x40], NUL-terminated).  The AP reassembles the chunks into one
- * buffer, runs OSUnserializeXML over it and setProperty(key, dict).  Giving the
- * connector >= 1 non-virtual SDR mode makes nr_modes > 0 so CoreDisplay builds
- * a connected display and mints a real CGDirectDisplayID (the gate behind the
- * nil main-display layout / 0xffffffff display id).
- */
-static void dcp_iop_append_prop_push(AppleModernDcpIop *s, const char *key,
-                                     const char *blob, uint32_t blob_len)
-{
-    typeof(s->active_cbs[0]) *cb;
-
-    if (s->cb_count + 3 > ARRAY_SIZE(s->active_cbs) || blob_len > 0x1000) {
+    uint64_t raw_cb_dva = s->shmem_dva + 0x70000;
+    uint64_t cb_dva = raw_cb_dva;
+    const char *which = "none";
+    uint8_t probe4[4] = { 0 };
+    uint8_t pkt_buf[128] = { 0 };
+    DcpRpcPacketHeader hdr = {
+        .tag = { tag[3], tag[2], tag[1], tag[0] },
+        .in_len = in_len,
+        .out_len = out_len,
+    };
+    uint32_t total_len = sizeof(hdr) + in_len + out_len;
+    AddressSpace *as = dcp_iop_select_dma_as(s, raw_cb_dva, probe4,
+                                             sizeof(probe4), &which, &cb_dva);
+    if (!as || total_len > sizeof(pkt_buf)) {
         return;
     }
-    /* D126 setDCPAVPropStart(uint32 total_length) */
-    cb = &s->active_cbs[s->cb_count++];
-    memset(cb, 0, sizeof(*cb));
-    cb->tag = "D126";
-    cb->in_len = 4;
-    cb->out_len = 4;
-    stl_le_p(cb->payload, blob_len);
-    cb->payload_len = 4;
-    /* D127 setDCPAVPropChunk: data[0x1000], then u32 offset, u32 length */
-    cb = &s->active_cbs[s->cb_count++];
-    memset(cb, 0, sizeof(*cb));
-    cb->tag = "D127";
-    cb->in_len = 0x1008;
-    cb->out_len = 4;
-    memcpy(cb->payload, blob, blob_len);
-    stl_le_p(cb->payload + 0x1000, 0);
-    stl_le_p(cb->payload + 0x1004, blob_len);
-    cb->payload_len = 0x1008;
-    /* D128 setDCPAVPropEnd(char key[0x40]) */
-    cb = &s->active_cbs[s->cb_count++];
-    memset(cb, 0, sizeof(*cb));
-    cb->tag = "D128";
-    cb->in_len = 0x40;
-    cb->out_len = 4;
-    strncpy((char *)cb->payload, key, 0x3f);
-    cb->payload_len = 0x40;
+    memcpy(pkt_buf, &hdr, sizeof(hdr));
+    if (out_len == 4) {
+        stl_le_p(pkt_buf + sizeof(hdr) + in_len, 0xdeadbeefU);
+    }
+    dma_memory_write(as, cb_dva, pkt_buf, total_len, MEMTXATTRS_UNSPECIFIED);
+    warn_report("apple-modern: dcp-iop v6-resumed PROBE tag='%s' "
+                "(in=0x%x out=0x%x) on %s",
+                tag, in_len, out_len, s->nub_name);
+    apple_rtkit_send_user_msg(APPLE_RTKIT(s), s->a401_ep,
+                              ((uint64_t)total_len << 32) | UINT64_C(2));
 }
 
-/* Append the selected attach callbacks to active_cbs, always pushing MODES
- * (TimingElements + DisplayAttributes via D126/D127/D128) BEFORE D575 so that
- * IOMobileFramebufferAP::hotPlug_notify_gated(1) never inspects an empty
- * TimingElements property when D575 fires. */
-static void dcp_iop_append_attach_cbs(AppleModernDcpIop *s)
+static void dcp_iop_send_hotplug_cb(AppleModernDcpIop *s)
 {
-    g_auto(GStrv) tags = g_strsplit(s->attach_cbs, "+", -1);
-
-    for (char **t = tags; *t && s->cb_count < ARRAY_SIZE(s->active_cbs); t++) {
-        const char *tag = dcp_attach_tag(*t);
-        if (!strcmp(tag, "MODES")) {
-            /*
-             * The AP hands the reassembled buffer to OSUnserializeXML(buf,
-             * total_length), whose XML path rejects a buffer whose LAST byte
-             * (buf[total_length - 1]) is not NUL.  v9 sent total_length without
-             * the terminator and logged "OSUnserializeXML failed" twice, so the
-             * length here deliberately includes the trailing NUL.
-             */
-            dcp_iop_append_prop_push(s, "TimingElements",
-                                     dcp_av_timing_xml,
-                                     sizeof(dcp_av_timing_xml));
-            dcp_iop_append_prop_push(s, "DisplayAttributes",
-                                     dcp_av_display_attrs_xml,
-                                     sizeof(dcp_av_display_attrs_xml));
-        }
+    /*
+     * D576 hotPlug_notify_gated(mapID u32, InOutPtr(0x50) timing).
+     * Place a zeroed timing buffer inside the same CB packet and pass
+     * its DVA as the pointer so the kernel handler can safely copy it.
+     */
+    const uint32_t in_len = 0xc;
+    const uint32_t timing_len = 0x50; /* declared as out: InOutPtr buffer */
+    uint64_t raw_cb_dva = s->shmem_dva + 0x60000;
+    uint64_t cb_dva = raw_cb_dva;
+    const char *which = "none";
+    uint8_t probe[4] = { 0 };
+    uint8_t pkt_buf[128] = { 0 };
+    DcpRpcPacketHeader hdr = {
+        .tag = { '6', '7', '5', 'D' },
+        .in_len = in_len,
+        .out_len = timing_len,
+    };
+    uint32_t total_len = sizeof(hdr) + in_len + timing_len;
+    AddressSpace *as = dcp_iop_select_dma_as(s, raw_cb_dva, probe,
+                                             sizeof(probe), &which,
+                                             &cb_dva);
+    if (!as || total_len > sizeof(pkt_buf)) {
+        warn_report("apple-modern: dcp-iop v6-resumed D576 hotplug DMA "
+                    "lookup failed");
+        return;
     }
-
-    for (char **t = tags; *t && s->cb_count < ARRAY_SIZE(s->active_cbs); t++) {
-        const char *tag = dcp_attach_tag(*t);
-        typeof(s->active_cbs[0]) *cb;
-
-        if (!strcmp(tag, "MODES")) {
-            continue;
-        }
-
-        cb = &s->active_cbs[s->cb_count];
-        memset(cb, 0, sizeof(*cb));
-        cb->tag = tag;
-        if (!strcmp(tag, "D575")) {
-            cb->in_len = 0x58;
-            cb->out_len = 0x4c;
-            stq_le_p(cb->payload, 1);   /* HPD state: attached */
-            cb->payload[0x53] = 0;      /* bool argument */
-            cb->payload[0x54] = 1;      /* TiledDisplayInfo pointer is null */
-            cb->payload_len = 0x58;
-        } else {
-            cb->in_len = 4;             /* D600: console mode off */
-            cb->payload_len = 4;
-        }
-        s->cb_count++;
-    }
+    memcpy(pkt_buf, &hdr, sizeof(hdr));
+    stl_le_p(pkt_buf + sizeof(hdr), 0);
+    stq_le_p(pkt_buf + sizeof(hdr) + 4, cb_dva + sizeof(hdr) + in_len);
+    dma_memory_write(as, cb_dva, pkt_buf, total_len,
+                     MEMTXATTRS_UNSPECIFIED);
+    warn_report("apple-modern: dcp-iop v6-resumed sending D576 "
+                "hotPlug_notify_gated (zero timing) on %s via %s "
+                "(ctx=0 off=0x0 len=0x%x)",
+                s->nub_name, which, total_len);
+    apple_rtkit_send_user_msg(APPLE_RTKIT(s), s->a401_ep,
+                              ((uint64_t)total_len << 32) | UINT64_C(2));
 }
 
 static void dcp_iop_send_next_startup_cb(AppleModernDcpIop *s)
@@ -894,7 +811,7 @@ static void dcp_iop_send_next_startup_cb(AppleModernDcpIop *s)
         uint64_t raw_cb_dva = s->shmem_dva + 0x60000;
         uint64_t cb_dva = raw_cb_dva;
         const char *which = "none";
-        uint8_t pkt_buf[0x1020] = { 0 };
+        uint8_t pkt_buf[128] = { 0 };
         DcpRpcPacketHeader hdr = {
             .tag = { tag[3], tag[2], tag[1], tag[0] },
             .in_len = in_len,
@@ -912,11 +829,7 @@ static void dcp_iop_send_next_startup_cb(AppleModernDcpIop *s)
             break;
         }
         memcpy(pkt_buf, &hdr, sizeof(hdr));
-        if (s->active_cbs[s->cb_index].payload_len > 0) {
-            memcpy(pkt_buf + sizeof(hdr),
-                   s->active_cbs[s->cb_index].payload,
-                   s->active_cbs[s->cb_index].payload_len);
-        } else if (prop_key && in_len == 0x44) {
+        if (prop_key && in_len == 0x44) {
             strncpy((char *)(pkt_buf + sizeof(hdr)), prop_key, 0x3f);
             stl_le_p(pkt_buf + sizeof(hdr) + 0x40, prop_val32);
         } else if (in_len == 0x10) {
@@ -1037,14 +950,10 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                             "tag='%s' in_len=0x%x out_len=0x%x in_hex=%s",
                             s->messages, s->nub_name, ctx, off, len, which,
                             tag_str, hdr.in_len, hdr.out_len, hex_preview);
-                warn_report("apple-modern: dcp-iop v6-resumed RPCALL #%" PRIu64
-                            " tag='%s' ctx=%u in_len=%u out_len=%u",
-                            s->messages, tag_str, ctx, hdr.in_len, hdr.out_len);
 
-                if (!strcmp(tag_str, "A352")) {
-                    s->normal_mode_seen = true;
-                }
-
+                warn_report("apple-modern: dcp-iop v6-resumed RPCALL #%llu tag='%s' ctx=%u in_len=%u out_len=%u",
+                            (unsigned long long)s->messages, tag_str, ctx,
+                            hdr.in_len, hdr.out_len);
                 if (hdr.in_len > sizeof(in_preview) && hdr.in_len <= 0x4000) {
                     uint8_t *full_in = g_malloc0(hdr.in_len);
                     dma_memory_read(as, pkt_dva + sizeof(hdr), full_in,
@@ -1056,7 +965,8 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                                         " tag='%s' in[+0x%03x]=0x%016" PRIx64,
                                         s->messages, tag_str, off_w, val);
                         }
-                        if ((!strcmp(tag_str, "A407") || !strcmp(tag_str, "A408")) &&
+                        if ((!strcmp(tag_str, "A408") ||
+                             !strcmp(tag_str, "A407")) &&
                             (val >> 36) == UINT64_C(0x10) &&
                             (val & UINT64_C(0xfffffffff)) != 0 &&
                             s->disp0_dma_as) {
@@ -1075,10 +985,10 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                                     }
                                 }
                                 warn_report("apple-modern: dcp-iop v6-resumed "
-                                            "%s surface at in[+0x%03x] "
+                                            "A408 surface at in[+0x%03x] "
                                             "dva=0x%" PRIx64 " via=dart-disp0(trunc36) "
                                             "nonzero_rgb_pixels=%u",
-                                            tag_str, off_w, val, nonzero_rgb);
+                                            off_w, val, nonzero_rgb);
                                 if (nonzero_rgb > 0 && s->scanout_pa &&
                                     s->scanout_size >= fb_bytes) {
                                     address_space_write(&address_space_memory,
@@ -1099,72 +1009,46 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                     /* Methods returning bool_ true on init/display queries */
                     if (hdr.out_len >= 4 &&
                         (!strcmp(tag_str, "A000") ||
-                         !strcmp(tag_str, "A002") ||
-                         !strcmp(tag_str, "A020") ||
-                         !strcmp(tag_str, "A024") ||
-                         !strcmp(tag_str, "A030") ||
-                         !strcmp(tag_str, "A031") ||
                          !strcmp(tag_str, "A032") ||
-                         !strcmp(tag_str, "A035") ||
-                         !strcmp(tag_str, "A036") ||
-                         !strcmp(tag_str, "A037") ||
-                         !strcmp(tag_str, "A043") ||
-                         !strcmp(tag_str, "A115") ||
-                         !strcmp(tag_str, "A116") ||
-                         !strcmp(tag_str, "A130") ||
-                         !strcmp(tag_str, "A131") ||
-                         !strcmp(tag_str, "A132") ||
                          !strcmp(tag_str, "A204") ||
                          !strcmp(tag_str, "A352") ||
-                         !strcmp(tag_str, "A381") ||
                          !strcmp(tag_str, "A401") ||
-                         /*
-                          * A410/A411 = is_main_display family. In this BootKC
-                          * A410 is in=8/out=4 and A411 is in=4/out=4 (never
-                          * in_len==0), so the old "&& hdr.in_len == 0" guard made
-                          * both always return false and the single built-in panel
-                          * was never reported as the main display. Assert true.
-                          */
                          !strcmp(tag_str, "A410") ||
                          !strcmp(tag_str, "A411") ||
-                         !strcmp(tag_str, "A454") ||
-                         !strcmp(tag_str, "A455") ||
-                         !strcmp(tag_str, "A456") ||
+                         !strcmp(tag_str, "A412") ||
                          !strcmp(tag_str, "A463") ||
-                         !strcmp(tag_str, "A465") ||
-                         !strcmp(tag_str, "A466") ||
-                         !strcmp(tag_str, "A468") ||
-                         !strcmp(tag_str, "A473") ||
-                         !strcmp(tag_str, "A474") ||
-                         !strcmp(tag_str, "A475") ||
-                         !strcmp(tag_str, "A479") ||
-                         !strcmp(tag_str, "A485"))) {
+                         !strcmp(tag_str, "A475"))) {
                         zeros[0] = 1;
                     } else if (!strcmp(tag_str, "A412") && hdr.out_len >= 4) {
-                        /*
-                         * A412 get_digital_out_state: in=0/out=4. The single 4-byte
-                         * word is an IOReturn status (the state value travels via an
-                         * in/out pointer this call site passes NULL and discards).
-                         * kIOReturnSuccess = 0; the old value 1 was a non-success code.
-                         */
-                        stl_le_p(zeros, 0);
+                        /* V14_7+: get_digital_out_state(InOutPtr(uint)) -> connected */
+                        stl_le_p(zeros, 1);
+                    } else if (!strcmp(tag_str, "A472") &&
+                               hdr.out_len >= 8 && preview_len >= 4) {
+                        /* V14_7+: setPowerState(ulong,...,OutPtr(uint),...) echo + 0 */
+                        stl_le_p(zeros, ldl_le_p(in_preview));
+                        stl_le_p(zeros + 4, 0);
+                    } else if (!strcmp(tag_str, "A443") && hdr.out_len >= 8) {
+                        /* V14_7+: get_display_size */
+                        stl_le_p(zeros, 1024);
+                        stl_le_p(zeros + 4, 768);
+                    } else if (!strcmp(tag_str, "A441") && hdr.out_len >= 4) {
+                        /* V14_7+: display_width */
+                        stl_le_p(zeros, 1024);
+                    } else if (!strcmp(tag_str, "A442") && hdr.out_len >= 4) {
+                        /* V14_7+: display_height */
+                        stl_le_p(zeros, 768);
                     } else if (!strcmp(tag_str, "A437")) {
                         /* V14_7+: get_block_dcp — timing/param blocks: log id, zeros for now */
                         warn_report("apple-modern: dcp-iop v6-resumed A437 get_block id=0x%x",
                                     preview_len >= 4 ? ldl_le_p(in_preview) : 0);
-                    } else if ((!strcmp(tag_str, "A406") ||
-                                (!strcmp(tag_str, "A407") && hdr.in_len < 0x80)) &&
-                               hdr.out_len >= 8) {
+                    } else if (!strcmp(tag_str, "A406") && hdr.out_len >= 8) {
                         /* swap_start(InOutPtr(uint) swap_id, ...) */
                         if (++s->next_swap_id == 0) {
                             s->next_swap_id = 1;
                         }
                         stl_le_p(zeros, s->next_swap_id);
                         stl_le_p(zeros + 4, 0);
-                    } else if ((!strcmp(tag_str, "A472") ||
-                                !strcmp(tag_str, "A473") ||
-                                !strcmp(tag_str, "A468") ||
-                                !strcmp(tag_str, "A484")) &&
+                    } else if (!strcmp(tag_str, "A484") &&
                                hdr.out_len >= 8 && preview_len >= 4) {
                         /*
                          * setPowerState(ulong powerState, ..., OutPtr(uint) outState, ...)
@@ -1172,70 +1056,32 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                          */
                         stl_le_p(zeros, ldl_le_p(in_preview));
                         stl_le_p(zeros + 4, 0);
-                    } else if (!strcmp(tag_str, "A453")) {
-                        /*
-                         * Native A453 in pinned BootKC a36b9241... is:
-                         * virtual void IOMobileFramebufferShim::get_display_size(uint32_t*, uint32_t*) const
-                         * Output 8 bytes are width (1024) and height (768), with no IOReturn status field.
-                         */
-                        if (hdr.out_len >= 8) {
-                            stl_le_p(zeros, 1024);
-                            stl_le_p(zeros + 4, 768);
-                        }
-                    } else if ((!strcmp(tag_str, "A443") ||
-                                !strcmp(tag_str, "A444") ||
-                                !strcmp(tag_str, "A445") ||
+                    } else if ((!strcmp(tag_str, "A453") ||
                                 !strcmp(tag_str, "A103")) &&
                                hdr.out_len >= 8) {
                         /* get_display_size / get_config_frame_size */
                         stl_le_p(zeros, 1024);
                         stl_le_p(zeros + 4, 768);
-                    } else if ((!strcmp(tag_str, "A441") ||
-                                !strcmp(tag_str, "A443") ||
-                                !strcmp(tag_str, "A440") ||
-                                !strcmp(tag_str, "A451") ||
-                                !strcmp(tag_str, "A351") ||
-                                (!strcmp(tag_str, "A442") && hdr.out_len == 4 && preview_len == 0)) &&
-                               hdr.out_len == 4) {
+                        if (!s->hotplug_sent && ctx == 2) {
+                            s->hotplug_sent = true;
+                            for (int dn = 540; dn <= 600; dn++) {
+                                char tag[8];
+                                snprintf(tag, sizeof(tag), "D%d", dn);
+                                dcp_iop_send_probe_cb(s, tag, 0x10, 4);
+                                dcp_iop_send_probe_cb(s, tag, 0xc, 0x50);
+                            }
+                            dcp_iop_send_hotplug_cb(s);
+                        }
+                    } else if (!strcmp(tag_str, "A451") && hdr.out_len >= 4) {
                         /* display_width() -> uint */
                         stl_le_p(zeros, 1024);
-                    } else if ((!strcmp(tag_str, "A442") ||
-                                !strcmp(tag_str, "A444") ||
-                                !strcmp(tag_str, "A452") ||
-                                !strcmp(tag_str, "A350")) &&
-                               hdr.out_len == 4) {
+                    } else if (!strcmp(tag_str, "A452") && hdr.out_len >= 4) {
                         /* display_height() -> uint */
                         stl_le_p(zeros, 768);
                     }
                     dma_memory_write(as, out_dva, zeros, hdr.out_len,
                                      MEMTXATTRS_UNSPECIFIED);
-                    warn_report("apple-modern: dcp-iop v6-resumed RPC #%" PRIu64
-                                " tag='%s' replied out_len=0x%x out_hex=%02x%02x%02x%02x%02x%02x%02x%02x",
-                                s->messages, tag_str, hdr.out_len,
-                                zeros[0], zeros[1], zeros[2], zeros[3],
-                                hdr.out_len > 4 ? zeros[4] : 0,
-                                hdr.out_len > 5 ? zeros[5] : 0,
-                                hdr.out_len > 6 ? zeros[6] : 0,
-                                hdr.out_len > 7 ? zeros[7] : 0);
                     g_free(zeros);
-                }
-
-                if (s->attach_cbs && !s->attach_sent &&
-                    s->normal_mode_seen && !s->a401_pending &&
-                    !strcmp(tag_str, "A453")) {
-                    memset(s->active_cbs, 0, sizeof(s->active_cbs));
-                    s->cb_count = 0;
-                    dcp_iop_append_attach_cbs(s);
-                    s->attach_sent = true;
-                    warn_report("apple-modern: dcp-iop v6-resumed attach callbacks "
-                                "[%s] nested in RPC #%" PRIu64 " A453 (after "
-                                "NormalModeEnable)", s->attach_cbs, s->messages);
-                    s->a401_pending = true;
-                    s->a401_ep = ep;
-                    s->pending_rpc_ctx = ctx;
-                    s->cb_index = 0;
-                    dcp_iop_send_next_startup_cb(s);
-                    return;
                 }
 
                 if (ctx == 2 && !strcmp(tag_str, "A401")) {
@@ -1282,13 +1128,6 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                         s->active_cbs[1].prop_key = "NormalModeActive";
                         s->active_cbs[1].prop_val32 = prop_val ? 1u : 0u;
                         s->cb_count = 2;
-                        if (prop_val != 0 && s->attach_cbs &&
-                            !s->attach_after_a453) {
-                            /* NormalModeEnable = 1: push MODES+D575 now and
-                             * leave attach_sent false so the subsequent A453
-                             * query also sees a fresh hotplug edge. */
-                            dcp_iop_append_attach_cbs(s);
-                        }
                     }
                     s->a401_pending = true;
                     s->a401_ep = ep;
@@ -1561,16 +1400,6 @@ void apple_modern_dcp_iop_set_dma(DeviceState *dev, AddressSpace *dcp_dma_as,
     s->disp0_dma_as = disp0_dma_as;
 }
 
-void apple_modern_dcp_iop_set_attach(DeviceState *dev, const char *cbs,
-                                     bool after_a453)
-{
-    AppleModernDcpIop *s = APPLE_MODERN_DCP_IOP(dev);
-
-    g_free(s->attach_cbs);
-    s->attach_cbs = cbs && *cbs ? g_strdup(cbs) : NULL;
-    s->attach_after_a453 = after_a453;
-}
-
 void apple_modern_dcp_iop_set_scanout(DeviceState *dev, uint64_t scanout_pa,
                                       uint64_t scanout_size)
 {
@@ -1609,8 +1438,6 @@ static void dcp_iop_reset_hold(Object *obj, ResetType type)
     s->a401_pending = false;
     s->a401_ep = 0;
     s->cb_index = 0;
-    s->normal_mode_seen = false;
-    s->attach_sent = false;
 }
 
 static void dcp_iop_reset_exit(Object *obj, ResetType type)
