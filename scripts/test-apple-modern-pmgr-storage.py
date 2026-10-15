@@ -24,7 +24,8 @@ def main():
                'hw/arm/apple-silicon/modern-pmgr-storage.c',
                'include/hw/arm/apple-silicon/modern-pmgr-storage.h',
                'scripts/test-apple-modern-pmgr-storage.c',
-               'scripts/test-apple-modern-pmgr-storage.py']
+               'scripts/test-apple-modern-pmgr-storage.py',
+               'scripts/test-apple-modern-pmgr-counter-table.inc']
     before = {name: digest(root / name) for name in sources}
     dtree_before = digest(args.dtree) if args.dtree else None
     runs = []

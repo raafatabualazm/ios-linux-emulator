@@ -167,7 +167,7 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     enable register (+0x18100) are deliberately NOT listed.
  *  4: PMGR_SOC_CLUSTER_CTL (reg 28, RegMap selector 98, 0x300780000; reg 37 repeats the
  *     same range, and /arm-io/mcc reg[0] panic-save is the same physical page, which
- *     no model here owns) +0x0 and +0x4, two registers. ApplePMGR's start calls vtable slot
+ *     no model here owns) +0x0..+0x10, five registers (ADT ids 0..4). ApplePMGR's start calls vtable slot
  *     0x590 (AppleT8140PMGR wrapper 0xfffffff009847d84, then slot 0x9f0) which reaches
  *     the cluster power routine at 0xfffffff009847bf0 with index 0 and enable 1: it
  *     reads the register (readPMGRSOCClusterCtlReg, 0xfffffff0092b09f8), writes it back
@@ -322,7 +322,11 @@ static const FixedWindow fixed_windows[] = {
     {34, 0x18200, 0x80, 0, {0}},
     {34, 0x18300, 0x80, 0, {0}},
     {34, 0x18400, 0x400, 0, {0}},
-    {28, 0x0, 0x8, 0, {0}},
+    /* Five ADT soc-clusters, indexed 0..4. ApplePMGR 0x92b57b0 computes
+     * base + 4*cluster, RMWs the low nibble, then polls bit 4 clear. The
+     * retained v14 guest witnesses cluster 2 (+8), caller 0x92b57e8.
+     * Zero-reset storage retains the existing immediate/no-busy profile. */
+    {28, 0x0, 0x14, 0, {0}},
     {22, 0x0, 0x4, 0, {0}},
     {22, 0x40, 0x4, 0, {0}},
     DPE_CHANNEL(0), DPE_CHANNEL(1), DPE_CHANNEL(2), DPE_CHANNEL(3), DPE_CHANNEL(4),
@@ -336,6 +340,39 @@ static const FixedWindow fixed_windows[] = {
     {22, 0xc8c, 0x48, 2, {0, 0x44}},        /* PwrGate +0xc8c and +0xcd0 (hook table 2) */
     {25, 0x400, 0x3e4, 2, {0, 0x3e0}},      /* PMGR_SOC_TVM index 0xb: control +0x400, status +0x7e0 */
 };
+
+/* AppleT8140PMGR slot0xb88 (0x984a4cc) restores ACC accounting
+ * counters, NOT power votes. Kinds0/1 have 8/18 qwords at +400/+500;
+ * kinds10/11 (bound57) form the union +680..+84f; kinds20/21 add
+ * the extended ranges below. Captured at the generic 64-bit store:
+ * selector9, offset400, value0, caller0x92aa10c (v23). No event
+ * producer is attached; like the other counters these are plain storage.
+ * Append after the existing groups/windows to preserve their identities. */
+#define ACC_COUNTER_TAG_BASE 0x200
+static const FixedWindow acc_counter_windows[] = {
+    {5, 0x400, 0x40, 0, {0}}, {5, 0x500, 0x40, 0, {0}},
+    {5, 0x680, 0x1d0, 0, {0}}, {5, 0x10e8, 0x40, 0, {0}},
+    {5, 0x11e8, 0x40, 0, {0}},
+    {14, 0x400, 0x90, 0, {0}}, {14, 0x500, 0x90, 0, {0}},
+    {14, 0x680, 0x1d0, 0, {0}}, {14, 0x11e8, 0x90, 0, {0}},
+    /* Slotsbc8/bd0: per-core counter pairs9000/9008 (table0x77b2038).
+     * CPU0's pair is already inside the board's cpu-impl-reg RAM.
+     * Slotsbd8/be0: cluster pair8000/8008; E is already inside cpm-impl
+     * RAM. List only the five other cores and the P cluster here. */
+    {11, 0x9000, 0x10, 0, {0}}, {12, 0x9000, 0x10, 0, {0}},
+    {13, 0x9000, 0x10, 0, {0}}, {19, 0x9000, 0x10, 0, {0}},
+    {20, 0x9000, 0x10, 0, {0}}, {16, 0x8000, 0x10, 0, {0}},
+};
+static const uint64_t acc_counter_banks[] = {
+    UINT64_C(0x210e20000), UINT64_C(0x210e20000), UINT64_C(0x210e20000),
+    UINT64_C(0x210e20000), UINT64_C(0x210e20000),
+    UINT64_C(0x211e20000), UINT64_C(0x211e20000), UINT64_C(0x211e20000),
+    UINT64_C(0x211e20000),
+    UINT64_C(0x210150000), UINT64_C(0x210250000), UINT64_C(0x210350000),
+    UINT64_C(0x211050000), UINT64_C(0x211150000), UINT64_C(0x211e40000),
+};
+_Static_assert(ARRAY_ENTRIES(acc_counter_banks) == ARRAY_ENTRIES(acc_counter_windows),
+               "ACC register windows require matched bank addresses");
 
 /* Block bases of the T8140 PS-write hook table (see item 23-32 above), in table order. The window
  * of block b is the register pair at b + 0x104 and b + 0x108; each must lie inside the /arm-io
@@ -449,6 +486,10 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
     }
     for (unsigned i = 0; i < SOC_CLUSTERS; i++) {
         const uint8_t *c = clusters.data + SOC_CLUSTER_RECORD * i;
+        if (c[0] != i) {
+            error_setg(errp, "PMGR cluster-control profile requires cluster ids 0..4");
+            return false;
+        }
         bool selects = (c[2] & 4) && (c[0xb] & 0xfe) != 4;
         if (selects != (i == SOC_CLUSTER_AVE) || (selects && c[0xb] != 0xb)) {
             error_setg(errp, "PMGR soc-clusters record %u selects a TVM the window does not list", i);
@@ -477,14 +518,17 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
             return false;
         }
     }
-    /* Second loop of the start routine: each programmed group's own register. */
+    /* Group controls, also used by the later counter-enable routine. */
     for (unsigned i = 0; i < group_count; i++) {
-        if ((groups[i].flags & GROUP_PROGRAMMED) &&
-            !mark(groups, group_count, reg, i, 0, errp)) {
+        if (!mark(groups, group_count, reg, i, 0, errp)) {
             return false;
         }
     }
-    /* First loop: every counter whose group is programmed. */
+    /* init programming plus the later enable loop at 0x92b84d0. For each
+     * non-event counter, 0x92cadb0 writes two 32-bit data words at
+     * group.base + counter.offset + group.data_offset, then +4. T8140's
+     * original ADT names the registers; v15 measures group1+0x110 first.
+     * They remain declared zero-reset storage, without counting events. */
     for (unsigned i = 0; i < counter_count; i++) {
         const uint8_t *c = counters.data + COUNTER_RECORD * i;
         unsigned type = c[0], group = c[4];
@@ -492,9 +536,6 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
             error_setg(errp, "PMGR perf counter %u names group %u of %u", i, group,
                        group_count);
             return false;
-        }
-        if (!(groups[group].flags & GROUP_PROGRAMMED)) {
-            continue;
         }
         if (type == 3) {
             continue;
@@ -504,12 +545,28 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
                        i, type);
             return false;
         }
-        if (!mark(groups, group_count, reg, group, le32(c + 8), errp)) {
+        uint64_t offset = le32(c + 8);
+        uint64_t data_offset = le32(groups_blob.data + GROUP_RECORD * group + 12);
+        if (!mark(groups, group_count, reg, group, offset, errp) ||
+            !mark(groups, group_count, reg, group, offset + data_offset, errp) ||
+            !mark(groups, group_count, reg, group, offset + data_offset + 4, errp)) {
             return false;
         }
-        if (type == 1 && (c[1] & 2) &&
-            !mark(groups, group_count, reg, c[5], le32(c + 12), errp)) {
-            return false;
+        /* Initialization uses flag bit1; the later enable path at
+         * 0x92b85dc also writes the second data value for flags==1. */
+        if (type == 1 && ((c[1] & 2) || c[1] == 1)) {
+            unsigned second = c[5];
+            if (second >= group_count) {
+                error_setg(errp, "PMGR secondary counter group is missing");
+                return false;
+            }
+            offset = le32(c + 12);
+            data_offset = le32(groups_blob.data + GROUP_RECORD * second + 12);
+            if (!mark(groups, group_count, reg, second, offset, errp) ||
+                !mark(groups, group_count, reg, second, offset + data_offset, errp) ||
+                !mark(groups, group_count, reg, second, offset + data_offset + 4, errp)) {
+                return false;
+            }
         }
     }
     for (unsigned i = 0; i < group_count; i++) {
@@ -570,6 +627,43 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
         if (!place(&plan, acg_blocks[i] + ACG_OFFSET, ACG_SIZE,
                    FIXED_TAG_BASE + ARRAY_ENTRIES(fixed_windows) + i, valid,
                    dram_base, dram_size, exclusions, exclusion_count, errp)) {
+            return false;
+        }
+    }
+    /* Keep the prior programmed-group/fixed-window identities stable and
+     * append the other ADT counter groups. Accept no unlisted holes. */
+    for (unsigned i = 0; i < group_count; i++) {
+        uint64_t base;
+        if (groups[i].flags & GROUP_PROGRAMMED) {
+            continue;
+        }
+        if (!translate(ranges, le64(reg.data + 16 * groups[i].reg_index),
+                       le64(reg.data + 16 * groups[i].reg_index + 8), &base) ||
+            base > UINT64_MAX - groups[i].base) {
+            error_setg(errp, "PMGR counter group translation failed");
+            return false;
+        }
+        if (!place(&plan, base + groups[i].base, groups[i].end, i, groups[i].valid,
+                   dram_base, dram_size, exclusions, exclusion_count, errp)) {
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < ARRAY_ENTRIES(acc_counter_windows); i++) {
+        const FixedWindow *f = &acc_counter_windows[i];
+        uint64_t base, valid[APPLE_MODERN_PMGR_STORAGE_MASKS] = {0};
+        uint64_t size = le64(reg.data + 16 * f->reg_index + 8);
+        uint64_t expected = acc_counter_banks[i];
+        if (size < f->offset + f->size ||
+            !translate(ranges, le64(reg.data + 16 * f->reg_index), size, &base) ||
+            base != expected) {
+            error_setg(errp, "ACC accounting-counter range is outside matched PWRCTL");
+            return false;
+        }
+        for (unsigned word = 0; word < f->size / 4; word++) {
+            valid[word / 64] |= UINT64_C(1) << (word % 64);
+        }
+        if (!place(&plan, base + f->offset, f->size, ACC_COUNTER_TAG_BASE + i,
+                   valid, dram_base, dram_size, exclusions, exclusion_count, errp)) {
             return false;
         }
     }
@@ -670,6 +764,7 @@ typedef struct StorageView {
 } StorageView;
 struct AppleModernPMGRStorageState {
     SysBusDevice parent_obj;
+    bool mapped;
     AppleModernPMGRStorageCore core;
     StorageView views[APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS];
     MemoryRegion regions[APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS];
@@ -742,6 +837,10 @@ static void storage_reset(DeviceState *dev)
 static void storage_realize(DeviceState *dev, Error **errp)
 {
     AppleModernPMGRStorageState *s = APPLE_MODERN_PMGR_STORAGE(dev);
+    if (!s->core.plan.count || s->core.plan.count > APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS) {
+        error_setg(errp, "invalid PMGR storage window count");
+        return;
+    }
     for (unsigned i = 0; i < s->core.plan.count; i++) {
         char name[48];
         s->views[i] = (StorageView){&s->core, i, s->rejected[i]};
@@ -749,8 +848,33 @@ static void storage_realize(DeviceState *dev, Error **errp)
                  s->core.plan.windows[i].group);
         memory_region_init_io(&s->regions[i], OBJECT(dev), &storage_ops, &s->views[i],
                               name, s->core.plan.windows[i].size);
-        sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->regions[i]);
     }
+}
+bool apple_modern_pmgr_storage_map(DeviceState *dev, MemoryRegion *memory,
+                                   Error **errp)
+{
+    AppleModernPMGRStorageState *s = APPLE_MODERN_PMGR_STORAGE(dev);
+    if (!dev->realized || s->mapped || !memory) {
+        error_setg(errp, "PMGR storage must be realized and mapped exactly once");
+        return false;
+    }
+    /* A valid plan can contain more than QDEV_MAX_MMIO (32) windows. Calling
+     * sysbus_init_mmio for each used to overrun its fixed array in NDEBUG
+     * builds. Map only these validated, disjoint ranges, not a catch-all. */
+    for (unsigned i = 0; i < s->core.plan.count; i++) {
+        memory_region_add_subregion(memory, s->core.plan.windows[i].address,
+                                    &s->regions[i]);
+    }
+    s->mapped = true;
+    return true;
+}
+static void get_mapping_counter(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    AppleModernPMGRStorageState *s = APPLE_MODERN_PMGR_STORAGE(obj);
+    uint64_t value = opaque ? SYS_BUS_DEVICE(s)->num_mmio :
+                             (s->mapped ? s->core.plan.count : 0);
+    visit_type_uint64(v, name, &value, errp);
 }
 static void get_counter(Object *obj, Visitor *v, const char *name, void *opaque,
                         Error **errp)
@@ -773,6 +897,10 @@ static void storage_class_init(ObjectClass *oc, const void *data)
         (void *)offsetof(AppleModernPMGRStorageCore, reads));
     object_class_property_add(oc, "mmio-write-count", "uint64", get_counter, NULL, NULL,
         (void *)offsetof(AppleModernPMGRStorageCore, writes));
+    object_class_property_add(oc, "mapped-window-count", "uint64", get_mapping_counter,
+                              NULL, NULL, NULL);
+    object_class_property_add(oc, "sysbus-mmio-count", "uint64", get_mapping_counter,
+                              NULL, NULL, (void *)1);
 }
 DeviceState *apple_modern_pmgr_storage_new(const AppleModernPMGRStoragePlan *plan)
 {

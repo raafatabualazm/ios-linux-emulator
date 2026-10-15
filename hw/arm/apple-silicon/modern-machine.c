@@ -1450,8 +1450,8 @@ static bool map_pmgr_storage(AppleModernMachine *s, uint64_t uart,
     dev->id = g_strdup("pmgr-storage");
     object_property_add_child(OBJECT(s), "pmgr-storage", OBJECT(dev));
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
-    for (unsigned i = 0; i < plan.count; i++) {
-        sysbus_mmio_map(SYS_BUS_DEVICE(dev), i, plan.windows[i].address);
+    if (!apple_modern_pmgr_storage_map(dev, get_system_memory(), errp)) {
+        return false;
     }
     s->pmgr_storage_plan = plan;
     warn_report("apple-modern: opt-in PMGR perf-counter register storage (%u windows, "

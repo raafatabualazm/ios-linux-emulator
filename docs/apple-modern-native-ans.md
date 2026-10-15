@@ -62,3 +62,20 @@ Protocol provenance is the retained, hash-pinned AP/PMP disassembly in
 workspace level. `test-apple-modern-pmp-command-qemu.py` checks default-off and
 quiet behavior with real ARM64 loads/stores across reset. It also requires
 PMP-status and quota-response slots to remain zero.
+
+## PMGR accounting register continuation
+
+The native-storage lane also extends the existing opt-in PMGR storage profile
+with the five ADT cluster-control registers, the original ADT's non-event counter
+control/data words and the bounded ACC accounting ranges recovered from
+AppleT8140PMGR slot0xb88. These are zero-reset storage without event producers.
+They do not enforce voltage, frequency or thermal policy.
+
+The wrapper maps validated sparse MemoryRegions directly. More than32 windows
+must never be passed to sysbus_init_mmio: SysBusDevice has a fixed32-entry array,
+and NDEBUG hides its overflow assertion. The actual CPU gate caught that old
+wrapper defect and now checks all56 mapped regions and zero SysBus slots across
+reset. The ACC accounting-enable register at +0x178 in each cluster accepts the
+recovered 64-bit read-modify-write without generating hardware events. Missing
+words, holes and window boundaries still fault. Core and CPU
+qualification is recorded under the workspace native-storage evidence directory.

@@ -309,13 +309,13 @@ static void dvfm_core(void)
 static void dvfm_control_page(void)
 {
     static AppleModernDVFMCore core, before;
-    static const uint64_t e_regs[] = {0xa8, 0xd0};
-    static const uint64_t p_regs[] = {0xa8, 0xb0, 0xd0, 0xd8};
+    static const uint64_t e_regs[] = {0xa8, 0xd0, 0x178};
+    static const uint64_t p_regs[] = {0xa8, 0xb0, 0xd0, 0xd8, 0x178};
     uint64_t v = 0x55, accepted[2] = {0, 0};
     apple_modern_cpu_dvfm_core_reset(&core);
     for (unsigned w = 2; w < 4; w++) {
         const uint64_t *regs = w == 2 ? e_regs : p_regs;
-        unsigned count = w == 2 ? 2 : 4;
+        unsigned count = w == 2 ? 3 : 5;
         for (uint64_t off = 0; off < APPLE_MODERN_DVFM_SPAN; off += 4) {
             bool listed = false;
             for (unsigned r = 0; r < count; r++) {
@@ -339,26 +339,38 @@ static void dvfm_control_page(void)
             }
         }
     }
-    CHECK(accepted[0] == 2 && accepted[1] == 4);
-    /* Listed registers are 64-bit and read-only: 4-byte reads (either half) and
-     * every write fault, and the registers stay zero. */
+    CHECK(accepted[0] == 3 && accepted[1] == 5);
+    /* All listed registers require 64-bit accesses; descriptor registers are
+     * read-only, while the accounting-enable register also accepts writes. */
     before = core;
     for (unsigned w = 2; w < 4; w++) {
         const uint64_t *regs = w == 2 ? e_regs : p_regs;
-        unsigned count = w == 2 ? 2 : 4;
+        unsigned count = w == 2 ? 3 : 5;
         for (unsigned r = 0; r < count; r++) {
             v = 0x55;
             CHECK(!apple_modern_cpu_dvfm_core_read(&core, w, regs[r], 4, &v) && v == 0x55);
             CHECK(!apple_modern_cpu_dvfm_core_read(&core, w, regs[r] + 4, 4, &v) && v == 0x55);
-            CHECK(!apple_modern_cpu_dvfm_core_write(&core, w, regs[r], 8, 0x1f));
+            if (regs[r] != 0x178) {
+                CHECK(!apple_modern_cpu_dvfm_core_write(&core, w, regs[r], 8, 0x1f));
+            }
             CHECK(!apple_modern_cpu_dvfm_core_write(&core, w, regs[r], 4, 0x1f));
             CHECK(!apple_modern_cpu_dvfm_core_write(&core, w, regs[r] + 4, 4, 0x1f));
             CHECK(apple_modern_cpu_dvfm_core_read(&core, w, regs[r], 8, &v) && !v);
         }
     }
-    CHECK(core.reads == before.reads + 6 && core.writes == before.writes &&
+    CHECK(core.reads == before.reads + 8 && core.writes == before.writes &&
           !memcmp(core.words, before.words, sizeof(core.words)) &&
           !memcmp(core.touched, before.touched, sizeof(core.touched)));
+    /* Recovered accounting-enable RMW: exact top-bit pattern, no counting. */
+    for (unsigned w = 2; w < 4; w++) {
+        CHECK(apple_modern_cpu_dvfm_core_read(&core, w, 0x178, 8, &v) && !v);
+        CHECK(apple_modern_cpu_dvfm_core_write(&core, w, 0x178, 8,
+                                             UINT64_C(0xa800000000000000)));
+        CHECK(apple_modern_cpu_dvfm_core_read(&core, w, 0x178, 8, &v) &&
+              v == UINT64_C(0xa800000000000000));
+        CHECK(apple_modern_cpu_dvfm_core_write(&core, w, 0x178, 8, 0));
+        CHECK(apple_modern_cpu_dvfm_core_read(&core, w, 0x178, 8, &v) && !v);
+    }
     /* Registers are specific to the cluster: P's +0xb0/+0xd8 do not exist in E. */
     CHECK(!apple_modern_cpu_dvfm_core_read(&core, 2, 0xb0, 8, &v));
     CHECK(!apple_modern_cpu_dvfm_core_read(&core, 2, 0xd8, 8, &v));
