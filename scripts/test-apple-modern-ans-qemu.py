@@ -72,7 +72,10 @@ class ROM(mb.ROM):
   self.mov(20,RESULT);self.mov(0,mb.NORMAL_SP);self.emit(0x9100001f)
   self.emit(0xd5034fdf) # DAIF masked; actual CPU polls MMIO and DMA
   self.check('boot_not_ready_before_rtkit',BAR+0x1300,0)
+  self.write32(mb.AIC_BASE+mb.GLBCFG,1);self.unmask(1010)
   self.write32(WRAP+0x8114,1);self.write32(WRAP+0x44,16)
+  self.read32(mb.AIC_BASE+mb.EVENT,23)
+  self.trace('rtkit_hello_irq_event',mb.EVENT_IRQ|1010,register=23)
   self.receive('rtkit_hello',0x100000000c0003)
   self.send(0x200000000c000c)
   self.receive('rtkit_endpoint_map',0x88000000000003)
@@ -163,44 +166,56 @@ def run_case(binary,assets,out,backing,mode):
     require('non-migratable' in str(e),'migration fails for device state')
     report['migration_rejection']=str(e)
    else:raise RuntimeError('unsupported migration admitted')
-   with tempfile.TemporaryDirectory(prefix='ans-prelaunch-') as temp:
-    target=Path(temp)/'verify'
-    for pa,expected in [(BASE,raw),(RESULT,bytes(4096)),(DMA,bytes(data))]:
-     qmp.request('pmemsave',{'val':pa,'size':len(expected),'filename':str(target)})
-     require(target.read_bytes()==expected,'exact owned prelaunch CPU/DMA/result bytes')
-   report['owned_prelaunch_bytes_verified']=True
-   qmp.request('cont')
-   with tempfile.TemporaryDirectory(prefix='owned-ans-') as temp:
-    target=Path(temp)/'results'
-    while True:
-     guard();time.sleep(.1)
-     qmp.request('stop');qmp.request('pmemsave',{'val':RESULT,'size':4096,'filename':str(target)})
-     result=target.read_bytes();(out/'results.bin').write_bytes(result)
-     values=list(struct.unpack_from('<'+'Q'*len(rom.expected),result))
-     progress=struct.unpack_from('<Q',result,0xf00)[0]
-     require(progress<=len(rom.expected),'CPU progress bound')
-     for (k,expected),got in zip(list(rom.expected.items())[:progress],values):
-      if expected is None:require(got>>17!=0,'negative NVMe completion '+k)
-      else:require(got==expected,'CPU mismatch '+k+': '+hex(got)+' != '+hex(expected))
-     if values[-1]==DONE:break
-     report['last_values']=dict(zip(rom.expected,values))
-     report['last_registers']=qmp.request('human-monitor-command',{'command-line':'info registers'})
-     qmp.request('cont')
-    got=dict(zip(rom.expected,values));report['cpu_checks']=got
-    for k,expected in rom.expected.items():
-     if expected is None: require(got[k]>>17!=0,'negative must report NVMe error: '+k)
-     else:require(got[k]==expected,'CPU mismatch '+k+': '+hex(got[k])+' != '+hex(expected))
-    qmp.request('pmemsave',{'val':RX,'size':8192,'filename':str(target)})
-    require(target.read_bytes()==PATTERN*2,'every data byte read by controller')
-    report['readback_sha256']=hashlib.sha256(target.read_bytes()).hexdigest()
-   report['counters']={k:qmp.request('qom-get',{'path':'/machine/ans','property':k}) for k in
-    ['mmio-read-count','mmio-write-count','submission-count','rejected-count','crypto-rejected-count']}
-   require(report['counters']['crypto-rejected-count']==1,'crypto reject observed')
-   require(report['counters']['rejected-count']>=2,'duplicate and crypto refusals observed')
-   expected=bytearray(65536);expected[3*4096:4*4096]=PATTERN
-   expected[7*4096:9*4096]=PATTERN*2
-   require(backing.read_bytes()==expected,'only intended block persisted; negatives unchanged')
-   report['backing_sha256_at_flush']=sha(backing)
+   report['passes']=[]
+   for iteration in range(2 if mode=='reset' else 1):
+    with tempfile.TemporaryDirectory(prefix='ans-prelaunch-') as temp:
+     target=Path(temp)/'verify'
+     for pa,expected in [(BASE,raw),(RESULT,bytes(4096)),(DMA,bytes(data))]:
+      qmp.request('pmemsave',{'val':pa,'size':len(expected),'filename':str(target)})
+      require(target.read_bytes()==expected,'exact owned prelaunch CPU/DMA/result bytes')
+    report['owned_prelaunch_bytes_verified']=True
+    qmp.request('cont')
+    with tempfile.TemporaryDirectory(prefix='owned-ans-') as temp:
+     target=Path(temp)/'results'
+     while True:
+      guard();time.sleep(.1)
+      qmp.request('stop');qmp.request('pmemsave',{'val':RESULT,'size':4096,'filename':str(target)})
+      result=target.read_bytes();(out/'results.bin').write_bytes(result)
+      values=list(struct.unpack_from('<'+'Q'*len(rom.expected),result))
+      progress=struct.unpack_from('<Q',result,0xf00)[0]
+      require(progress<=len(rom.expected),'CPU progress bound')
+      for (k,expected),got in zip(list(rom.expected.items())[:progress],values):
+       if expected is None:require(got>>17!=0,'negative NVMe completion '+k)
+       else:require(got==expected,'CPU mismatch '+k+': '+hex(got)+' != '+hex(expected))
+      if values[-1]==DONE:break
+      report['last_values']=dict(zip(rom.expected,values))
+      report['last_registers']=qmp.request('human-monitor-command',{'command-line':'info registers'})
+      qmp.request('cont')
+     got=dict(zip(rom.expected,values));report['cpu_checks']=got
+     for k,expected in rom.expected.items():
+      if expected is None: require(got[k]>>17!=0,'negative must report NVMe error: '+k)
+      else:require(got[k]==expected,'CPU mismatch '+k+': '+hex(got[k])+' != '+hex(expected))
+     qmp.request('pmemsave',{'val':RX,'size':8192,'filename':str(target)})
+     require(target.read_bytes()==PATTERN*2,'every data byte read by controller')
+     report['readback_sha256']=hashlib.sha256(target.read_bytes()).hexdigest()
+    report['counters']={k:qmp.request('qom-get',{'path':'/machine/ans','property':k}) for k in
+     ['mmio-read-count','mmio-write-count','submission-count','rejected-count','crypto-rejected-count']}
+    require(report['counters']['crypto-rejected-count']==1,'crypto reject observed')
+    require(report['counters']['rejected-count']>=2,'duplicate and crypto refusals observed')
+    expected=bytearray(65536);expected[3*4096:4*4096]=PATTERN
+    expected[7*4096:9*4096]=PATTERN*2
+    require(backing.read_bytes()==expected,'only intended block persisted; negatives unchanged')
+    report['backing_sha256_at_flush']=sha(backing)
+    report['passes'].append({'iteration':iteration,'cpu_checks':got,
+     'readback_sha256':report['readback_sha256'],'counters':report['counters'],
+     'backing_sha256':report['backing_sha256_at_flush']})
+    (out/f'results-pass{iteration}.bin').write_bytes(result)
+    if mode=='reset' and iteration==0:
+     qmp.request('system_reset')
+     require(qmp.request('query-status')['running'] is False,'reset remains stopped')
+     reset={k:qmp.request('qom-get',{'path':'/machine/ans','property':k}) for k in report['counters']}
+     require(all(v==0 for v in reset.values()),'controller diagnostics reset')
+     report['reset_counters']=reset
    if mode=='write':
     require(p.poll() is None,'owned child alive before deliberate process crash')
     require(Path(f'/proc/{p.pid}/stat').read_text().rsplit(')',1)[1].split()[19]==report['start_ticks'],'owned child identity')
@@ -234,7 +249,7 @@ def main():
  for lo,size in layout['regions'].values():require(DMA+0x20000<=lo or BASE>=lo+size,'owned buffers outside boot assets')
  backing=out/'persistent.raw';backing.write_bytes(bytes(65536))
  rows=[]
- for mode in ['write','recovery','readonly']:rows.append(run_case(a.binary.resolve(),assets,out/mode,backing,mode))
+ for mode in ['write','recovery','readonly','reset']:rows.append(run_case(a.binary.resolve(),assets,out/mode,backing,mode))
  require(rows[0]['pid']!=rows[1]['pid'],'fresh process recovery')
  require(rows[0]['backing_sha256_after_close']==rows[1]['backing_sha256_after_close']==rows[2]['backing_sha256_after_close'],'stable backend recovery')
  (out/'report.json').write_text(json.dumps({'passed':True,'cases':[{'mode':r['mode'],'pid':r['pid'],'passed':r['passed']} for r in rows],

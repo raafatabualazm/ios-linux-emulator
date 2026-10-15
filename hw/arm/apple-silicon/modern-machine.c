@@ -1165,8 +1165,8 @@ static bool map_pmp_ptd(AppleModernMachine *s, uint64_t uart,
     s->pmp_ptd_plan = plan;
     warn_report("apple-modern: opt-in PMP PTD message board (MCC reg[6] Dashboard, "
                 "reg[7] Update); Update stores mirror into the Dashboard "
-                "(declared); no PMP responder: no acknowledgement or response "
-                "is ever produced");
+                "(declared); optional quiet command-responder acknowledges "
+                "receipt only; no PMP power or quota firmware is executed");
     return true;
 }
 

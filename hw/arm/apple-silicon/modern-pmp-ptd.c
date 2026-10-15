@@ -11,6 +11,8 @@
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/module.h"
+#include "hw/qdev-properties.h"
+#include "qemu/error-report.h"
 #include "migration/vmstate.h"
 #endif
 #include "hw/arm/apple-silicon/modern-pmp-ptd.h"
@@ -164,6 +166,9 @@ void apple_modern_pmp_ptd_core_reset(AppleModernPTDCore *core)
     memset(core->meta, 0, sizeof(core->meta));
     memset(core->hidden, 0, sizeof(core->hidden));
     core->reads = core->writes = 0;
+    core->command_count = core->ack_count = 0;
+    core->command_word0 = core->command_word1 = 0;
+    core->command_responder = false;
 }
 
 bool apple_modern_pmp_ptd_core_read(AppleModernPTDCore *core, unsigned view,
@@ -194,6 +199,21 @@ bool apple_modern_pmp_ptd_core_write(AppleModernPTDCore *core, unsigned view,
         core->hidden[slot - APPLE_MODERN_PTD_ENTRIES] = value;
     }
     increment(&core->writes);
+    if (slot == 432) {
+        uint64_t sequence = value & 0xfff;
+        increment(&core->command_count);
+        core->command_word0 = value;
+        core->command_word1 = core->msg[433];
+        if (core->command_responder && sequence) {
+            /* Firmware: command at 432 commits word1 from 433; publish
+             * response words first, then the sequence ack (fw 0x1012844).
+             * Profile Q publishes no grants, so there are no preceding
+             * response writes. Do not confuse this receipt with PMP ready. */
+            core->msg[448] = sequence;
+            core->meta[448] = 2;
+            increment(&core->ack_count);
+        }
+    }
     return true;
 }
 
@@ -204,6 +224,7 @@ typedef struct PTDView {
 } PTDView;
 struct AppleModernPTDState {
     SysBusDevice parent_obj;
+    bool command_responder;
     AppleModernPTDCore core;
     PTDView views[APPLE_MODERN_PTD_VIEWS];
     MemoryRegion regions[APPLE_MODERN_PTD_VIEWS];
@@ -230,11 +251,18 @@ static const MemoryRegionOps ptd_ops = {
 };
 static void ptd_reset(DeviceState *dev)
 {
-    apple_modern_pmp_ptd_core_reset(&APPLE_MODERN_PMP_PTD(dev)->core);
+    AppleModernPTDState *s = APPLE_MODERN_PMP_PTD(dev);
+    apple_modern_pmp_ptd_core_reset(&s->core);
+    s->core.command_responder = s->command_responder;
 }
 static void ptd_realize(DeviceState *dev, Error **errp)
 {
     AppleModernPTDState *s = APPLE_MODERN_PMP_PTD(dev);
+    s->core.command_responder = s->command_responder;
+    if (s->command_responder) {
+        warn_report("PMP PTD: declared quiet command responder; receipt ack only, "
+                    "no PMP online status, quota allocation or power sequencing");
+    }
     for (unsigned i = 0; i < APPLE_MODERN_PTD_VIEWS; i++) {
         s->views[i] = (PTDView){&s->core, i};
         memory_region_init_io(&s->regions[i], OBJECT(dev), &ptd_ops, &s->views[i],
@@ -254,6 +282,10 @@ static void get_counter(Object *obj, Visitor *v, const char *name, void *opaque,
 static const VMStateDescription ptd_unmigratable = {
     .name = TYPE_APPLE_MODERN_PMP_PTD, .unmigratable = 1,
 };
+static const Property ptd_properties[] = {
+    DEFINE_PROP_BOOL("command-responder", AppleModernPTDState,
+                     command_responder, false),
+};
 static void ptd_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -261,10 +293,18 @@ static void ptd_class_init(ObjectClass *oc, const void *data)
     dc->vmsd = &ptd_unmigratable;
     dc->user_creatable = false;
     device_class_set_legacy_reset(dc, ptd_reset);
+    device_class_set_props(dc, ptd_properties);
     object_class_property_add(oc, "mmio-read-count", "uint64", get_counter, NULL, NULL,
         (void *)offsetof(AppleModernPTDCore, reads));
     object_class_property_add(oc, "mmio-write-count", "uint64", get_counter, NULL, NULL,
         (void *)offsetof(AppleModernPTDCore, writes));
+#define OBSERVE(name, field) object_class_property_add(oc, name, "uint64", \
+    get_counter, NULL, NULL, (void *)offsetof(AppleModernPTDCore, field))
+    OBSERVE("command-count", command_count);
+    OBSERVE("ack-count", ack_count);
+    OBSERVE("command-word0", command_word0);
+    OBSERVE("command-word1", command_word1);
+#undef OBSERVE
 }
 DeviceState *apple_modern_pmp_ptd_new(void)
 {
