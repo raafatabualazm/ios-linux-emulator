@@ -28,6 +28,9 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "system/system.h"
+#include "hw/core/cpu.h"
+#include "qemu/bswap.h"
 
 #include "hw/char/apple_uart.h"
 #include "hw/irq.h"
@@ -142,6 +145,193 @@ typedef struct {
 #define TYPE_APPLE_UART "apple-uart"
 OBJECT_DECLARE_SIMPLE_TYPE(AppleUartState, APPLE_UART)
 
+
+/* ---------------------------------------------------------------------------
+ * PROBE (scratch instrumentation, observation only). Bounded counters plus
+ * bounded log lines through qemu_log_mask(LOG_UNIMP, ...).
+ * ------------------------------------------------------------------------- */
+#define PROBE_NREG (APPLE_UART_REGS_MEM_SIZE / sizeof(uint32_t))
+#define PROBE_DISTINCT 16
+
+typedef struct ProbeVal {
+    uint32_t val;
+    uint64_t n;
+} ProbeVal;
+
+#define PROBE_SITES 64
+typedef struct ProbeSite {
+    uint8_t reg;
+    bool wr;
+    uint64_t pc, lr, n, v_or;
+    uint32_t v_first;
+} ProbeSite;
+
+typedef struct AppleUartProbe {
+    ProbeSite sites[PROBE_SITES];
+    unsigned nsites;
+    uint64_t sites_over;
+    Notifier exit_notifier;
+    uint64_t rd[PROBE_NREG], wr[PROBE_NREG];
+    ProbeVal rv[PROBE_NREG][PROBE_DISTINCT];
+    ProbeVal wv[PROBE_NREG][PROBE_DISTINCT];
+    unsigned nrv[PROBE_NREG], nwv[PROBE_NREG];
+    uint64_t rv_over[PROBE_NREG], wv_over[PROBE_NREG];
+
+    /* UCON as the guest attempted to write it (the model drops it) */
+    uint64_t ucon_writes, ucon_reads;
+    uint32_t ucon_or, ucon_last;
+    bool ucon_seen;
+    uint64_t ucon_bit[32];
+    uint64_t ucon_tx_ena, ucon_rx_ena, ucon_rxto_ena;
+
+    /* interrupt line, as driven by apple_uart_update_irq() */
+    bool line;
+    uint64_t raise, lower, update_calls, update_calls_by_cause[8];
+    uint64_t raise_by_cause[8], lower_by_cause[8];
+    const char *cause;
+    int cause_idx;
+
+    /* receive path */
+    uint64_t rx_calls, rx_bytes, rx_dropped, rx_nofifo, rx_while_line_high;
+    uint64_t pops, empty_pops, nofifo_urxh, drains, drains_line_high;
+    uint64_t timeouts, resets;
+
+    /* stale line: FIFO drained by a URXH read while the line was left high */
+    bool stale;
+    uint64_t stale_t0_us, stale_acc;
+    uint64_t stale_eps, stale_end_lower, stale_end_rx;
+    uint64_t stale_us_total, stale_us_max, stale_acc_total, stale_acc_max;
+    uint64_t stale_acc_rd[PROBE_NREG], stale_acc_wr[PROBE_NREG];
+    uint64_t stale_end_by_cause[8];
+
+    /* per-episode accounting: one episode = line high from RAISE to lower */
+    uint64_t ep_t0, ep_drain_t, ep_base_data, ep_base_stale, ep_base_low;
+    bool ep_open;
+    uint64_t ep_n, ep_data_sum, ep_stale_sum, ep_total_max, ep_data_max;
+    uint64_t ep_hist[8]; /* total acks in episode: 0,1,2,3-5,6-10,11-20,21-50,51+ */
+    uint64_t ep_dur_max_us, ep_drain_lat_sum_us, ep_drain_lat_max_us;
+    unsigned lb_ep;
+
+    /* what-if switches, from the environment at realize time */
+    bool sw_suppress_irq, sw_store_ucon, sw_refresh_drain;
+    uint32_t sw_txfull_every, sw_txfull_burst;
+    uint64_t sw_ufstat_reads, sw_txfull_injected, sw_suppressed_raises;
+
+    /* log budgets */
+    unsigned lb_ucon, lb_wdist, lb_rdist, lb_rx, lb_pop, lb_line, lb_stale;
+    uint64_t last_tbpc;
+} AppleUartProbe;
+
+static const char *const probe_causes[] = {
+    "rx", "UTXH", "UTRSTAT", "UCON", "UERSTAT", "timeout", "drain", "other"
+};
+#define PC_RX 0
+#define PC_UTXH 1
+#define PC_UTRSTAT 2
+#define PC_UCON 3
+#define PC_UERSTAT 4
+#define PC_TIMEOUT 5
+#define PC_EVENT 6 /* named "drain" */
+#define PC_OTHER 7
+
+/* Phase of the console line, read by the AIC probe: 0 low, 1 data waiting in
+ * the RX FIFO, 2 FIFO drained but line still high (the "stale" window). */
+int probe_uart_phase;
+extern uint64_t probe_aic_ack_data, probe_aic_ack_stale, probe_aic_ack_low;
+
+static uint64_t probe_now_us(void)
+{
+    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000;
+}
+
+static uint64_t probe_tbpc(void)
+{
+    if (current_cpu) {
+        CPUClass *cc = CPU_GET_CLASS(current_cpu);
+
+        if (cc->get_pc) {
+            return cc->get_pc(current_cpu);
+        }
+    }
+    return 0;
+}
+
+static uint64_t probe_lr(void)
+{
+    uint64_t lr = 0;
+
+    if (current_cpu) {
+        CPUClass *cc = CPU_GET_CLASS(current_cpu);
+
+        if (cc->gdb_read_register) {
+            GByteArray *ba = g_byte_array_new();
+
+            if (cc->gdb_read_register(current_cpu, ba, 30) >= 8) {
+                lr = ldq_le_p(ba->data);
+            }
+            g_byte_array_free(ba, true);
+        }
+    }
+    return lr;
+}
+
+static void probe_site(AppleUartProbe *p, unsigned r, bool wr, uint64_t val)
+{
+    uint64_t pc = probe_tbpc(), lr = probe_lr();
+
+    for (unsigned i = 0; i < p->nsites; i++) {
+        ProbeSite *t = &p->sites[i];
+
+        if (t->reg == r && t->wr == wr && t->pc == pc && t->lr == lr) {
+            t->n++;
+            t->v_or |= val;
+            return;
+        }
+    }
+    if (p->nsites < PROBE_SITES) {
+        ProbeSite *t = &p->sites[p->nsites++];
+
+        t->reg = r;
+        t->wr = wr;
+        t->pc = pc;
+        t->lr = lr;
+        t->n = 1;
+        t->v_or = val;
+        t->v_first = (uint32_t)val;
+    } else {
+        p->sites_over++;
+    }
+}
+
+#define PLOG(s, budget, cap, fmt, ...) \
+    do { \
+        if ((s)->probe.budget < (cap)) { \
+            (s)->probe.budget++; \
+            qemu_log_mask(LOG_UNIMP, "uartprobe: t=%" PRIu64 "us " fmt "\n", \
+                          probe_now_us(), ##__VA_ARGS__); \
+        } \
+    } while (0)
+
+static void probe_note_val(ProbeVal *tab, unsigned *n, uint64_t *over,
+                           uint32_t v, bool *fresh)
+{
+    *fresh = false;
+    for (unsigned i = 0; i < *n; i++) {
+        if (tab[i].val == v) {
+            tab[i].n++;
+            return;
+        }
+    }
+    if (*n < PROBE_DISTINCT) {
+        tab[*n].val = v;
+        tab[*n].n = 1;
+        (*n)++;
+        *fresh = true;
+    } else {
+        (*over)++;
+    }
+}
+
 struct AppleUartState {
     SysBusDevice parent_obj;
 
@@ -162,6 +352,7 @@ struct AppleUartState {
 
     uint32_t channel;
     uint32_t last_irq;
+    AppleUartProbe probe;
 };
 
 
@@ -225,6 +416,264 @@ static uint32_t apple_uart_Rx_FIFO_trigger_level(const AppleUartState *s)
     return apple_uart_FIFO_trigger_level(s->channel, reg);
 }
 
+
+static void probe_stale_begin(AppleUartState *s, const char *how)
+{
+    AppleUartProbe *p = &s->probe;
+
+    p->stale = true;
+    p->stale_t0_us = probe_now_us();
+    p->stale_acc = 0;
+    p->stale_eps++;
+    PLOG(s, lb_stale, 120, "STALE begin ep=%" PRIu64 " (%s) fifo_used=%u "
+         "utrstat=0x%x line=%d", p->stale_eps, how, fifo8_num_used(&s->rx),
+         s->reg[I_(UTRSTAT)], p->line);
+}
+
+static void probe_stale_end(AppleUartState *s, const char *how, int cause_idx)
+{
+    AppleUartProbe *p = &s->probe;
+    uint64_t dur;
+
+    if (!p->stale) {
+        return;
+    }
+    p->stale = false;
+    dur = probe_now_us() - p->stale_t0_us;
+    p->stale_us_total += dur;
+    if (dur > p->stale_us_max) {
+        p->stale_us_max = dur;
+    }
+    p->stale_acc_total += p->stale_acc;
+    if (p->stale_acc > p->stale_acc_max) {
+        p->stale_acc_max = p->stale_acc;
+    }
+    p->stale_end_by_cause[cause_idx]++;
+    PLOG(s, lb_stale, 120, "STALE end ep=%" PRIu64 " by=%s duration=%" PRIu64
+         "us guest_uart_accesses_while_stale=%" PRIu64, p->stale_eps, how, dur,
+         p->stale_acc);
+}
+
+static void probe_summary(AppleUartState *s, const char *tag)
+{
+    AppleUartProbe *p = &s->probe;
+    static const char *const names[] = { "ULCON", "UCON", "UFCON", "UMCON",
+        "UTRSTAT", "UERSTAT", "UFSTAT", "UMSTAT", "UTXH", "URXH", "UBRDIV",
+        "UFRACVAL", "off0x30", "off0x34", "off0x38" };
+
+    qemu_log_mask(LOG_UNIMP, "uartprobe: SUMMARY[%s] t=%" PRIu64 "us ch%u\n",
+                  tag, probe_now_us(), s->channel);
+    for (unsigned r = 0; r < PROBE_NREG; r++) {
+        if (!p->rd[r] && !p->wr[r]) {
+            continue;
+        }
+        qemu_log_mask(LOG_UNIMP, "uartprobe:   %-8s reads=%" PRIu64
+                      " writes=%" PRIu64 "\n", names[r], p->rd[r], p->wr[r]);
+        for (unsigned i = 0; i < p->nrv[r]; i++) {
+            qemu_log_mask(LOG_UNIMP, "uartprobe:     read  0x%08x x%" PRIu64
+                          "\n", p->rv[r][i].val, p->rv[r][i].n);
+        }
+        if (p->rv_over[r]) {
+            qemu_log_mask(LOG_UNIMP, "uartprobe:     read  (other values) x%"
+                          PRIu64 "\n", p->rv_over[r]);
+        }
+        for (unsigned i = 0; i < p->nwv[r]; i++) {
+            qemu_log_mask(LOG_UNIMP, "uartprobe:     write 0x%08x x%" PRIu64
+                          "\n", p->wv[r][i].val, p->wv[r][i].n);
+        }
+        if (p->wv_over[r]) {
+            qemu_log_mask(LOG_UNIMP, "uartprobe:     write (other values) x%"
+                          PRIu64 "\n", p->wv_over[r]);
+        }
+    }
+    qemu_log_mask(LOG_UNIMP, "uartprobe:   UCON writes=%" PRIu64 " reads=%"
+                  PRIu64 " or_of_values=0x%x last=0x%x tx_thresh_ena(bit13)=%"
+                  PRIu64 " rx_thresh_ena(bit12)=%" PRIu64
+                  " rx_timeout_ena(bit9)=%" PRIu64 " stored_now=0x%x\n",
+                  p->ucon_writes, p->ucon_reads, p->ucon_or, p->ucon_last,
+                  p->ucon_tx_ena, p->ucon_rx_ena, p->ucon_rxto_ena,
+                  s->reg[I_(UCON)]);
+    for (unsigned b = 0; b < 32; b++) {
+        if (p->ucon_bit[b]) {
+            qemu_log_mask(LOG_UNIMP, "uartprobe:   UCON bit%u set in %"
+                          PRIu64 " of %" PRIu64 " writes\n", b,
+                          p->ucon_bit[b], p->ucon_writes);
+        }
+    }
+    qemu_log_mask(LOG_UNIMP, "uartprobe:   CONFIG suppress_irq=%d store_ucon=%d "
+                  "refresh_on_drain=%d txfull_every=%u burst=%u injected=%"
+                  PRIu64 " suppressed_raises=%" PRIu64 "\n",
+                  p->sw_suppress_irq, p->sw_store_ucon, p->sw_refresh_drain,
+                  p->sw_txfull_every, p->sw_txfull_burst,
+                  p->sw_txfull_injected, p->sw_suppressed_raises);
+    qemu_log_mask(LOG_UNIMP, "uartprobe:   line raise=%" PRIu64 " lower=%"
+                  PRIu64 " update_irq_calls=%" PRIu64 " final_line=%d\n",
+                  p->raise, p->lower, p->update_calls, p->line);
+    for (unsigned c = 0; c < 8; c++) {
+        if (p->update_calls_by_cause[c]) {
+            qemu_log_mask(LOG_UNIMP, "uartprobe:   update_irq cause=%s calls="
+                          "%" PRIu64 " raises=%" PRIu64 " lowers=%" PRIu64
+                          "\n", probe_causes[c], p->update_calls_by_cause[c],
+                          p->raise_by_cause[c], p->lower_by_cause[c]);
+        }
+    }
+    qemu_log_mask(LOG_UNIMP, "uartprobe:   rx_calls=%" PRIu64 " rx_bytes=%"
+                  PRIu64 " rx_dropped=%" PRIu64 " rx_with_fifo_disabled=%"
+                  PRIu64 " rx_while_line_high=%" PRIu64 "\n", p->rx_calls,
+                  p->rx_bytes, p->rx_dropped, p->rx_nofifo,
+                  p->rx_while_line_high);
+    qemu_log_mask(LOG_UNIMP, "uartprobe:   URXH pops=%" PRIu64
+                  " empty_pops=%" PRIu64 " nofifo_urxh_reads=%" PRIu64
+                  " drains(fifo emptied)=%" PRIu64
+                  " drains_with_line_left_high=%" PRIu64 " timeouts=%" PRIu64
+                  " resets=%" PRIu64 "\n", p->pops, p->empty_pops,
+                  p->nofifo_urxh, p->drains, p->drains_line_high, p->timeouts,
+                  p->resets);
+    qemu_log_mask(LOG_UNIMP, "uartprobe:   STALE episodes=%" PRIu64
+                  " ended_by_lower=%" PRIu64 " ended_by_new_rx=%" PRIu64
+                  " still_open=%d total_us=%" PRIu64 " max_us=%" PRIu64
+                  " guest_accesses_total=%" PRIu64 " max=%" PRIu64 "\n",
+                  p->stale_eps, p->stale_end_lower, p->stale_end_rx, p->stale,
+                  p->stale_us_total, p->stale_us_max, p->stale_acc_total,
+                  p->stale_acc_max);
+    qemu_log_mask(LOG_UNIMP, "uartprobe:   EPISODES(line-high intervals)=%"
+                  PRIu64 " acks_while_data_waiting=%" PRIu64
+                  " acks_while_drained_but_high=%" PRIu64 " max_total_acks_in_"
+                  "one_episode=%" PRIu64 " max_data_acks_in_one_episode=%"
+                  PRIu64 " longest_episode=%" PRIu64 "us drain_latency_sum="
+                  "%" PRIu64 "us max=%" PRIu64 "us\n", p->ep_n,
+                  p->ep_data_sum, p->ep_stale_sum, p->ep_total_max,
+                  p->ep_data_max, p->ep_dur_max_us, p->ep_drain_lat_sum_us,
+                  p->ep_drain_lat_max_us);
+    qemu_log_mask(LOG_UNIMP, "uartprobe:   EPISODE histogram of total acks: "
+                  "0:%" PRIu64 " 1:%" PRIu64 " 2:%" PRIu64 " 3-5:%" PRIu64
+                  " 6-10:%" PRIu64 " 11-20:%" PRIu64 " 21-50:%" PRIu64
+                  " 51+:%" PRIu64 "\n", p->ep_hist[0], p->ep_hist[1],
+                  p->ep_hist[2], p->ep_hist[3], p->ep_hist[4], p->ep_hist[5],
+                  p->ep_hist[6], p->ep_hist[7]);
+    for (unsigned c = 0; c < 8; c++) {
+        if (p->stale_end_by_cause[c]) {
+            qemu_log_mask(LOG_UNIMP, "uartprobe:   STALE ended by %s x%"
+                          PRIu64 "\n", probe_causes[c],
+                          p->stale_end_by_cause[c]);
+        }
+    }
+    for (unsigned r = 0; r < PROBE_NREG; r++) {
+        if (p->stale_acc_rd[r] || p->stale_acc_wr[r]) {
+            qemu_log_mask(LOG_UNIMP, "uartprobe:   during STALE %-8s reads=%"
+                          PRIu64 " writes=%" PRIu64 "\n", names[r],
+                          p->stale_acc_rd[r], p->stale_acc_wr[r]);
+        }
+    }
+    for (unsigned i = 0; i < p->nsites; i++) {
+        ProbeSite *t = &p->sites[i];
+
+        qemu_log_mask(LOG_UNIMP, "uartprobe:   SITE %-8s %-5s pc=0x%" PRIx64
+                      " lr=0x%" PRIx64 " x%" PRIu64 " first=0x%x or_of_values="
+                      "0x%" PRIx64 "\n", names[t->reg], t->wr ? "write" :
+                      "read", t->pc, t->lr, t->n, t->v_first, t->v_or);
+    }
+    if (p->sites_over) {
+        qemu_log_mask(LOG_UNIMP, "uartprobe:   SITE (table full) x%" PRIu64
+                      "\n", p->sites_over);
+    }
+    qemu_log_mask(LOG_UNIMP, "uartprobe: SUMMARY[%s] end\n", tag);
+}
+
+static void probe_exit_notify(Notifier *n, void *data)
+{
+    AppleUartProbe *p = container_of(n, AppleUartProbe, exit_notifier);
+    AppleUartState *s = container_of(p, AppleUartState, probe);
+
+    probe_summary(s, "exit");
+}
+
+/* Called for every guest register access before it is handled. */
+static void probe_access(AppleUartState *s, hwaddr offset, uint64_t val,
+                         bool is_write)
+{
+    AppleUartProbe *p = &s->probe;
+    unsigned r = offset / 4;
+    bool fresh;
+
+    if (r >= PROBE_NREG) {
+        return;
+    }
+    if (is_write) {
+        probe_site(p, r, true, val);
+    }
+    if (p->stale) {
+        p->stale_acc++;
+        if (is_write) {
+            p->stale_acc_wr[r]++;
+        } else {
+            p->stale_acc_rd[r]++;
+        }
+    }
+    if (is_write) {
+        p->wr[r]++;
+        probe_note_val(p->wv[r], &p->nwv[r], &p->wv_over[r], (uint32_t)val,
+                       &fresh);
+        if (offset == UCON) {
+            p->ucon_writes++;
+            p->ucon_or |= (uint32_t)val;
+            p->ucon_last = (uint32_t)val;
+            for (unsigned b = 0; b < 32; b++) {
+                if ((val >> b) & 1) {
+                    p->ucon_bit[b]++;
+                }
+            }
+            if (val & UCON_TXTHRESH_ENA) {
+                p->ucon_tx_ena++;
+            }
+            if (val & UCON_RXTHRESH_ENA) {
+                p->ucon_rx_ena++;
+            }
+            if (val & UCON_RXTIMEOUT_ENA) {
+                p->ucon_rxto_ena++;
+            }
+            if (fresh || p->ucon_writes <= 8) {
+                PLOG(s, lb_ucon, 80, "UCON write #%" PRIu64 " val=0x%" PRIx64
+                     " (tx_thresh_ena=%d rx_thresh_ena=%d rx_timeout_ena=%d) "
+                     "stored_before=0x%x tbpc=0x%" PRIx64, p->ucon_writes,
+                     val, !!(val & UCON_TXTHRESH_ENA),
+                     !!(val & UCON_RXTHRESH_ENA),
+                     !!(val & UCON_RXTIMEOUT_ENA), s->reg[I_(UCON)],
+                     probe_tbpc());
+            }
+        } else if (fresh) {
+            PLOG(s, lb_wdist, 100, "write %s(0x%02" HWADDR_PRIx ") new value "
+                 "0x%" PRIx64 " tbpc=0x%" PRIx64,
+                 apple_uart_regname(offset) ? apple_uart_regname(offset) : "?",
+                 offset, val, probe_tbpc());
+        }
+    } else {
+        p->rd[r]++;
+        if (offset == UCON) {
+            p->ucon_reads++;
+        }
+    }
+}
+
+static void probe_read_result(AppleUartState *s, hwaddr offset, uint32_t res)
+{
+    AppleUartProbe *p = &s->probe;
+    unsigned r = offset / 4;
+    bool fresh;
+
+    if (r >= PROBE_NREG) {
+        return;
+    }
+    probe_site(p, r, false, res);
+    probe_note_val(p->rv[r], &p->nrv[r], &p->rv_over[r], res, &fresh);
+    if (fresh && offset != URXH) {
+        PLOG(s, lb_rdist, 100, "read  %s(0x%02" HWADDR_PRIx ") new value "
+             "0x%x tbpc=0x%" PRIx64,
+             apple_uart_regname(offset) ? apple_uart_regname(offset) : "?",
+             offset, res, probe_tbpc());
+    }
+}
+
 static void apple_uart_update_irq(AppleUartState *s)
 {
     /*
@@ -262,9 +711,83 @@ static void apple_uart_update_irq(AppleUartState *s)
         }
     }
 
+    {
+        bool level = !!(s->reg[I_(UTRSTAT)] & mask);
+        AppleUartProbe *p = &s->probe;
+        int ci = p->cause_idx;
+
+        p->update_calls++;
+        p->update_calls_by_cause[ci]++;
+        if (level != p->line) {
+            if (level) {
+                p->raise++;
+                p->raise_by_cause[ci]++;
+            } else {
+                p->lower++;
+                p->lower_by_cause[ci]++;
+            }
+            if (level) {
+                p->ep_open = true;
+                p->ep_t0 = probe_now_us();
+                p->ep_drain_t = 0;
+                p->ep_base_data = probe_aic_ack_data;
+                p->ep_base_stale = probe_aic_ack_stale;
+                p->ep_base_low = probe_aic_ack_low;
+            } else if (p->ep_open) {
+                uint64_t d = probe_aic_ack_data - p->ep_base_data;
+                uint64_t st = probe_aic_ack_stale - p->ep_base_stale;
+                uint64_t tot = d + st;
+                uint64_t dur = probe_now_us() - p->ep_t0;
+                uint64_t lat = p->ep_drain_t ? p->ep_drain_t - p->ep_t0 : 0;
+                unsigned bin = tot == 0 ? 0 : tot == 1 ? 1 : tot == 2 ? 2 :
+                               tot <= 5 ? 3 : tot <= 10 ? 4 : tot <= 20 ? 5 :
+                               tot <= 50 ? 6 : 7;
+
+                p->ep_open = false;
+                p->ep_n++;
+                p->ep_data_sum += d;
+                p->ep_stale_sum += st;
+                p->ep_hist[bin]++;
+                if (tot > p->ep_total_max) {
+                    p->ep_total_max = tot;
+                }
+                if (d > p->ep_data_max) {
+                    p->ep_data_max = d;
+                }
+                if (dur > p->ep_dur_max_us) {
+                    p->ep_dur_max_us = dur;
+                }
+                p->ep_drain_lat_sum_us += lat;
+                if (lat > p->ep_drain_lat_max_us) {
+                    p->ep_drain_lat_max_us = lat;
+                }
+                PLOG(s, lb_ep, 120, "EPISODE %" PRIu64 " line high %" PRIu64
+                     "us; guest drained FIFO after %" PRIu64 "us; AIC acks "
+                     "of irq 1092 while data waiting=%" PRIu64 " while drained"
+                     "-but-high=%" PRIu64 " (total %" PRIu64 ")", p->ep_n, dur,
+                     lat, d, st, tot);
+            }
+            PLOG(s, lb_line, 160, "LINE %s cause=%s utrstat=0x%x ucon_stored="
+                 "0x%x ufcon=0x%x rx_fifo=%u stale=%d",
+                 level ? "RAISE" : "lower", probe_causes[ci],
+                 s->reg[I_(UTRSTAT)], s->reg[I_(UCON)], s->reg[I_(UFCON)],
+                 fifo8_num_used(&s->rx), p->stale);
+            if (!level && p->stale) {
+                p->stale_end_lower++;
+                probe_stale_end(s, probe_causes[ci], ci);
+            }
+            p->line = level;
+        }
+        probe_uart_phase = !level ? 0 : (fifo8_num_used(&s->rx) ? 1 : 2);
+    }
     if (s->reg[I_(UTRSTAT)] & mask) {
         s->last_irq = s->reg[I_(UTRSTAT)] & mask;
-        qemu_irq_raise(s->irq);
+        if (s->probe.sw_suppress_irq) {
+            s->probe.sw_suppressed_raises++;
+            qemu_irq_lower(s->irq);
+        } else {
+            qemu_irq_raise(s->irq);
+        }
         trace_apple_uart_irq_raised(s->channel, s->reg[I_(UTRSTAT)]);
     } else {
         qemu_irq_lower(s->irq);
@@ -277,6 +800,8 @@ static void apple_uart_timeout_int(void *opaque)
     AppleUartState *s = opaque;
 
     trace_apple_uart_rx_timeout(s->channel, s->reg[I_(UTRSTAT)], 0);
+    s->probe.timeouts++;
+    s->probe.cause_idx = PC_TIMEOUT;
 
     if ((s->reg[I_(UTRSTAT)] & UTRSTAT_Rx_BUFFER_DATA_READY) ||
         (s->reg[I_(UCON)] & UCON_RXTIMEOUT_ENA)) {
@@ -350,6 +875,8 @@ static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
     uint8_t ch;
 
     trace_apple_uart_write(s->channel, offset, apple_uart_regname(offset), val);
+    probe_access(s, offset, val, true);
+    s->probe.cause_idx = PC_OTHER;
 
     switch (offset) {
     case ULCON:
@@ -382,6 +909,7 @@ static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
             qemu_chr_fe_write_all(&s->chr, &ch, 1);
             trace_apple_uart_tx(s->channel, ch);
             s->reg[I_(UTRSTAT)] |= UTRSTAT_Tx_EMPTY | UTRSTAT_Tx_BUFFER_EMPTY;
+            s->probe.cause_idx = PC_UTXH;
             apple_uart_update_irq(s);
         }
         break;
@@ -390,10 +918,12 @@ static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
         val &= (UTRSTAT_Tx_EMPTY);
         s->reg[I_(UTRSTAT)] &= ~val;
         trace_apple_uart_intclr(s->channel, s->reg[I_(UTRSTAT)]);
+        s->probe.cause_idx = PC_UTRSTAT;
         apple_uart_update_irq(s);
         break;
     case UERSTAT:
         s->reg[I_(UERSTAT)] &= ~val;
+        s->probe.cause_idx = PC_UERSTAT;
         apple_uart_update_irq(s);
         break;
     case UFSTAT:
@@ -403,6 +933,10 @@ static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
                                   offset);
         break;
     case UCON:
+        if (s->probe.sw_store_ucon) {
+            s->reg[I_(UCON)] = val;
+        }
+        s->probe.cause_idx = PC_UCON;
         apple_uart_update_irq(s);
         break;
     case UMCON:
@@ -412,7 +946,8 @@ static void apple_uart_write(void *opaque, hwaddr offset, uint64_t val,
     }
 }
 
-static uint64_t apple_uart_read(void *opaque, hwaddr offset, unsigned size)
+static uint64_t apple_uart_read_inner(void *opaque, hwaddr offset,
+                                      unsigned size)
 {
     AppleUartState *s = opaque;
     uint32_t res;
@@ -450,6 +985,10 @@ static uint64_t apple_uart_read(void *opaque, hwaddr offset, unsigned size)
             s->reg[I_(UTRSTAT)] &= ~UTRSTAT_Rx_BUFFER_DATA_READY;
             res = s->reg[I_(URXH)];
         }
+        if (s->probe.sw_refresh_drain) {
+            s->probe.cause_idx = PC_EVENT;
+            apple_uart_update_irq(s);
+        }
         qemu_chr_fe_accept_input(&s->chr);
         trace_apple_uart_read(s->channel, offset, apple_uart_regname(offset),
                               res);
@@ -466,6 +1005,61 @@ static uint64_t apple_uart_read(void *opaque, hwaddr offset, unsigned size)
 
     trace_apple_uart_read(s->channel, offset, apple_uart_regname(offset), 0);
     return 0;
+}
+
+static uint64_t apple_uart_read(void *opaque, hwaddr offset, unsigned size)
+{
+    AppleUartState *s = opaque;
+    AppleUartProbe *p = &s->probe;
+    uint32_t used_before = fifo8_num_used(&s->rx);
+    bool fifo_en = !!(s->reg[I_(UFCON)] & UFCON_FIFO_ENABLE);
+    uint64_t res;
+
+    probe_access(s, offset, 0, false);
+    res = apple_uart_read_inner(opaque, offset, size);
+    if (offset == UFSTAT && p->sw_txfull_every) {
+        uint64_t k = p->sw_ufstat_reads++ % p->sw_txfull_every;
+
+        if (k < p->sw_txfull_burst) {
+            res |= UFSTAT_Tx_FIFO_FULL;
+            p->sw_txfull_injected++;
+        }
+    }
+    probe_read_result(s, offset, (uint32_t)res);
+    if (offset == URXH) {
+        if (!fifo_en) {
+            p->nofifo_urxh++;
+        } else if (used_before == 0) {
+            p->empty_pops++;
+            PLOG(s, lb_pop, 120, "URXH read on EMPTY fifo (data=0x%x) line=%d "
+                 "stale=%d", (unsigned)res, p->line, p->stale);
+        } else {
+            uint32_t used_after = fifo8_num_used(&s->rx);
+
+            p->pops++;
+            if (used_after == 0) {
+                p->drains++;
+                if (p->line) {
+                    p->drains_line_high++;
+                    PLOG(s, lb_pop, 120, "URXH pop 0x%02x -> FIFO now EMPTY, "
+                         "utrstat=0x%x, LINE LEFT HIGH (no update_irq on this "
+                         "path)", (unsigned)res, s->reg[I_(UTRSTAT)]);
+                    probe_stale_begin(s, "URXH drain");
+                    probe_uart_phase = 2;
+                    if (p->ep_open && !p->ep_drain_t) {
+                        p->ep_drain_t = probe_now_us();
+                    }
+                } else {
+                    PLOG(s, lb_pop, 120, "URXH pop 0x%02x -> FIFO now EMPTY, "
+                         "line already low", (unsigned)res);
+                }
+            } else {
+                PLOG(s, lb_pop, 120, "URXH pop 0x%02x -> %u left, line=%d",
+                     (unsigned)res, used_after, p->line);
+            }
+        }
+    }
+    return res;
 }
 
 static const MemoryRegionOps apple_uart_ops = {
@@ -489,6 +1083,18 @@ static int apple_uart_can_receive(void *opaque)
 static void apple_uart_receive(void *opaque, const uint8_t *buf, int size)
 {
     AppleUartState *s = opaque;
+    AppleUartProbe *probe_p = &s->probe;
+    bool probe_line_before = probe_p->line;
+    int probe_size_in = size;
+
+    probe_p->rx_calls++;
+    if (probe_line_before) {
+        probe_p->rx_while_line_high++;
+    }
+    if (probe_p->stale) {
+        probe_p->stale_end_rx++;
+        probe_stale_end(s, "new rx data", PC_RX);
+    }
 
     if (s->reg[I_(UFCON)] & UFCON_FIFO_ENABLE) {
         if (fifo8_num_free(&s->rx) < size) {
@@ -500,10 +1106,28 @@ static void apple_uart_receive(void *opaque, const uint8_t *buf, int size)
         apple_uart_rx_timeout_set(s);
     } else {
         s->reg[I_(URXH)] = buf[0];
+        probe_p->rx_nofifo++;
     }
     s->reg[I_(UTRSTAT)] |= UTRSTAT_Rx_BUFFER_DATA_READY;
 
+    probe_p->rx_bytes += size;
+    probe_p->rx_dropped += probe_size_in - size;
+    s->probe.cause_idx = PC_RX;
     apple_uart_update_irq(s);
+    PLOG(s, lb_rx, 120, "RX n=%d first=0x%02x fifo_used=%u fifo_en=%d "
+         "line_before=%d line_after=%d", size, buf[0], fifo8_num_used(&s->rx),
+         !!(s->reg[I_(UFCON)] & UFCON_FIFO_ENABLE), probe_line_before,
+         probe_p->line);
+    if (!(probe_p->rx_calls & (probe_p->rx_calls - 1))) {
+        qemu_log_mask(LOG_UNIMP, "uartprobe: rx_calls=%" PRIu64 " rx_bytes=%"
+                      PRIu64 " raise=%" PRIu64 " lower=%" PRIu64
+                      " pops=%" PRIu64 " drains=%" PRIu64
+                      " drains_line_high=%" PRIu64 " ucon_writes=%" PRIu64
+                      "\n", probe_p->rx_calls, probe_p->rx_bytes,
+                      probe_p->raise, probe_p->lower, probe_p->pops,
+                      probe_p->drains, probe_p->drains_line_high,
+                      probe_p->ucon_writes);
+    }
 }
 
 
@@ -516,6 +1140,7 @@ static void apple_uart_event(void *opaque, QEMUChrEvent event)
          * fifo */
         fifo8_push(&s->rx, '\0');
         s->reg[I_(UERSTAT)] |= UERSTAT_BREAK;
+        s->probe.cause_idx = PC_OTHER;
         apple_uart_update_irq(s);
     }
 }
@@ -532,6 +1157,11 @@ static void apple_uart_reset(DeviceState *dev)
 
     fifo8_reset(&s->rx);
     fifo8_reset(&s->tx);
+    s->probe.resets++;
+    s->probe.line = false;
+    s->probe.stale = false;
+    qemu_log_mask(LOG_UNIMP, "uartprobe: device reset #%" PRIu64 "\n",
+                  s->probe.resets);
 
     trace_apple_uart_rxsize(s->channel, s->rx_fifo_size);
 }
@@ -615,6 +1245,21 @@ static void apple_uart_realize(DeviceState *dev, Error **errp)
 
     fifo8_create(&s->rx, s->rx_fifo_size);
     fifo8_create(&s->tx, s->tx_fifo_size);
+    s->probe.sw_suppress_irq = !!getenv("UARTPROBE_SUPPRESS_IRQ");
+    s->probe.sw_store_ucon = !!getenv("UARTPROBE_STORE_UCON");
+    s->probe.sw_refresh_drain = !!getenv("UARTPROBE_REFRESH_DRAIN");
+    if (getenv("UARTPROBE_TXFULL_EVERY")) {
+        s->probe.sw_txfull_every = atoi(getenv("UARTPROBE_TXFULL_EVERY"));
+        s->probe.sw_txfull_burst = getenv("UARTPROBE_TXFULL_BURST") ?
+            atoi(getenv("UARTPROBE_TXFULL_BURST")) : 1;
+    }
+    qemu_log_mask(LOG_UNIMP, "uartprobe: CONFIG suppress_irq=%d store_ucon=%d "
+                  "refresh_on_drain=%d txfull_every=%u txfull_burst=%u\n",
+                  s->probe.sw_suppress_irq, s->probe.sw_store_ucon,
+                  s->probe.sw_refresh_drain, s->probe.sw_txfull_every,
+                  s->probe.sw_txfull_burst);
+    s->probe.exit_notifier.notify = probe_exit_notify;
+    qemu_add_exit_notifier(&s->probe.exit_notifier);
 
     s->fifo_timeout_timer =
         timer_new_ns(QEMU_CLOCK_VIRTUAL, apple_uart_timeout_int, s);

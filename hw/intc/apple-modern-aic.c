@@ -316,8 +316,69 @@ bool apple_modern_aic_core_write(AppleModernAICCore *s, uint64_t offset,
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
+#include "system/system.h"
 
 #define APPLE_MODERN_AIC_TRACE_LIMIT 200
+
+/* PROBE (scratch, observation only): uncapped counters + bounded log lines. */
+#define AICP_UART_IRQ 1092
+typedef struct AicProbe {
+    Notifier exit_notifier;
+    bool registered, prev;
+    uint64_t assert_n, deassert_n;
+    uint64_t ack_total, ack_empty, ack_uart, ack_other;
+    uint64_t unmask_uart, mask_uart, unmask_other_writes, mask_other_writes;
+    uint64_t cfg_writes;
+    unsigned lb;
+} AicProbe;
+static AicProbe aicp;
+
+/* Read by the UART probe and the AIC probe: see apple_uart.c. */
+extern int probe_uart_phase;
+uint64_t probe_aic_ack_data, probe_aic_ack_stale, probe_aic_ack_low;
+static uint64_t aicp_ack_hw_only, aicp_ack_sw_only, aicp_ack_both,
+                aicp_ack_neither, aicp_sw_set_uart, aicp_sw_clear_uart;
+
+static uint64_t aicp_now_us(void)
+{
+    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000;
+}
+
+#define ALOG(cap, fmt, ...) \
+    do { \
+        if (aicp.lb < (cap)) { \
+            aicp.lb++; \
+            qemu_log_mask(LOG_UNIMP, "aicprobe: t=%" PRIu64 "us " fmt "\n", \
+                          aicp_now_us(), ##__VA_ARGS__); \
+        } \
+    } while (0)
+
+static void aicp_exit(Notifier *n, void *data)
+{
+    qemu_log_mask(LOG_UNIMP, "aicprobe: SUMMARY t=%" PRIu64 "us output_assert="
+                  "%" PRIu64 " output_deassert=%" PRIu64 " event_reads=%"
+                  PRIu64 " (empty=%" PRIu64 " irq%d=%" PRIu64 " other=%"
+                  PRIu64 ") unmask_irq%d=%" PRIu64 " mask_irq%d=%" PRIu64
+                  " other_mask_set_writes=%" PRIu64 " other_mask_clear_writes="
+                  "%" PRIu64 " config_writes=%" PRIu64 "\n", aicp_now_us(),
+                  aicp.assert_n, aicp.deassert_n, aicp.ack_total,
+                  aicp.ack_empty, AICP_UART_IRQ, aicp.ack_uart, aicp.ack_other,
+                  AICP_UART_IRQ, aicp.unmask_uart, AICP_UART_IRQ,
+                  aicp.mask_uart, aicp.mask_other_writes,
+                  aicp.unmask_other_writes, aicp.cfg_writes);
+    qemu_log_mask(LOG_UNIMP, "aicprobe: SUMMARY2 acks of irq %d by UART phase: "
+                  "line_low=%" PRIu64 " data_waiting=%" PRIu64
+                  " drained_but_line_high=%" PRIu64 "; at ack time hw_bit_only="
+                  "%" PRIu64 " sw_bit_only=%" PRIu64 " both=%" PRIu64
+                  " neither=%" PRIu64 " (counted at every event read incl. empty)"
+                  "; sw_set_writes_irq%d=%" PRIu64 " sw_clear_writes_irq%d=%"
+                  PRIu64 "\n", AICP_UART_IRQ, probe_aic_ack_low,
+                  probe_aic_ack_data, probe_aic_ack_stale, aicp_ack_hw_only,
+                  aicp_ack_sw_only, aicp_ack_both, aicp_ack_neither,
+                  AICP_UART_IRQ, aicp_sw_set_uart, AICP_UART_IRQ,
+                  aicp_sw_clear_uart);
+}
 
 static void apple_modern_aic_trace(AppleModernAICState *s, const char *what,
                                    uint64_t offset, unsigned size,
@@ -337,6 +398,21 @@ static void apple_modern_aic_update(AppleModernAICState *s)
 {
     bool level = apple_modern_aic_core_output(&s->core);
 
+    if (!aicp.registered) {
+        aicp.registered = true;
+        aicp.exit_notifier.notify = aicp_exit;
+        qemu_add_exit_notifier(&aicp.exit_notifier);
+    }
+    if (level != aicp.prev) {
+        aicp.prev = level;
+        if (level) {
+            aicp.assert_n++;
+        } else {
+            aicp.deassert_n++;
+        }
+        ALOG(400, "AIC output %s (#%" PRIu64 "/%" PRIu64 ")",
+             level ? "assert" : "deassert", aicp.assert_n, aicp.deassert_n);
+    }
     if (s->trace && level != s->asserted) {
         s->asserted = level;
         if (s->traced < APPLE_MODERN_AIC_TRACE_LIMIT) {
@@ -355,6 +431,22 @@ static MemTxResult apple_modern_aic_read(void *opaque, hwaddr offset,
     AppleModernAICState *s = opaque;
     uint32_t result;
 
+    if (offset == s->geometry.event_offset) {
+        bool hw = (s->core.hardware[AICP_UART_IRQ / 32] >>
+                   (AICP_UART_IRQ % 32)) & 1;
+        bool sw = (s->core.software[AICP_UART_IRQ / 32] >>
+                   (AICP_UART_IRQ % 32)) & 1;
+
+        if (hw && sw) {
+            aicp_ack_both++;
+        } else if (hw) {
+            aicp_ack_hw_only++;
+        } else if (sw) {
+            aicp_ack_sw_only++;
+        } else {
+            aicp_ack_neither++;
+        }
+    }
     if (!apple_modern_aic_core_read(&s->core, offset, size, &result)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "apple-modern-aic: unsupported read at 0x%" HWADDR_PRIx
@@ -363,6 +455,29 @@ static MemTxResult apple_modern_aic_read(void *opaque, hwaddr offset,
         return MEMTX_ERROR;
     }
     *value = result;
+    if (offset == s->geometry.event_offset) {
+        aicp.ack_total++;
+        if ((result & 0xffff) == AICP_UART_IRQ && result) {
+            if (probe_uart_phase == 1) {
+                probe_aic_ack_data++;
+            } else if (probe_uart_phase == 2) {
+                probe_aic_ack_stale++;
+            } else {
+                probe_aic_ack_low++;
+            }
+        }
+        if (!result) {
+            aicp.ack_empty++;
+            ALOG(400, "AIC event read -> 0 (no pending irq)");
+        } else if ((result & 0xffff) == AICP_UART_IRQ) {
+            aicp.ack_uart++;
+            ALOG(400, "AIC event read -> 0x%x (irq %d acked+masked) #%" PRIu64,
+                 result, AICP_UART_IRQ, aicp.ack_uart);
+        } else {
+            aicp.ack_other++;
+            ALOG(400, "AIC event read -> 0x%x (other irq)", result);
+        }
+    }
     apple_modern_aic_trace(s, "read ", offset, size, result);
     apple_modern_aic_update(s);
     return MEMTX_OK;
@@ -375,6 +490,47 @@ static MemTxResult apple_modern_aic_write(void *opaque, hwaddr offset,
     AppleModernAICState *s = opaque;
 
     apple_modern_aic_trace(s, "write", offset, size, value);
+    {
+        uint64_t bank = s->core.geometry.max_irqs / 32 * 4;
+        uint32_t wi = AICP_UART_IRQ / 32, bi = AICP_UART_IRQ % 32;
+
+        if (offset == s->core.geometry.config_offset) {
+            aicp.cfg_writes++;
+            ALOG(400, "AIC config write 0x%" PRIx64, value);
+        } else if (offset >= s->core.mask_clear_offset &&
+                   offset - s->core.mask_clear_offset < bank) {
+            if (offset - s->core.mask_clear_offset == wi * 4 &&
+                ((value >> bi) & 1)) {
+                aicp.unmask_uart++;
+                ALOG(400, "AIC UNMASK irq %d (mask_clear write 0x%" PRIx64
+                     ") #%" PRIu64, AICP_UART_IRQ, value, aicp.unmask_uart);
+            } else {
+                aicp.unmask_other_writes++;
+            }
+        } else if (offset >= s->core.sw_set_offset &&
+                   offset - s->core.sw_set_offset < bank) {
+            if (offset - s->core.sw_set_offset == wi * 4 &&
+                ((value >> bi) & 1)) {
+                aicp_sw_set_uart++;
+            }
+        } else if (offset >= s->core.sw_clear_offset &&
+                   offset - s->core.sw_clear_offset < bank) {
+            if (offset - s->core.sw_clear_offset == wi * 4 &&
+                ((value >> bi) & 1)) {
+                aicp_sw_clear_uart++;
+            }
+        } else if (offset >= s->core.mask_set_offset &&
+                   offset - s->core.mask_set_offset < bank) {
+            if (offset - s->core.mask_set_offset == wi * 4 &&
+                ((value >> bi) & 1)) {
+                aicp.mask_uart++;
+                ALOG(400, "AIC MASK irq %d (mask_set write 0x%" PRIx64
+                     ") #%" PRIu64, AICP_UART_IRQ, value, aicp.mask_uart);
+            } else {
+                aicp.mask_other_writes++;
+            }
+        }
+    }
     if (!apple_modern_aic_core_write(&s->core, offset, size, value)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "apple-modern-aic: unsupported write at 0x%" HWADDR_PRIx
