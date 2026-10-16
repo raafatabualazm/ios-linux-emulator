@@ -1128,25 +1128,23 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                          !strcmp(tag_str, "A381") ||
                          !strcmp(tag_str, "A401") ||
                          /*
-                          * A410/A411 = is_main_display family. In this BootKC
-                          * A410 is in=8/out=4 and A411 is in=4/out=4 (never
-                          * in_len==0), so the old "&& hdr.in_len == 0" guard made
-                          * both always return false and the single built-in panel
-                          * was never reported as the main display. Assert true.
+                          * NOTE (Grok RE): A410/A411 (is_main_display), A456,
+                          * A473, A479 are NOT booleans -- their 4-byte out word
+                          * is an IOReturn STATUS where 1 = kIOReturnError (mapped
+                          * via 0xfffffff00a1881f0).  They must reply 0
+                          * (kIOReturnSuccess) and so are REMOVED from this
+                          * out[0]=1 list (they fall through to the zero default).
+                          * The is_main_display result travels via a separate
+                          * out-pointer, not this status word.
                           */
-                         !strcmp(tag_str, "A410") ||
-                         !strcmp(tag_str, "A411") ||
                          !strcmp(tag_str, "A454") ||
                          !strcmp(tag_str, "A455") ||
-                         !strcmp(tag_str, "A456") ||
                          !strcmp(tag_str, "A463") ||
                          !strcmp(tag_str, "A465") ||
                          !strcmp(tag_str, "A466") ||
                          !strcmp(tag_str, "A468") ||
-                         !strcmp(tag_str, "A473") ||
                          !strcmp(tag_str, "A474") ||
                          !strcmp(tag_str, "A475") ||
-                         !strcmp(tag_str, "A479") ||
                          !strcmp(tag_str, "A485"))) {
                         zeros[0] = 1;
                     } else if (!strcmp(tag_str, "A353") && hdr.out_len >= 8) {
@@ -1195,6 +1193,19 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                         }
                         stl_le_p(zeros, s->next_swap_id);
                         stl_le_p(zeros + 4, 0);
+                    } else if (!strcmp(tag_str, "A407") && hdr.in_len >= 0x80 &&
+                               hdr.out_len >= 9) {
+                        /*
+                         * A407 swap_submit, the full ~7472-byte submit (in>=0x80).
+                         * ACK = 12 packed bytes "01 <swap_id LE32> <status LE32>
+                         * pad", status 0 (Grok RE).  swap_id echoes the id the
+                         * preceding swap_start allocated.  (Blitting the real
+                         * surface needs the 7472-byte struct field offsets, still
+                         * blocked pending DCP-firmware concolic.)
+                         */
+                        zeros[0] = 1;
+                        stl_le_p(zeros + 1, s->next_swap_id);
+                        stl_le_p(zeros + 5, 0);
                     } else if ((!strcmp(tag_str, "A472") ||
                                 !strcmp(tag_str, "A473") ||
                                 !strcmp(tag_str, "A468") ||

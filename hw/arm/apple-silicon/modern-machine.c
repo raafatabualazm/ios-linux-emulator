@@ -104,6 +104,7 @@ struct AppleModernMachine {
     bool iouc_sandbox_compat;
     bool amfi_csstatus_platform_compat;
     bool platform_binary_force_compat;
+    bool rootvp_auth_skip_compat;
     /* Declared, opt-in anchored image-patch set (default NULL = none). */
     char *image_patches;
     AppleModernImagePatchResult image_patch_result;
@@ -3067,6 +3068,22 @@ static void modern_init(MachineState *machine)
                     pbf.anchor, pbf.insn_before[0], pbf.insn_before[1],
                     pbf.insn_after[0], pbf.insn_after[1]);
     }
+    if (s->rootvp_auth_skip_compat) {
+        AppleModernRootvpSkipPatch rvp = { 0 };
+        uint8_t *bootkc = (uint8_t *)s->blobs[ASSET_BOOTKC].data;
+
+        if (!apple_modern_kc_rootvp_auth_skip_compat(
+                bootkc, s->blobs[ASSET_BOOTKC].size, &rvp, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: applied opt-in rootvp-auth-skip-compat patch "
+                    "to the in-memory kernel cache: bsd_init ramdisk-skip at "
+                    "0x%" PRIx64 " (0x%08x->0x%08x) so rootdev=md0 (normal boot) "
+                    "skips the root-vnode auth check like rd=md0 does. "
+                    "Compatibility, not Apple fidelity",
+                    rvp.anchor, rvp.insn_before, rvp.insn_after);
+    }
     if (s->image_patches) {
         /*
          * Declared, opt-in anchored image patches on the board's private
@@ -3493,6 +3510,7 @@ BOOL_PROPERTY(txm_sc_compat, txm_sc_compat)
 BOOL_PROPERTY(iouc_sandbox_compat, iouc_sandbox_compat)
 BOOL_PROPERTY(amfi_csstatus_platform_compat, amfi_csstatus_platform_compat)
 BOOL_PROPERTY(platform_binary_force_compat, platform_binary_force_compat)
+BOOL_PROPERTY(rootvp_auth_skip_compat, rootvp_auth_skip_compat)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(el0_trap_trace, el0_trap_trace)
 BOOL_PROPERTY(sep_trace, sep_trace)
@@ -3851,6 +3869,9 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "platform-binary-force-compat",
                                    get_platform_binary_force_compat,
                                    set_platform_binary_force_compat);
+    object_class_property_add_bool(oc, "rootvp-auth-skip-compat",
+                                   get_rootvp_auth_skip_compat,
+                                   set_rootvp_auth_skip_compat);
     object_class_property_add_str(oc, "image-patches", get_image_patches,
                                   set_image_patches);
     object_class_property_add_str(oc, "applied-image-patches",

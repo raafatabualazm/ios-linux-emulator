@@ -276,5 +276,28 @@ bool apple_modern_kc_platform_binary_force_compat(uint8_t *bootkc, size_t len,
                                                   AppleModernPlatBinPatch *out,
                                                   Error **errp);
 
+/*
+ * rootvp-auth-skip-compat: let the guest boot in NORMAL mode (rootdev=md0)
+ * instead of restore mode (rd=md0).  bsd_init() skips the root-vnode
+ * authentication iff bsd_rooted_ramdisk() is true, which only holds when the
+ * boot-arg is literally "rd=md0".  With "rootdev=md0" (which launchd does NOT
+ * treat as restore, so it runs the normal boot-tasks) the detector returns 0,
+ * the VNOP_IOCTL root-auth query runs on the plain ramdisk, returns nonzero,
+ * and the kernel panics "rootvp not authenticated after mounting @bsd_init.c:976".
+ * This patch turns the ramdisk-skip branch (tbnz w0,#0,<skip>) into an
+ * unconditional branch so the auth check is always skipped -- byte-for-byte the
+ * same path rd=md0 already takes.  Pair with -machine root-arg rootdev=md0.
+ * Compatibility (ramdisk root without the rd= restore match), not Apple fidelity.
+ */
+typedef struct AppleModernRootvpSkipPatch {
+    uint64_t anchor;      /* file offset of the ramdisk-skip tbnz */
+    uint32_t insn_before; /* 0x37000200 tbnz w0, #0, <skip> */
+    uint32_t insn_after;  /* 0x14000010 b <skip> */
+} AppleModernRootvpSkipPatch;
+
+bool apple_modern_kc_rootvp_auth_skip_compat(uint8_t *bootkc, size_t len,
+                                             AppleModernRootvpSkipPatch *out,
+                                             Error **errp);
+
 #endif
 

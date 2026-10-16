@@ -1299,3 +1299,72 @@ bool apple_modern_kc_platform_binary_force_compat(uint8_t *bootkc, size_t len,
     return true;
 }
 
+/*
+ * rootvp-auth-skip-compat: make bsd_init()'s "booted-from-ramdisk -> skip root
+ * authentication" branch unconditional, so booting with rootdev=md0 (normal
+ * mode) does not panic "rootvp not authenticated after mounting @bsd_init.c:976".
+ *
+ * On the pinned BootKC (sha a36b9241, com.apple.kernel VA 0xfffffff00b091c64)
+ * the deciding instruction is:
+ *     tbnz w0, #0, 0xfffffff00b091ca4   ; 0x37000200 -- if bsd_rooted_ramdisk(),
+ *                                       ;   skip the VNOP_IOCTL root-auth query
+ * Falling through runs the auth ioctl on the plain ramdisk and
+ *     cbnz w0, <panic 0xb091f00>        ; nonzero -> "rootvp not authenticated".
+ * Replace the tbnz with an unconditional `b 0xfffffff00b091ca4` (0x14000010) so
+ * the auth block is always skipped -- identical to the path rd=md0 takes.
+ */
+#define ROOTVP_SKIP_FN_VA UINT64_C(0xfffffff00b091c64)
+#define ROOTVP_SKIP_OLD   0x37000200u /* tbnz w0, #0, 0xb091ca4 */
+#define ROOTVP_SKIP_NEW   0x14000010u /* b 0xb091ca4            */
+
+bool apple_modern_kc_rootvp_auth_skip_compat(uint8_t *bootkc, size_t len,
+                                             AppleModernRootvpSkipPatch *out,
+                                             Error **errp)
+{
+    uint64_t kernel, texec_va, texec_vmsize, texec_off, texec_size, off;
+
+    if (!bootkc) {
+        error_setg(errp, "rootvp-auth-skip-compat: no kernel cache");
+        return false;
+    }
+    if (!find_fileset_entry(bootkc, len, "com.apple.kernel", &kernel)) {
+        error_setg(errp, "rootvp-auth-skip-compat: com.apple.kernel fileset "
+                   "entry not found");
+        return false;
+    }
+    if (!find_segment_and_section_va(bootkc, len, kernel, "__TEXT_EXEC", NULL,
+                                     &texec_va, &texec_vmsize,
+                                     &texec_off, &texec_size)) {
+        error_setg(errp, "rootvp-auth-skip-compat: kernel __TEXT_EXEC not found");
+        return false;
+    }
+    if (texec_off > len || texec_size > len - texec_off ||
+        (texec_off & 3) != 0 || texec_size < 32) {
+        error_setg(errp, "rootvp-auth-skip-compat: kernel __TEXT_EXEC outside "
+                   "image or unaligned");
+        return false;
+    }
+    if (ROOTVP_SKIP_FN_VA < texec_va ||
+        ROOTVP_SKIP_FN_VA - texec_va > texec_size - 4) {
+        error_setg(errp, "rootvp-auth-skip-compat: ramdisk-skip VA 0x%" PRIx64
+                   " outside kernel __TEXT_EXEC", ROOTVP_SKIP_FN_VA);
+        return false;
+    }
+    off = texec_off + (ROOTVP_SKIP_FN_VA - texec_va);
+    if (ldl_le_p(bootkc + off) != ROOTVP_SKIP_OLD) {
+        error_setg(errp, "rootvp-auth-skip-compat: unexpected instruction "
+                   "0x%08x at the bsd_init ramdisk-skip tbnz (expected "
+                   "0x%08x); refusing to patch",
+                   ldl_le_p(bootkc + off), ROOTVP_SKIP_OLD);
+        return false;
+    }
+
+    if (out) {
+        out->anchor = off;
+        out->insn_before = ROOTVP_SKIP_OLD;
+        out->insn_after = ROOTVP_SKIP_NEW;
+    }
+    stl_le_p(bootkc + off, ROOTVP_SKIP_NEW);
+    return true;
+}
+
