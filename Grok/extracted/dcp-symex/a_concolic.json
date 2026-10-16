@@ -1,0 +1,1109 @@
+{
+ "A000": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A000",
+   "in_len": 4,
+   "out_len": 4,
+   "in_hex": "00aaaaaa"
+  }
+ },
+ "A001": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A001",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A003": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A003",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "aaaaaaaa"
+  }
+ },
+ "A004": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A004",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "aaaaaaaa"
+  }
+ },
+ "A005": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A005",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00000000"
+  }
+ },
+ "A006": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A006",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00000000"
+  }
+ },
+ "A007": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A007",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00000000"
+  }
+ },
+ "A008": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A008",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00000000"
+  }
+ },
+ "A009": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A009",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00aaaaaa"
+  }
+ },
+ "A010": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A010",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00aaaaaa"
+  }
+ },
+ "A011": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A011",
+   "in_len": 8,
+   "out_len": 0,
+   "in_hex": "aaaaaaaaaaaaaaaa"
+  }
+ },
+ "A012": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A012",
+   "in_len": 8,
+   "out_len": 0,
+   "in_hex": "aaaaaaaaaaaaaaaa"
+  }
+ },
+ "A013": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A013",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00000000"
+  }
+ },
+ "A014": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A014",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A015": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A015",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A016": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A016",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00000000"
+  }
+ },
+ "A018": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A018",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A019": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A019",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A020": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A020",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A022": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A022",
+   "in_len": 12,
+   "out_len": 8,
+   "in_hex": "aaaaaaaaaaaaaaaa0100aaaa"
+  }
+ },
+ "A023": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A023",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A025": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A025",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A026": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A026",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A027": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A027",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A029": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A029",
+   "in_len": 8,
+   "out_len": 4,
+   "in_hex": "0000000000002010"
+  }
+ },
+ "A030": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {}
+ },
+ "A031": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A031",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A032": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A032",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A033": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A033",
+   "in_len": 44,
+   "out_len": 44,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01aaaaaa"
+  }
+ },
+ "A034": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A034",
+   "in_len": 8,
+   "out_len": 8,
+   "in_hex": "aaaaaaaa01aaaaaa"
+  }
+ },
+ "A035": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A035",
+   "in_len": 0,
+   "out_len": 8,
+   "in_hex": ""
+  }
+ },
+ "A036": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A036",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A037": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A037",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A038": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A038",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A039": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A039",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A041": {
+  "func": "0xfffffff0091dcc24",
+  "declared_in": 8,
+  "declared_out": 4,
+  "rpc": {
+   "tag": "A041",
+   "in_len": 8,
+   "out_len": 4,
+   "in_hex": "0000000000000000"
+  },
+  "x0": "0x0",
+  "x0_lo32": 0,
+  "boolish": 0
+ },
+ "A100": {
+  "err": "Unhandled CPU exception (UC_ERR_EXCEPTION)",
+  "rpc": {}
+ },
+ "A101": {
+  "err": "Unhandled CPU exception (UC_ERR_EXCEPTION)",
+  "rpc": {}
+ },
+ "A102": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A102",
+   "in_len": 8,
+   "out_len": 4,
+   "in_hex": "0000000000002010"
+  }
+ },
+ "A103": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A103",
+   "in_len": 12,
+   "out_len": 8,
+   "in_hex": "aaaaaaaaaaaaaaaa0100aaaa"
+  }
+ },
+ "A104": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A104",
+   "in_len": 8,
+   "out_len": 0,
+   "in_hex": "0000000000002010"
+  }
+ },
+ "A106": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A106",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A107": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A107",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A108": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A108",
+   "in_len": 4,
+   "out_len": 4,
+   "in_hex": "00aaaaaa"
+  }
+ },
+ "A109": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A109",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A110": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A110",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00002010"
+  }
+ },
+ "A111": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A111",
+   "in_len": 12,
+   "out_len": 0,
+   "in_hex": "000000000000201000102010"
+  }
+ },
+ "A112": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A112",
+   "in_len": 4,
+   "out_len": 4,
+   "in_hex": "00000000"
+  }
+ },
+ "A113": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {}
+ },
+ "A115": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A115",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A116": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A116",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A117": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A117",
+   "in_len": 4,
+   "out_len": 4,
+   "in_hex": "00aaaaaa"
+  }
+ },
+ "A118": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A118",
+   "in_len": 12,
+   "out_len": 12,
+   "in_hex": "aaaaaaaaaaaaaaaa0000aaaa"
+  }
+ },
+ "A119": {
+  "func": "0xfffffff0091f8a98",
+  "declared_in": 4204,
+  "declared_out": 4,
+  "rpc": {
+   "tag": "\u0000\u0000\u0000\u0000",
+   "in_len": 270536704,
+   "out_len": 270544896,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "x0": "0xfffffff00764c03e",
+  "x0_lo32": 124043326,
+  "boolish": 0
+ },
+ "A120": {
+  "func": "0xfffffff0091f8c88",
+  "declared_in": 92,
+  "declared_out": 4100,
+  "rpc": {
+   "tag": "\u0000\u0000\u0000\u0000",
+   "in_len": 270536704,
+   "out_len": 270544896,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "x0": "0xfffffff00764c03e",
+  "x0_lo32": 124043326,
+  "boolish": null
+ },
+ "A121": {
+  "func": "0xfffffff0091f8e5c",
+  "declared_in": 12,
+  "declared_out": 4,
+  "rpc": {
+   "tag": "A121",
+   "in_len": 12,
+   "out_len": 4,
+   "in_hex": "000000000000000000002010"
+  },
+  "x0": "0xfffffff0080c0e60",
+  "x0_lo32": 135007840,
+  "boolish": 0
+ },
+ "A122": {
+  "func": "0xfffffff0091f8ed0",
+  "declared_in": 4204,
+  "declared_out": 4,
+  "rpc": {
+   "tag": "\u0000\u0000\u0000\u0000",
+   "in_len": 270536704,
+   "out_len": 270544896,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "x0": "0xfffffff00764c03e",
+  "x0_lo32": 124043326,
+  "boolish": 0
+ },
+ "A123": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A123",
+   "in_len": 24,
+   "out_len": 4,
+   "in_hex": "000000000000000000002010001020100000000000202010"
+  }
+ },
+ "A124": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A124",
+   "in_len": 12,
+   "out_len": 4,
+   "in_hex": "000000000000000000002010"
+  }
+ },
+ "A125": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A125",
+   "in_len": 12,
+   "out_len": 4,
+   "in_hex": "000000000000000000002010"
+  }
+ },
+ "A126": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A126",
+   "in_len": 20,
+   "out_len": 8,
+   "in_hex": "000000000000000000002010aaaaaaaa00aaaaaa"
+  }
+ },
+ "A127": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A127",
+   "in_len": 128,
+   "out_len": 124,
+   "in_hex": "00000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+ },
+ "A128": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A128",
+   "in_len": 128,
+   "out_len": 4,
+   "in_hex": "00000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+ },
+ "A129": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A129",
+   "in_len": 52,
+   "out_len": 52,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01aaaaaa"
+  }
+ },
+ "A130": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A130",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "aaaaaaaa"
+  }
+ },
+ "A131": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A131",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "aaaaaaaa"
+  }
+ },
+ "A132": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {}
+ },
+ "A133": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A133",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A135": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A135",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A136": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A136",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A137": {
+  "func": "0xfffffff0091f98b4",
+  "declared_in": 0,
+  "declared_out": 4,
+  "rpc": {
+   "tag": "A137",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  },
+  "x0": "0x0",
+  "x0_lo32": 0,
+  "boolish": 0
+ },
+ "A200": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A200",
+   "in_len": 8,
+   "out_len": 4,
+   "in_hex": "0000000000aaaaaa"
+  }
+ },
+ "A201": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A201",
+   "in_len": 8,
+   "out_len": 4,
+   "in_hex": "0000000000002010"
+  }
+ },
+ "A202": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A202",
+   "in_len": 8,
+   "out_len": 4,
+   "in_hex": "0000000000002010"
+  }
+ },
+ "A203": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A203",
+   "in_len": 8,
+   "out_len": 4,
+   "in_hex": "0000000000002010"
+  }
+ },
+ "A204": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A204",
+   "in_len": 4,
+   "out_len": 4,
+   "in_hex": "00000000"
+  }
+ },
+ "A205": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A205",
+   "in_len": 4,
+   "out_len": 4,
+   "in_hex": "00000000"
+  }
+ },
+ "A206": {
+  "err": "Invalid memory write (UC_ERR_WRITE_UNMAPPED)",
+  "rpc": {
+   "tag": "A206",
+   "in_len": 4,
+   "out_len": 4,
+   "in_hex": "00000000"
+  }
+ },
+ "A350": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A350",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A351": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A351",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A352": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A352",
+   "in_len": 8,
+   "out_len": 4,
+   "in_hex": "0000000000002010"
+  }
+ },
+ "A353": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A353",
+   "in_len": 0,
+   "out_len": 8,
+   "in_hex": ""
+  }
+ },
+ "A354": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A354",
+   "in_len": 16,
+   "out_len": 12,
+   "in_hex": "00000000000000000000000000000000"
+  }
+ },
+ "A355": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "\u0000\u0000\u0000\u0000",
+   "in_len": 270536704,
+   "out_len": 270544896,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+ },
+ "A356": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A356",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A357": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A357",
+   "in_len": 112,
+   "out_len": 104,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+ },
+ "A358": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A358",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A359": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A359",
+   "in_len": 20,
+   "out_len": 8,
+   "in_hex": "000000000000201000102010aaaaaaaa00aaaaaa"
+  }
+ },
+ "A360": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A360",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A361": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A361",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00000000"
+  }
+ },
+ "A362": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A362",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00aaaaaa"
+  }
+ },
+ "A363": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A363",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00aaaaaa"
+  }
+ },
+ "A364": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A364",
+   "in_len": 124,
+   "out_len": 116,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+ },
+ "A365": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A365",
+   "in_len": 124,
+   "out_len": 116,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+ },
+ "A366": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A366",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00aaaaaa"
+  }
+ },
+ "A367": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A367",
+   "in_len": 36,
+   "out_len": 32,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01aaaaaa"
+  }
+ },
+ "A368": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A368",
+   "in_len": 36,
+   "out_len": 32,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01aaaaaa"
+  }
+ },
+ "A369": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A369",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A370": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A370",
+   "in_len": 4,
+   "out_len": 8,
+   "in_hex": "aaaa01aa"
+  }
+ },
+ "A371": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A371",
+   "in_len": 4,
+   "out_len": 8,
+   "in_hex": "aaaa01aa"
+  }
+ },
+ "A372": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A372",
+   "in_len": 12,
+   "out_len": 12,
+   "in_hex": "aaaaaaaaaaaaaaaa01aaaaaa"
+  }
+ },
+ "A373": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A373",
+   "in_len": 12,
+   "out_len": 12,
+   "in_hex": "000000000000000000000000"
+  }
+ },
+ "A374": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "\u0000\u0000\u0000\u0000",
+   "in_len": 270536704,
+   "out_len": 270544896,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+ },
+ "A375": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {}
+ },
+ "A376": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A376",
+   "in_len": 8,
+   "out_len": 12,
+   "in_hex": "000000000000aaaa"
+  }
+ },
+ "A377": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A377",
+   "in_len": 20,
+   "out_len": 20,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01000000"
+  }
+ },
+ "A378": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A378",
+   "in_len": 40,
+   "out_len": 32,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01000000000101aaaa"
+  }
+ },
+ "A379": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A379",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A380": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A380",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A381": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {}
+ },
+ "A383": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A383",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A384": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A384",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A385": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A385",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A386": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A386",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A387": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A387",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00000000"
+  }
+ },
+ "A388": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A388",
+   "in_len": 52,
+   "out_len": 52,
+   "in_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001aaaa"
+  }
+ },
+ "A390": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A390",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A391": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A391",
+   "in_len": 4,
+   "out_len": 4,
+   "in_hex": "aa01aaaa"
+  }
+ },
+ "A392": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A392",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A394": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A394",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A395": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A395",
+   "in_len": 4,
+   "out_len": 0,
+   "in_hex": "00aaaaaa"
+  }
+ },
+ "A397": {
+  "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)",
+  "rpc": {
+   "tag": "A397",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  }
+ },
+ "A399": {
+  "func": "0xfffffff0091e1c18",
+  "declared_in": 0,
+  "declared_out": 4,
+  "rpc": {
+   "tag": "A399",
+   "in_len": 0,
+   "out_len": 4,
+   "in_hex": ""
+  },
+  "x0": "0x0",
+  "x0_lo32": 0,
+  "boolish": 0
+ }
+}

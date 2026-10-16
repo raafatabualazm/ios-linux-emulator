@@ -1,0 +1,140 @@
+D000 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D001 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D002 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D003 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || function-bw_req_interrupt0 || function-clock_req_interrupt || Int || Ext || rt_bandwidth_setup_ap || IOMFB %s: %s platform functions missing: %s %s || Int || Ext || rt_bandwidth_setup_ap
+D004 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D005 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D006 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Brightness_Scale
+D007 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D100 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOPMPowerSource
+D101 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D102 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D103 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || trigger_user_cal_loader || %s: triggering user cal || IOMFBLaunchFDRUserCal
+D104 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOMFB : Failed to set property  %s , is_valid_property = %d
+D105 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Panel_ID || IOMFB : Failed to set property  %s , is_valid_property = %d
+D106 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D107 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D108 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D109 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOPMPowerSource
+D110 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D111 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || BacklightMatching
+D112 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IONVRAM || IODTNVRAM || failed to get IODTNVRAM || failed to get IONVRAM
+D113 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Conversions.h || "OSDictionary serialization failed [%p] [%p]" @%s:%d || Conversions.h || "OSDictionary deserialization failed [%p]" @%s:%d
+D114 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D115 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D116 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IdleState
+D117 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D118 D118_callback__ || %s: data: in_args->len (%lu) > in_args->data[] count (%lu) || "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D119 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D120 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || bool UnifiedPipeline2::start_hardware_boot() || %s: late_init failed
+D121 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || kern.darkboot
+D122 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D123 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IODeviceTree:/ || target-type || sim || imb
+D124 D124_callback__ || %s: vals: in_args->nvals (%lu) > in_args->vals[] count (%lu) || "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || read_edt_data || IOMFB %s: Got data for prop: %s with length: %uB but expected length is %uB!
+D125 D125_callback__ || %s: val: in_args->len is NULL || D125_callback__ || %s: val: in_args->len (%lu) > in_args->val[] count (%lu) || D125_callback__ || %s: val: out_args->len (%lu) > out_args->val[] count (%lu) || "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D126 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || setDCPAVPropStart || IOFMB: %s: failed to create buffer
+D127 D127_callback__ || %s: chunk: in_args->chunk_size (%lu) > in_args->chunk[] count (%lu) || "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || setDCPAVPropChunk || IOFMB: %s: setDCPAVPropStart not called or failed || setDCPAVPropChunk || IOFMB: %s: invalid chunk requested
+D128 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || setDCPAVPropEnd || IOFMB: %s: setDCPAVPropStart not called or failed || IOFMB: %s: setProperty failed || OSUnserializeXML failed
+D129 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D130 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Update Ext Pipe state: is_plug %u total count %u limited %u Apple Display %u pipes %u
+D131 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D132 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Platform limits applied %u overall limited %u
+D133 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || APP
+D200 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D201 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOMFBStatus IOMFB::UPPipe2::map_buf(BufferDescriptor *, uint32_t *, dva_t *, bool) || %s: no available records... || IOReturn UnifiedPipeline2::dart_map_mdesc_gated(IOMemoryDescriptor *, IODMACommand **, dva || %s: Could not set the memory descriptor for the DMA command (%X)
+D202 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || void IOMFB::UPPipe2::unmap_buf(BufferDescriptor *, uint32_t, dva_t, bool, bool) || %s: unable to find record for id: %u || UPPipe.cpp || void IOMFB::UPPipe2::unmap_buf(BufferDescriptor *, uint32_t, dva_t, bool, bool) || "%s: dva mismatch for record id: %u\n" @%s:%d || RecordTracker.cpp || get_record_by_id || "%s: record book mismatch\n" @%s:%d
+D203 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || function-link_enable
+D204 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D205 D205_callback__ || %s: dest: in_args->bytes (%lu) > in_args->dest[] count (%lu) || "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D206 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOPMPowerSource
+D207 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || BacklightMatching
+D208 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Brightness_Scale
+D209 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D210 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || isp-alss-zone-count || IOMFB FCAM stats: unexpected window count %d || isp-alss-zone-weight || isp-alss-lum-weight || IOMFB FCAM stats: read %s failed\n
+D211 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D300 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D400 D400_callback__ || %s: data: in_args->data_size is NULL || D400_callback__ || %s: data: in_args->data_size (%lu) > in_args->data[] count (%lu) || D400_callback__ || %s: data: out_args->data_size (%lu) > out_args->data[] count (%lu) || "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d || "IOMFB: buffer too small for property data" @%s:%d
+D401 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D402 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D403 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D404 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D405 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D406 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D407 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D408 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D409 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D410 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D411 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOMFB: mapDeviceMemoryWithIndex memory descriptor allocation failed (0x%x) || IOMFB: mapDeviceMemoryWithIndex DCP memory descriptor allocation failed (0x%x) || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+
+D413 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Conversions.h || "OSDictionary deserialization failed [%p]" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D414 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D415 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D416 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D417 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Conversions.h || "OSArray deserialization failed [%p]" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D418 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Conversions.h || "OSDictionary deserialization failed [%p]" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D419 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D420 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D421 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D422 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D423 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D424 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || ServiceRelay.cpp || "IOMFB: service not found for ID: '%s'" @%s:%d
+D450 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || RecordTracker.cpp || get_record_by_id || "%s: record book mismatch\n" @%s:%d
+D451 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || MemDescRelay.cpp || allocate_buffer || "%s: BufferDescriptor::withOptions options %x, size %llu align %x failed\n" @%s:%d || MemDescRelay.cpp || MemDescRelay::desc_id_t IOMFB::MemDescRelay::allocate_buffer(uint32_t, uint64_t, uint32_t, || "%s: map_memory failed with 0x%x\n" @%s:%d
+D452 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || RecordTracker.cpp || get_record_by_id || "%s: record book mismatch\n" @%s:%d
+D453 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || RecordTracker.cpp || get_record_by_id || "%s: record book mismatch\n" @%s:%d
+D454 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || bool IOMFB::MemDescRelay::release_descriptor(desc_id_t) || %s: wrong ID: %u || bool IOMFB::MemDescRelay::release_descriptor(desc_id_t) || %s: unmap_memory failed with 0x%x || RecordTracker.cpp || get_record_by_id || "%s: record book mismatch\n" @%s:%d
+D550 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Conversions.h || "OSArray deserialization failed [%p]" @%s:%d
+D551 IOMFB: failed to deserialize AFKArray || "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D552 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Conversions.h || "OSDictionary deserialization failed [%p]" @%s:%d
+D553 IOMFB: failed to deserialize AFKDictionary || "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D554 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D555 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D556 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D557 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D558 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D559 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Conversions.h || "OSArray deserialization failed [%p]" @%s:%d
+D560 IOMFB: failed to deserialize AFKArray || "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D561 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Conversions.h || "OSDictionary deserialization failed [%p]" @%s:%d
+D562 IOMFB: failed to deserialize AFKDictionary || "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D563 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D564 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D565 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D566 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D567 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D568 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D569 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D570 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || Conversions.h || "OSDictionary deserialization failed [%p]" @%s:%d
+D571 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D572 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOMFB_POWER_DART: powerUpDART enable=%d dcp_power_off=%d dartRef=%d activeCount=%d
+D573 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D574 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D575 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D576 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D577 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D578 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D579 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D580 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D581 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D582 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOMobileFramebufferAP.cpp || "IOMFB: swap_complete_head_of_line_gated: swap not found: %u" @%s:%d || IOMobileFramebufferAP.cpp || "IOMFB: swap_complete_head_of_line_gated: invalid request to " "update and complete %u" @% || IOSurfaceDisplayTimes || display-complete || void IOMobileFramebufferAP::surface_complete(IOMFBSwapIORequest *, uint32_t) || %s: invalid layerID: %d
+D583 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOMFB: dropped prox sensing needed message from DCP
+D584 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D585 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOMFB: dropped apt mode switch message from DCP
+D586 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOMFBCarveoutRegion || IOMFB: %s : layout_buffers - failed for Surface = 0x%p, sid = %d || IOMFB: %s : getMemoryRegion Failed for Surface = 0x%p, sid = %d || create_default_fb_surface
+D587 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D588 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D589 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D590 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D591 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOMobileFramebufferAP.cpp || IOMFBStatus IOMobileFramebufferAP::updateBufferMappingCount_gated(bool) || "%s, fDartActiveCount is zero when disable is specified" @%s:%d
+D592 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D593 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D594 D594_callback__ || %s: blobs: in_args->blob_count (%lu) > in_args->blobs[] count (%lu) || "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOMobileFramebufferAP.cpp || "IOMFB: swap_complete_ap_gated: swap not found: %u" @%s:%d || "IOMFB: swap_complete_head_of_line_gated: swap not found: %u" @%s:%d || "IOMFB: swap_complete_head_of_line_gated: invalid request to " "update and complete %u" @% || IOSurfaceDisplayTimes || display-complete || void IOMobileFramebufferAP::surface_complete(IOMFBSwapIORequest *, uint32_t)
+D595 D595_callback__ || %s: swapID: in_args->count (%lu) > in_args->swapID[] count (%lu) || %s: has_data: in_args->count (%lu) > in_args->has_data[] count (%lu) || %s: data: in_args->count (%lu) > in_args->data[] count (%lu) || "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || IOMobileFramebufferAP.cpp || "IOMFB: swap_complete_ap_gated: swap not found: %u" @%s:%d || "IOMFB: swap_complete_head_of_line_gated: swap not found: %u" @%s:%d || "IOMFB: swap_complete_head_of_line_gated: invalid request to " "update and complete %u" @% || ERROR: event is NULL
+
+D597 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D598 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || displayOnTimestamp || displayOnContinuousTimestamp
+D599 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D600 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || BBBBBBBBBBGGGGGGGGGGRRRRRRRRRR || IOMFB: Unsupported format for spinner || SystemConsoleMode || void IOMobileFramebufferAP::setSystemConsoleMode_gated(bool) || %s:  failed to map surface %d
+D601 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D602 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d
+D603 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d || iomfb_swap_fn
+D700 "IOMFB: %s: no instance for instance ID: %u\n" @%s:%d

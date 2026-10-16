@@ -1,0 +1,2549 @@
+{
+ "D300": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091e5008",
+  "handler": "0xfffffff0091e5030",
+  "size_checks": [
+   "in_len>=0x10?"
+  ],
+  "calls": [
+   "0xfffffff0091e5108",
+   "0xfffffff0091e5108"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::PropRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D100": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fce28",
+  "size_checks": [],
+  "calls": [
+   "0xfffffff0091eda40"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOPMPowerSource"
+  ]
+ },
+ "D101": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fce98",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D102": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fcf14",
+  "size_checks": [
+   "in_len>=0x44?"
+  ],
+  "calls": [
+   "0xfffffff0091fcff8",
+   "0xfffffff0091e92fc",
+   "0xfffffff0091fcff8"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D103": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fd034",
+  "size_checks": [],
+  "calls": [
+   "0xfffffff0091eb728"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "trigger_user_cal_loader"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "trigger_user_cal_loader",
+   "%s: triggering user cal",
+   "IOMFBLaunchFDRUserCal"
+  ]
+ },
+ "D104": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fd0a4",
+  "size_checks": [
+   "in_len>=0x44?"
+  ],
+  "calls": [
+   "0xfffffff0091fd190",
+   "0xfffffff0091e93b0",
+   "0xfffffff0091fd190"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "IOMFB : Failed to set property  %s , is_valid_property = %d \n"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOMFB : Failed to set property  %s , is_valid_property = %d"
+  ]
+ },
+ "D105": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fd1e8",
+  "size_checks": [
+   "in_len>=0x80?"
+  ],
+  "calls": [
+   "0xfffffff0091fd2dc",
+   "0xfffffff0091e94c4",
+   "0xfffffff0091fd2dc"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "Panel_ID",
+   "IOMFB : Failed to set property  %s , is_valid_property = %d \n"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Panel_ID",
+   "IOMFB : Failed to set property  %s , is_valid_property = %d"
+  ]
+ },
+ "D106": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fd334",
+  "size_checks": [
+   "in_len>=0x40?"
+  ],
+  "calls": [
+   "0xfffffff0091fd404",
+   "0xfffffff0091fd404"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D107": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fd43c",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff0091fd49c",
+   "0xfffffff0091ecc68"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D108": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fd4d4",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff0091fd534",
+   "0xfffffff0091eccd0"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D109": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fd56c",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff0091fd5cc",
+   "0xfffffff0091ecd38"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOPMPowerSource"
+  ]
+ },
+ "D110": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fd604",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff0091fd664",
+   "0xfffffff0091ecd9c"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D111": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fd69c",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff0091fd6fc",
+   "0xfffffff0091ecdfc"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "BacklightMatching"
+  ]
+ },
+ "D112": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fd734",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff0091fd794",
+   "0xfffffff0091ece60"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IONVRAM",
+   "IODTNVRAM",
+   "failed to get IODTNVRAM",
+   "failed to get IONVRAM"
+  ]
+ },
+ "D113": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fd7cc",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Conversions.h",
+   "\"OSDictionary serialization failed [%p] [%p]\" @%s:%d",
+   "Conversions.h",
+   "\"OSDictionary deserialization failed [%p]\" @%s:%d"
+  ]
+ },
+ "D114": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fd9e8",
+  "size_checks": [
+   "in_len>=0x10?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D115": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fdb0c",
+  "size_checks": [
+   "in_len>=0x10?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D116": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fdc24",
+  "size_checks": [
+   "in_len>=0xc?"
+  ],
+  "calls": [
+   "0xfffffff0091fdce0",
+   "0xfffffff0091ed520",
+   "0xfffffff0091fdce0"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IdleState"
+  ]
+ },
+ "D117": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fdd18",
+  "size_checks": [
+   "in_len>=0x14?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D118": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fde30",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "D118_callback__",
+   "%s: data: in_args->len (%lu) > in_args->data[] count (%lu)\n",
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "D118_callback__",
+   "%s: data: in_args->len (%lu) > in_args->data[] count (%lu)",
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D119": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fdfb4",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D120": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fe0bc",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff0091fe11c",
+   "0xfffffff0091eaa28"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "bool UnifiedPipeline2::start_hardware_boot()",
+   "%s: late_init failed\n"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "bool UnifiedPipeline2::start_hardware_boot()",
+   "%s: late_init failed"
+  ]
+ },
+ "D121": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fe154",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff0091fe1b4",
+   "0xfffffff0091ecfcc"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "kern.darkboot"
+  ]
+ },
+ "D122": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fe1ec",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff0091fe24c",
+   "0xfffffff0091edd4c"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D123": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fe284",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff0091fe2e4",
+   "0xfffffff0091e9818"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IODeviceTree:/",
+   "target-type",
+   "sim",
+   "imb"
+  ]
+ },
+ "D124": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fe31c",
+  "size_checks": [
+   "in_len>=0x64?"
+  ],
+  "calls": [],
+  "strings": [
+   "D124_callback__",
+   "%s: vals: in_args->nvals (%lu) > in_args->vals[] count (%lu)\n",
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "read_edt_data"
+  ],
+  "deep_strings": [
+   "D124_callback__",
+   "%s: vals: in_args->nvals (%lu) > in_args->vals[] count (%lu)",
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "read_edt_data",
+   "IOMFB %s: Got data for prop: %s with length: %uB but expected length is %uB!"
+  ]
+ },
+ "D125": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fe4b0",
+  "size_checks": [
+   "in_len>=0x48?"
+  ],
+  "calls": [],
+  "strings": [
+   "D125_callback__",
+   "%s: val: in_args->len is NULL\n",
+   "D125_callback__",
+   "%s: val: in_args->len (%lu) > in_args->val[] count (%lu)\n"
+  ],
+  "deep_strings": [
+   "D125_callback__",
+   "%s: val: in_args->len is NULL",
+   "D125_callback__",
+   "%s: val: in_args->len (%lu) > in_args->val[] count (%lu)",
+   "D125_callback__",
+   "%s: val: out_args->len (%lu) > out_args->val[] count (%lu)",
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D126": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fe698",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "setDCPAVPropStart",
+   "IOFMB: %s: failed to create buffer"
+  ]
+ },
+ "D127": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fe7a0",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "D127_callback__",
+   "%s: chunk: in_args->chunk_size (%lu) > in_args->chunk[] count (%lu)\n",
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "D127_callback__",
+   "%s: chunk: in_args->chunk_size (%lu) > in_args->chunk[] count (%lu)",
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "setDCPAVPropChunk",
+   "IOFMB: %s: setDCPAVPropStart not called or failed",
+   "setDCPAVPropChunk",
+   "IOFMB: %s: invalid chunk requested"
+  ]
+ },
+ "D128": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fe924",
+  "size_checks": [
+   "in_len>=0x40?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "setDCPAVPropEnd",
+   "IOFMB: %s: setDCPAVPropStart not called or failed",
+   "IOFMB: %s: setProperty failed",
+   "OSUnserializeXML failed"
+  ]
+ },
+ "D129": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fea38",
+  "size_checks": [
+   "in_len>=0x1c?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D130": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091feb88",
+  "size_checks": [
+   "in_len>=0x8?"
+  ],
+  "calls": [
+   "0xfffffff0091fec40",
+   "0xfffffff0091e96ec",
+   "0xfffffff0091fec40"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "Update Ext Pipe state: is_plug %u total count %u limited %u Apple Display %u pipes %u \n"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Update Ext Pipe state: is_plug %u total count %u limited %u Apple Display %u pipes %u"
+  ]
+ },
+ "D131": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fec78",
+  "size_checks": [
+   "in_len>=0x10?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D132": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091fedbc",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff0091fee80",
+   "0xfffffff0091e97a4",
+   "0xfffffff0091fee80"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Platform limits applied %u overall limited %u"
+  ]
+ },
+ "D133": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091fc978",
+  "handler": "0xfffffff0091feebc",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff0091fef1c",
+   "0xfffffff0091e95c4"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "APP"
+  ]
+ },
+ "D200": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091ffc38",
+  "handler": "0xfffffff0091ffddc",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D201": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091ffc38",
+  "handler": "0xfffffff0091ffe50",
+  "size_checks": [
+   "in_len>=0xc?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::MemDescRelay]",
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "IOMFBStatus IOMFB::UPPipe2::map_buf(BufferDescriptor *, uint32_t *, dva_t *, bool)",
+   "IOReturn UnifiedPipeline2::dart_map_mdesc_gated(IOMemoryDescriptor *, IODMACommand **, dva_t *, bool)"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOMFBStatus IOMFB::UPPipe2::map_buf(BufferDescriptor *, uint32_t *, dva_t *, bool)",
+   "%s: no available records...",
+   "IOReturn UnifiedPipeline2::dart_map_mdesc_gated(IOMemoryDescriptor *, IODMACommand **, dva_t *, bool)",
+   "%s: Could not set the memory descriptor for the DMA command (%X)"
+  ]
+ },
+ "D202": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091ffc38",
+  "handler": "0xfffffff009200014",
+  "size_checks": [
+   "in_len>=0x18?"
+  ],
+  "calls": [
+   "0xfffffff00920015c",
+   "0xfffffff0092000f0",
+   "0xfffffff009201158"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::MemDescRelay]",
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "void IOMFB::UPPipe2::unmap_buf(BufferDescriptor *, uint32_t, dva_t, bool, bool)",
+   "void IOMFB::UPPipe2::unmap_buf(BufferDescriptor *, uint32_t, dva_t, bool, bool)"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "void IOMFB::UPPipe2::unmap_buf(BufferDescriptor *, uint32_t, dva_t, bool, bool)",
+   "%s: unable to find record for id: %u",
+   "UPPipe.cpp",
+   "void IOMFB::UPPipe2::unmap_buf(BufferDescriptor *, uint32_t, dva_t, bool, bool)",
+   "\"%s: dva mismatch for record id: %u\\n\" @%s:%d",
+   "RecordTracker.cpp",
+   "get_record_by_id",
+   "\"%s: record book mismatch\\n\" @%s:%d"
+  ]
+ },
+ "D203": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091ffc38",
+  "handler": "0xfffffff00920019c",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "function-link_enable"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "function-link_enable"
+  ]
+ },
+ "D204": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091ffc38",
+  "handler": "0xfffffff0092001f0",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D205": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091ffc38",
+  "handler": "0xfffffff009200244",
+  "size_checks": [
+   "in_len>=0xc?"
+  ],
+  "calls": [],
+  "strings": [
+   "D205_callback__",
+   "%s: dest: in_args->bytes (%lu) > in_args->dest[] count (%lu)\n",
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "D205_callback__",
+   "%s: dest: in_args->bytes (%lu) > in_args->dest[] count (%lu)",
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D206": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091ffc38",
+  "handler": "0xfffffff009200370",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOPMPowerSource"
+  ]
+ },
+ "D207": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091ffc38",
+  "handler": "0xfffffff0092003c4",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "BacklightMatching"
+  ]
+ },
+ "D208": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091ffc38",
+  "handler": "0xfffffff009200418",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "Brightness_Scale"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Brightness_Scale"
+  ]
+ },
+ "D209": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091ffc38",
+  "handler": "0xfffffff0092004c0",
+  "size_checks": [
+   "out_len>=0x8?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D210": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091ffc38",
+  "handler": "0xfffffff009200514",
+  "size_checks": [
+   "in_len>=0x4?",
+   "out_len>=0x51c?",
+   "out_len>=0x51c?"
+  ],
+  "calls": [
+   "0xfffffff0092006e0",
+   "0xfffffff0091e7904",
+   "0xfffffff009200b28"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "isp-alss-zone-count",
+   "IOMFB FCAM stats: unexpected window count %d",
+   "isp-alss-zone-weight",
+   "isp-alss-lum-weight",
+   "IOMFB FCAM stats: read %s failed\\n"
+  ]
+ },
+ "D211": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091ffc38",
+  "handler": "0xfffffff0092005f8",
+  "size_checks": [
+   "in_len>=0x4?",
+   "out_len>=0x14?",
+   "out_len>=0x14?"
+  ],
+  "calls": [
+   "0xfffffff009200674",
+   "0xfffffff0092006e0",
+   "0xfffffff0091e7b98"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D700": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a14c0b4",
+  "handler": "0xfffffff00a14c0dc",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::DCPPowerManager]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D400": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16acb0",
+  "size_checks": [
+   "in_len>=0x4c?"
+  ],
+  "calls": [],
+  "strings": [
+   "D400_callback__",
+   "%s: data: in_args->data_size is NULL\n",
+   "D400_callback__",
+   "%s: data: in_args->data_size (%lu) > in_args->data[] count (%lu)\n"
+  ],
+  "deep_strings": [
+   "D400_callback__",
+   "%s: data: in_args->data_size is NULL",
+   "D400_callback__",
+   "%s: data: in_args->data_size (%lu) > in_args->data[] count (%lu)",
+   "D400_callback__",
+   "%s: data: out_args->data_size (%lu) > out_args->data[] count (%lu)",
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d",
+   "\"IOMFB: buffer too small for property data\" @%s:%d"
+  ]
+ },
+ "D401": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16aeb4",
+  "size_checks": [
+   "in_len>=0x50?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D402": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16b000",
+  "size_checks": [
+   "in_len>=0x4c?"
+  ],
+  "calls": [
+   "0xfffffff00a16b0e0",
+   "0xfffffff00a14d1dc",
+   "0xfffffff00a16b0e0"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D403": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16b118",
+  "size_checks": [
+   "in_len>=0x4c?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D404": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16b26c",
+  "size_checks": [
+   "in_len>=0x48?"
+  ],
+  "calls": [
+   "0xfffffff00a16b344",
+   "0xfffffff00a14d170",
+   "0xfffffff00a16b344"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D405": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16b37c",
+  "size_checks": [
+   "in_len>=0x4c?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D406": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16b4d0",
+  "size_checks": [
+   "in_len>=0x48?"
+  ],
+  "calls": [
+   "0xfffffff00a16b5a8",
+   "0xfffffff00a14d248",
+   "0xfffffff00a16b5a8"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D407": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16b5e0",
+  "size_checks": [
+   "in_len>=0x48?"
+  ],
+  "calls": [
+   "0xfffffff00a16b6bc",
+   "0xfffffff00a14d2b4",
+   "0xfffffff00a16b6bc"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D408": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16b6f4",
+  "size_checks": [
+   "in_len>=0x8?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D409": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16b810",
+  "size_checks": [
+   "in_len>=0xc?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D410": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16b940",
+  "size_checks": [
+   "in_len>=0x14?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D411": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16ba8c",
+  "size_checks": [
+   "in_len>=0x10?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]",
+   "IOMFB: mapDeviceMemoryWithIndex memory descriptor allocation failed (0x%x)\n",
+   "IOMFB: mapDeviceMemoryWithIndex DCP memory descriptor allocation failed (0x%x)\n"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOMFB: mapDeviceMemoryWithIndex memory descriptor allocation failed (0x%x)",
+   "IOMFB: mapDeviceMemoryWithIndex DCP memory descriptor allocation failed (0x%x)",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D412": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16bbe0",
+  "size_checks": [
+   "in_len>=0x448?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Conversions.h",
+   "\"OSArray deserialization failed [%p]\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D413": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16bdcc",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Conversions.h",
+   "\"OSDictionary deserialization failed [%p]\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D414": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16bfd8",
+  "size_checks": [
+   "in_len>=0x50?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D415": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16c194",
+  "size_checks": [
+   "in_len>=0x4c?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D416": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16c33c",
+  "size_checks": [
+   "in_len>=0x84?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D417": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16c4f4",
+  "size_checks": [
+   "in_len>=0x448?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Conversions.h",
+   "\"OSArray deserialization failed [%p]\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D418": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16c6b4",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Conversions.h",
+   "\"OSDictionary deserialization failed [%p]\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D419": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16c894",
+  "size_checks": [
+   "in_len>=0x50?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D420": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16ca1c",
+  "size_checks": [
+   "in_len>=0x4c?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D421": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16cb88",
+  "size_checks": [
+   "in_len>=0x84?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D422": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16cd0c",
+  "size_checks": [
+   "in_len>=0x48?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D423": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16ce48",
+  "size_checks": [
+   "in_len>=0x44?"
+  ],
+  "calls": [
+   "0xfffffff00a16cf50",
+   "0xfffffff00a14d9e4",
+   "0xfffffff00a16cf50"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]",
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D424": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16a928",
+  "handler": "0xfffffff00a16cfa8",
+  "size_checks": [
+   "in_len>=0x44?"
+  ],
+  "calls": [
+   "0xfffffff00a16d0b8",
+   "0xfffffff00a177390",
+   "0xfffffff00a14d978"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::ServiceRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "ServiceRelay.cpp",
+   "\"IOMFB: service not found for ID: '%s'\" @%s:%d"
+  ]
+ },
+ "D550": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1719b4",
+  "size_checks": [
+   "in_len>=0x444?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Conversions.h",
+   "\"OSArray deserialization failed [%p]\" @%s:%d"
+  ]
+ },
+ "D551": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a171bb0",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "IOMFB: failed to deserialize AFKArray",
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D552": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a171de8",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Conversions.h",
+   "\"OSDictionary deserialization failed [%p]\" @%s:%d"
+  ]
+ },
+ "D553": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a172004",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "IOMFB: failed to deserialize AFKDictionary",
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D554": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a17223c",
+  "size_checks": [
+   "in_len>=0x4c?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D555": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a172408",
+  "size_checks": [
+   "in_len>=0x4c?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D556": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1725d4",
+  "size_checks": [
+   "in_len>=0x48?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D557": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a172784",
+  "size_checks": [
+   "in_len>=0x80?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D558": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a17293c",
+  "size_checks": [
+   "in_len>=0x80?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D559": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a172af4",
+  "size_checks": [
+   "in_len>=0x444?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Conversions.h",
+   "\"OSArray deserialization failed [%p]\" @%s:%d"
+  ]
+ },
+ "D560": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a172cc4",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "IOMFB: failed to deserialize AFKArray",
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D561": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a172ed0",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Conversions.h",
+   "\"OSDictionary deserialization failed [%p]\" @%s:%d"
+  ]
+ },
+ "D562": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1730c0",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "IOMFB: failed to deserialize AFKDictionary",
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D563": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1732cc",
+  "size_checks": [
+   "in_len>=0x4c?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D564": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a17346c",
+  "size_checks": [
+   "in_len>=0x4c?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D565": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a17360c",
+  "size_checks": [
+   "in_len>=0x48?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D566": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a173788",
+  "size_checks": [
+   "in_len>=0x80?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D567": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a173914",
+  "size_checks": [
+   "in_len>=0x80?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D568": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a173aa0",
+  "size_checks": [
+   "in_len>=0x80?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D569": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a173bf8",
+  "size_checks": [
+   "in_len>=0x44?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D570": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a173d48",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Conversions.h",
+   "\"OSDictionary deserialization failed [%p]\" @%s:%d"
+  ]
+ },
+ "D571": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a173f34",
+  "size_checks": [
+   "in_len>=0x8?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D572": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a174070",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "IOMFB_POWER_DART: powerUpDART enable=%d dcp_power_off=%d dartRef=%d activeCount=%d\n"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOMFB_POWER_DART: powerUpDART enable=%d dcp_power_off=%d dartRef=%d activeCount=%d"
+  ]
+ },
+ "D573": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a17419c",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D574": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1742e0",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D575": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a174424",
+  "size_checks": [
+   "in_len>=0x58?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D576": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1745a8",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff00a17468c",
+   "0xfffffff00a17468c"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D577": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1746c4",
+  "size_checks": [
+   "in_len>=0x8?"
+  ],
+  "calls": [
+   "0xfffffff00a17479c",
+   "0xfffffff00a17479c"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D578": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1747d4",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D579": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a174874",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D580": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1749ac",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D581": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a174a4c",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D582": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a174aec",
+  "size_checks": [
+   "in_len>=0xc?"
+  ],
+  "calls": [
+   "0xfffffff00a174bc4",
+   "0xfffffff00a15fdf8",
+   "0xfffffff00a174bc4"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "\"IOMFB: swap_complete_head_of_line_gated: swap not found: %u\" @%s:%d",
+   "\"IOMFB: swap_complete_head_of_line_gated: invalid request to \" \"update and complete %u\" @%s:%d"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOMobileFramebufferAP.cpp",
+   "\"IOMFB: swap_complete_head_of_line_gated: swap not found: %u\" @%s:%d",
+   "IOMobileFramebufferAP.cpp",
+   "\"IOMFB: swap_complete_head_of_line_gated: invalid request to \" \"update and complete %u\" @%s:%d",
+   "IOSurfaceDisplayTimes",
+   "display-complete",
+   "void IOMobileFramebufferAP::surface_complete(IOMFBSwapIORequest *, uint32_t)",
+   "%s: invalid layerID: %d"
+  ]
+ },
+ "D583": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a174bfc",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff00a174ce4",
+   "0xfffffff00a15595c",
+   "0xfffffff00a174ce4"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOMFB: dropped prox sensing needed message from DCP"
+  ]
+ },
+ "D584": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a174d3c",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D585": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a174ddc",
+  "size_checks": [
+   "in_len>=0xc?"
+  ],
+  "calls": [
+   "0xfffffff00a174ed8",
+   "0xfffffff00a15589c",
+   "0xfffffff00a174ed8"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOMFB: dropped apt mode switch message from DCP"
+  ]
+ },
+ "D586": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a174f14",
+  "size_checks": [
+   "in_len>=0x8?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "IOMFB: %s : layout_buffers - failed for Surface = 0x%p, sid = %d\n",
+   "create_default_fb_surface"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOMFBCarveoutRegion",
+   "IOMFB: %s : layout_buffers - failed for Surface = 0x%p, sid = %d",
+   "IOMFB: %s : getMemoryRegion Failed for Surface = 0x%p, sid = %d",
+   "create_default_fb_surface"
+  ]
+ },
+ "D587": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a175030",
+  "size_checks": [],
+  "calls": [
+   "0xfffffff00a14eb48"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D588": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1750b4",
+  "size_checks": [
+   "in_len>=0x18?"
+  ],
+  "calls": [
+   "0xfffffff00a175180",
+   "0xfffffff00a156948",
+   "0xfffffff00a175180"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D589": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1751b8",
+  "size_checks": [
+   "in_len>=0xe4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D590": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a175344",
+  "size_checks": [
+   "in_len>=0x14?"
+  ],
+  "calls": [
+   "0xfffffff00a175414",
+   "0xfffffff00a155894",
+   "0xfffffff00a175414"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D591": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a17544c",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "IOMFBStatus IOMobileFramebufferAP::updateBufferMappingCount_gated(bool)"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOMobileFramebufferAP.cpp",
+   "IOMFBStatus IOMobileFramebufferAP::updateBufferMappingCount_gated(bool)",
+   "\"%s, fDartActiveCount is zero when disable is specified\" @%s:%d"
+  ]
+ },
+ "D592": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1755a4",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D593": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a175644",
+  "size_checks": [
+   "in_len>=0x8?"
+  ],
+  "calls": [
+   "0xfffffff00a175728",
+   "0xfffffff00a156b10",
+   "0xfffffff00a175728"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D594": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a175764",
+  "size_checks": [
+   "in_len>=0x730?"
+  ],
+  "calls": [
+   "0xfffffff00a17589c",
+   "0xfffffff00a1777c0",
+   "0xfffffff00a176ab0"
+  ],
+  "strings": [
+   "D594_callback__",
+   "%s: blobs: in_args->blob_count (%lu) > in_args->blobs[] count (%lu)\n",
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "\"IOMFB: swap_complete_ap_gated: swap not found: %u\" @%s:%d"
+  ],
+  "deep_strings": [
+   "D594_callback__",
+   "%s: blobs: in_args->blob_count (%lu) > in_args->blobs[] count (%lu)",
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOMobileFramebufferAP.cpp",
+   "\"IOMFB: swap_complete_ap_gated: swap not found: %u\" @%s:%d",
+   "\"IOMFB: swap_complete_head_of_line_gated: swap not found: %u\" @%s:%d",
+   "\"IOMFB: swap_complete_head_of_line_gated: invalid request to \" \"update and complete %u\" @%s:%d",
+   "IOSurfaceDisplayTimes",
+   "display-complete",
+   "void IOMobileFramebufferAP::surface_complete(IOMFBSwapIORequest *, uint32_t)",
+   "%s: invalid layerID: %d",
+   "ERROR: event is NULL"
+  ]
+ },
+ "D595": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1758dc",
+  "size_checks": [],
+  "calls": [],
+  "strings": [
+   "D595_callback__",
+   "%s: swapID: in_args->count (%lu) > in_args->swapID[] count (%lu)\n",
+   "%s: has_data: in_args->count (%lu) > in_args->has_data[] count (%lu)\n",
+   "%s: data: in_args->count (%lu) > in_args->data[] count (%lu)\n"
+  ],
+  "deep_strings": [
+   "D595_callback__",
+   "%s: swapID: in_args->count (%lu) > in_args->swapID[] count (%lu)",
+   "%s: has_data: in_args->count (%lu) > in_args->has_data[] count (%lu)",
+   "%s: data: in_args->count (%lu) > in_args->data[] count (%lu)",
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOMobileFramebufferAP.cpp",
+   "\"IOMFB: swap_complete_ap_gated: swap not found: %u\" @%s:%d",
+   "\"IOMFB: swap_complete_head_of_line_gated: swap not found: %u\" @%s:%d",
+   "\"IOMFB: swap_complete_head_of_line_gated: invalid request to \" \"update and complete %u\" @%s:%d",
+   "ERROR: event is NULL"
+  ]
+ },
+ "D596": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a175aec",
+  "size_checks": [
+   "in_len>=0x14?"
+  ],
+  "calls": [
+   "0xfffffff00a175bc4",
+   "0xfffffff00a15fed0",
+   "0xfffffff00a175bc4"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "\"IOMFB: swap_complete_intent_gated: unsupported intent %u\" @%s:%d",
+   "void IOMobileFramebufferAP::surface_complete(IOMFBSwapIORequest *, uint32_t)"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "IOMobileFramebufferAP.cpp",
+   "\"IOMFB: swap_complete_intent_gated: unsupported intent %u\" @%s:%d",
+   "IOSurfaceDisplayTimes",
+   "display-complete",
+   "void IOMobileFramebufferAP::surface_complete(IOMFBDisplayedData *, uint32_t, uint32_t)",
+   "%s: invalid layerID: %d",
+   "surface_complete",
+   "IOMFB: %s : Freeing up Default Temp surface - SwapID = %d, Surface = 0x%p",
+   "void IOMobileFramebufferAP::blit_surface_complete(IOMFBDisplayedData *, uint32_t, uint32_t)",
+   "%s: invalid blitID: %d",
+   "void IOMobileFramebufferAP::surface_complete(IOMFBSwapIORequest *, uint32_t)"
+  ]
+ },
+ "D597": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a175bfc",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff00a175ce4",
+   "0xfffffff00a1603ec",
+   "0xfffffff00a175ce4"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D598": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a175d3c",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff00a175e28",
+   "0xfffffff00a160530",
+   "0xfffffff00a175e28"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "displayOnTimestamp",
+   "displayOnContinuousTimestamp"
+  ]
+ },
+ "D599": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a175e64",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff00a175f50",
+   "0xfffffff00a150e34",
+   "0xfffffff00a175f50"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D600": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a175f8c",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff00a176078",
+   "0xfffffff00a159fc4",
+   "0xfffffff00a176078"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "void IOMobileFramebufferAP::setSystemConsoleMode_gated(bool)"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "BBBBBBBBBBGGGGGGGGGGRRRRRRRRRR",
+   "IOMFB: Unsupported format for spinner",
+   "SystemConsoleMode",
+   "void IOMobileFramebufferAP::setSystemConsoleMode_gated(bool)",
+   "%s:  failed to map surface %d"
+  ]
+ },
+ "D601": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1760b4",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [
+   "0xfffffff00a176128",
+   "0xfffffff00a15038c"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D602": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a176160",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D603": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a17125c",
+  "handler": "0xfffffff00a1761fc",
+  "size_checks": [],
+  "calls": [
+   "0xfffffff00a15b5e8"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "iomfb_swap_fn"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "iomfb_swap_fn"
+  ]
+ },
+ "D000": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091dcc94",
+  "handler": "0xfffffff0091dccc4",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D001": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091dcc94",
+  "handler": "0xfffffff0091dcd18",
+  "size_checks": [
+   "out_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D002": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091dcc94",
+  "handler": "0xfffffff0091dcd6c",
+  "size_checks": [],
+  "calls": [
+   "0xfffffff0091dd1cc",
+   "0xfffffff0091ddb40"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D003": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091dcc94",
+  "handler": "0xfffffff0091dcd94",
+  "size_checks": [
+   "in_len>=0x4?",
+   "out_len>=0x14?",
+   "out_len>=0x14?"
+  ],
+  "calls": [
+   "0xfffffff0091dd1cc",
+   "0xfffffff0091de0bc",
+   "0xfffffff009200b28"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "function-bw_req_interrupt0",
+   "function-clock_req_interrupt",
+   "rt_bandwidth_setup_ap"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "function-bw_req_interrupt0",
+   "function-clock_req_interrupt",
+   "Int",
+   "Ext",
+   "rt_bandwidth_setup_ap",
+   "IOMFB %s: %s platform functions missing: %s %s",
+   "Int",
+   "Ext",
+   "rt_bandwidth_setup_ap",
+   "%s: %s PMC Bandwidth dashboard not found (error %d)",
+   "Int"
+  ]
+ },
+ "D004": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091dcc94",
+  "handler": "0xfffffff0091dce78",
+  "size_checks": [
+   "in_len>=0x8?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D005": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091dcc94",
+  "handler": "0xfffffff0091dcf48",
+  "size_checks": [
+   "in_len>=0x8?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D006": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091dcc94",
+  "handler": "0xfffffff0091dd018",
+  "size_checks": [
+   "in_len>=0x54?",
+   "out_len>=0x50?",
+   "out_len>=0x50?"
+  ],
+  "calls": [
+   "0xfffffff0091dd104",
+   "0xfffffff0091dd0d4",
+   "0xfffffff0091dd1cc"
+  ],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]",
+   "Brightness_Scale"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "Brightness_Scale"
+  ]
+ },
+ "D007": {
+  "kext": "com.apple.driver.AppleMobileDispH17P-DCP",
+  "lookup": "0xfffffff0091dcc94",
+  "handler": "0xfffffff0091dd11c",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMobileFramebufferAP]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d"
+  ]
+ },
+ "D450": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16d4d8",
+  "handler": "0xfffffff00a16d508",
+  "size_checks": [
+   "in_len>=0x8?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::MemDescRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "RecordTracker.cpp",
+   "get_record_by_id",
+   "\"%s: record book mismatch\\n\" @%s:%d"
+  ]
+ },
+ "D451": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16d4d8",
+  "handler": "0xfffffff00a16d644",
+  "size_checks": [
+   "in_len>=0x14?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::MemDescRelay]",
+   "allocate_buffer",
+   "\"%s: BufferDescriptor::withOptions options %x, size %llu align %x failed\\n\" @%s:%d",
+   "MemDescRelay::desc_id_t IOMFB::MemDescRelay::allocate_buffer(uint32_t, uint64_t, uint32_t, dva_t *, uint64_t *)"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "MemDescRelay.cpp",
+   "allocate_buffer",
+   "\"%s: BufferDescriptor::withOptions options %x, size %llu align %x failed\\n\" @%s:%d",
+   "MemDescRelay.cpp",
+   "MemDescRelay::desc_id_t IOMFB::MemDescRelay::allocate_buffer(uint32_t, uint64_t, uint32_t, dva_t *, uint64_t *)",
+   "\"%s: map_memory failed with 0x%x\\n\" @%s:%d"
+  ]
+ },
+ "D452": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16d4d8",
+  "handler": "0xfffffff00a16d790",
+  "size_checks": [
+   "in_len>=0x8?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::MemDescRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "RecordTracker.cpp",
+   "get_record_by_id",
+   "\"%s: record book mismatch\\n\" @%s:%d"
+  ]
+ },
+ "D453": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16d4d8",
+  "handler": "0xfffffff00a16d8b0",
+  "size_checks": [
+   "in_len>=0x8?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::MemDescRelay]"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "RecordTracker.cpp",
+   "get_record_by_id",
+   "\"%s: record book mismatch\\n\" @%s:%d"
+  ]
+ },
+ "D454": {
+  "kext": "com.apple.iokit.IOMobileGraphicsFamily-DCP",
+  "lookup": "0xfffffff00a16d4d8",
+  "handler": "0xfffffff00a16d9d0",
+  "size_checks": [
+   "in_len>=0x4?"
+  ],
+  "calls": [],
+  "strings": [
+   "static T *IOMFB::InstanceTracker::instance(tracked_entity_t, uint32_t) [T = IOMFB::MemDescRelay]",
+   "bool IOMFB::MemDescRelay::release_descriptor(desc_id_t)",
+   "bool IOMFB::MemDescRelay::release_descriptor(desc_id_t)",
+   "%s: unmap_memory failed with 0x%x\n"
+  ],
+  "deep_strings": [
+   "\"IOMFB: %s: no instance for instance ID: %u\\n\" @%s:%d",
+   "bool IOMFB::MemDescRelay::release_descriptor(desc_id_t)",
+   "%s: wrong ID: %u",
+   "bool IOMFB::MemDescRelay::release_descriptor(desc_id_t)",
+   "%s: unmap_memory failed with 0x%x",
+   "RecordTracker.cpp",
+   "get_record_by_id",
+   "\"%s: record book mismatch\\n\" @%s:%d"
+  ]
+ }
+}

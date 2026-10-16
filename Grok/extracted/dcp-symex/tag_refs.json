@@ -1,0 +1,4177 @@
+{
+ "A000": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091db8f8",
+   "func": "0xfffffff0091db8a0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A001": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091db960",
+   "func": "0xfffffff0091db920",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A002": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091db9c8",
+   "func": "0xfffffff0091db998",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A003": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dba34",
+   "func": "0xfffffff0091db9f8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A004": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dba94",
+   "func": "0xfffffff0091dba58",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A005": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbaf4",
+   "func": "0xfffffff0091dbab8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A006": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbb54",
+   "func": "0xfffffff0091dbb18",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A007": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbbb4",
+   "func": "0xfffffff0091dbb78",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A008": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbc14",
+   "func": "0xfffffff0091dbbd8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A009": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbc84",
+   "func": "0xfffffff0091dbc38",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A010": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbcf4",
+   "func": "0xfffffff0091dbca8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A011": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbd54",
+   "func": "0xfffffff0091dbd18",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A012": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbdb4",
+   "func": "0xfffffff0091dbd78",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A013": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbe14",
+   "func": "0xfffffff0091dbdd8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A014": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbe78",
+   "func": "0xfffffff0091dbe38",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A015": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbee4",
+   "func": "0xfffffff0091dbea4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A016": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbf4c",
+   "func": "0xfffffff0091dbf10",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A017": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dbfa0",
+   "func": "0xfffffff0091dbf70",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A018": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc010",
+   "func": "0xfffffff0091dbfd0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A019": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc07c",
+   "func": "0xfffffff0091dc03c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A020": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc0f4",
+   "func": "0xfffffff0091dc0b4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A021": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc150",
+   "func": "0xfffffff0091dc120",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A022": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc21c",
+   "func": "0xfffffff0091dc180",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0x8"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A023": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc2a4",
+   "func": "0xfffffff0091dc264",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A024": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc30c",
+   "func": "0xfffffff0091dc2dc",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc36c",
+   "func": "0xfffffff0091dc33c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A025": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc3dc",
+   "func": "0xfffffff0091dc39c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A026": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc448",
+   "func": "0xfffffff0091dc408",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A027": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc4c0",
+   "func": "0xfffffff0091dc480",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A028": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc528",
+   "func": "0xfffffff0091dc4f8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc588",
+   "func": "0xfffffff0091dc558",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A029": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc600",
+   "func": "0xfffffff0091dc5b8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A030": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc690",
+   "func": "0xfffffff0091dc624",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x6c",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A031": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc6f4",
+   "func": "0xfffffff0091dc6b4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A032": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc76c",
+   "func": "0xfffffff0091dc72c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A033": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc874",
+   "func": "0xfffffff0091dc7a4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x2c",
+    "w5, #0x2c"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A034": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc978",
+   "func": "0xfffffff0091dc8f4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x8"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A035": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dc9f0",
+   "func": "0xfffffff0091dc9b0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x8"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A036": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dca58",
+   "func": "0xfffffff0091dca18",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A037": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dcac0",
+   "func": "0xfffffff0091dca80",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A038": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dcb2c",
+   "func": "0xfffffff0091dcaec",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A039": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dcb98",
+   "func": "0xfffffff0091dcb58",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A040": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dcbf4",
+   "func": "0xfffffff0091dcbc4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A041": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dcc6c",
+   "func": "0xfffffff0091dcc24",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A350": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dfc0c",
+   "func": "0xfffffff0091dfbe4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dfc5c",
+   "func": "0xfffffff0091dfc34",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A351": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dfcac",
+   "func": "0xfffffff0091dfc84",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dfcfc",
+   "func": "0xfffffff0091dfcd4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A352": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dfd54",
+   "func": "0xfffffff0091dfd24",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A353": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dfda4",
+   "func": "0xfffffff0091dfd7c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x8"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A354": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dfe40",
+   "func": "0xfffffff0091dfdcc",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x10",
+    "w5, #0xc"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091dfe80",
+   "func": "0xfffffff0091dfdcc",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x10",
+    "w5, #0xc"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A355": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0070",
+   "func": "0xfffffff0091dfea4",
+   "reg": "w1",
+   "sizes": [
+    "w2, #0x5d4",
+    "w3, #0x5dc",
+    "w5, #0x5d4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A356": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e019c",
+   "func": "0xfffffff0091e0174",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A357": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0248",
+   "func": "0xfffffff0091e01c8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x70",
+    "w5, #0x68"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e02b0",
+   "func": "0xfffffff0091e01c8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x70",
+    "w5, #0x68"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A358": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0304",
+   "func": "0xfffffff0091e02dc",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A359": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0394",
+   "func": "0xfffffff0091e0330",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x14",
+    "w5, #0x8"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e03cc",
+   "func": "0xfffffff0091e0330",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x14",
+    "w5, #0x8"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A360": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0420",
+   "func": "0xfffffff0091e03f8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A361": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e046c",
+   "func": "0xfffffff0091e0448",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A362": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e04c4",
+   "func": "0xfffffff0091e0490",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A363": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e051c",
+   "func": "0xfffffff0091e04e8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A364": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0618",
+   "func": "0xfffffff0091e0540",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x7c",
+    "w5, #0x74"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A365": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0734",
+   "func": "0xfffffff0091e0680",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x7c",
+    "w5, #0x74"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A366": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e07c0",
+   "func": "0xfffffff0091e078c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A367": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0858",
+   "func": "0xfffffff0091e07e4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x24",
+    "w5, #0x20"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0890",
+   "func": "0xfffffff0091e07e4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x24",
+    "w5, #0x20"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A368": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0928",
+   "func": "0xfffffff0091e08b4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x24",
+    "w5, #0x20"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0960",
+   "func": "0xfffffff0091e08b4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x24",
+    "w5, #0x20"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A369": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e09ac",
+   "func": "0xfffffff0091e0984",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A370": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0a30",
+   "func": "0xfffffff0091e09d4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x8"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0a68",
+   "func": "0xfffffff0091e09d4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x8"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A371": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0aec",
+   "func": "0xfffffff0091e0a90",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x8"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0b24",
+   "func": "0xfffffff0091e0a90",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x8"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A372": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0bb0",
+   "func": "0xfffffff0091e0b4c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0xc"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0be8",
+   "func": "0xfffffff0091e0b4c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0xc"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A373": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0c74",
+   "func": "0xfffffff0091e0c10",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0xc"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0cac",
+   "func": "0xfffffff0091e0c10",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0xc"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A374": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e0ea0",
+   "func": "0xfffffff0091e0cd4",
+   "reg": "w1",
+   "sizes": [
+    "w2, #0x5d4",
+    "w3, #0x5dc",
+    "w5, #0x5d4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A375": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e10cc",
+   "func": "0xfffffff0091e0fa4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x18",
+    "w5, #0x14"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A376": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e11b4",
+   "func": "0xfffffff0091e1150",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0xc"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A377": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e12c4",
+   "func": "0xfffffff0091e11f8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x14",
+    "w5, #0x14"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A378": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1454",
+   "func": "0xfffffff0091e1324",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x28",
+    "w5, #0x20"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A379": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1508",
+   "func": "0xfffffff0091e14e0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A380": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e155c",
+   "func": "0xfffffff0091e1534",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A381": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e15cc",
+   "func": "0xfffffff0091e1584",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x14"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A382": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e162c",
+   "func": "0xfffffff0091e1584",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A383": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1670",
+   "func": "0xfffffff0091e1648",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A384": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e16c4",
+   "func": "0xfffffff0091e169c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1718",
+   "func": "0xfffffff0091e16f0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A385": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e176c",
+   "func": "0xfffffff0091e1744",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A386": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e17c0",
+   "func": "0xfffffff0091e1798",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A387": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1810",
+   "func": "0xfffffff0091e17ec",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A388": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e189c",
+   "func": "0xfffffff0091e1834",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x34",
+    "w5, #0x34"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e18ec",
+   "func": "0xfffffff0091e1834",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x34",
+    "w5, #0x34"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A389": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1924",
+   "func": "0xfffffff0091e1834",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A390": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1968",
+   "func": "0xfffffff0091e1940",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A391": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e19ec",
+   "func": "0xfffffff0091e1994",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1a28",
+   "func": "0xfffffff0091e1994",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A392": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1a74",
+   "func": "0xfffffff0091e1a4c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A393": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1aac",
+   "func": "0xfffffff0091e1a4c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A394": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1af0",
+   "func": "0xfffffff0091e1ac8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A395": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1b50",
+   "func": "0xfffffff0091e1b1c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A396": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1b80",
+   "func": "0xfffffff0091e1b1c",
+   "reg": "w1",
+   "sizes": [
+    "w5, #0",
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A397": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1bc4",
+   "func": "0xfffffff0091e1b9c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A398": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1bfc",
+   "func": "0xfffffff0091e1b9c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A399": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e1c40",
+   "func": "0xfffffff0091e1c18",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "D300": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e5010",
+   "func": "0xfffffff0091e4fbc",
+   "reg": "w8",
+   "sizes": [],
+   "call": null
+  }
+ ],
+ "A200": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e5d1c",
+   "func": "0xfffffff0091e5cdc",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A201": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e5d74",
+   "func": "0xfffffff0091e5d44",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A202": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e5dcc",
+   "func": "0xfffffff0091e5d9c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A203": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e5e24",
+   "func": "0xfffffff0091e5df4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A204": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e5e7c",
+   "func": "0xfffffff0091e5e4c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A205": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e5ed4",
+   "func": "0xfffffff0091e5ea4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A206": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091e5f28",
+   "func": "0xfffffff0091e5ef8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A100": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f8178",
+   "func": "0xfffffff0091f80fc",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0xc10"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A101": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f8248",
+   "func": "0xfffffff0091f81bc",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc10",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A102": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f82c0",
+   "func": "0xfffffff0091f8278",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A103": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f8384",
+   "func": "0xfffffff0091f82e8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0x8"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A104": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f83fc",
+   "func": "0xfffffff0091f83c0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A105": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f8450",
+   "func": "0xfffffff0091f8420",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A106": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f84c0",
+   "func": "0xfffffff0091f8480",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A107": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f8528",
+   "func": "0xfffffff0091f84e8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A108": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f85a8",
+   "func": "0xfffffff0091f8550",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A109": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f8610",
+   "func": "0xfffffff0091f85d0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A110": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f8678",
+   "func": "0xfffffff0091f863c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A111": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f86dc",
+   "func": "0xfffffff0091f869c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A112": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f8748",
+   "func": "0xfffffff0091f8700",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A113": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f87c4",
+   "func": "0xfffffff0091f8770",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x10",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A114": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f881c",
+   "func": "0xfffffff0091f87ec",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A115": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f888c",
+   "func": "0xfffffff0091f884c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A116": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f88f8",
+   "func": "0xfffffff0091f88b8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A117": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f897c",
+   "func": "0xfffffff0091f8924",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A118": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f8a48",
+   "func": "0xfffffff0091f89a4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0xc"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A119": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f8c30",
+   "func": "0xfffffff0091f8a98",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x106c",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A120": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f8de8",
+   "func": "0xfffffff0091f8c88",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x5c",
+    "w5, #0x1004"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A121": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f8ea8",
+   "func": "0xfffffff0091f8e5c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A122": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f9068",
+   "func": "0xfffffff0091f8ed0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x106c",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A123": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f9114",
+   "func": "0xfffffff0091f90c0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x18",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A124": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f9188",
+   "func": "0xfffffff0091f913c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A125": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f91fc",
+   "func": "0xfffffff0091f91b0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A126": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f92a8",
+   "func": "0xfffffff0091f9224",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x14",
+    "w5, #0x8"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A127": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f93ac",
+   "func": "0xfffffff0091f92e0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x80",
+    "w5, #0x7c"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A128": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f94bc",
+   "func": "0xfffffff0091f9404",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x80",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A129": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f956c",
+   "func": "0xfffffff0091f94e4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x34",
+    "w5, #0x34"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A130": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f95e8",
+   "func": "0xfffffff0091f95ac",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A131": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f9648",
+   "func": "0xfffffff0091f960c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A132": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f96ec",
+   "func": "0xfffffff0091f966c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x20",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A133": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f9754",
+   "func": "0xfffffff0091f9714",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A134": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f97ac",
+   "func": "0xfffffff0091f977c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": [
+    "b",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A135": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f981c",
+   "func": "0xfffffff0091f97dc",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A136": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f9888",
+   "func": "0xfffffff0091f9848",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "A137": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091f98f4",
+   "func": "0xfffffff0091f98b4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "bl",
+    "0xfffffff009201358"
+   ]
+  }
+ ],
+ "D131": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091fca88",
+   "func": "0xfffffff0091fc8ec",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".gt\t0xfffffff0091fcac8"
+   ]
+  },
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091fcaa8",
+   "func": "0xfffffff0091fc8ec",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".ne\t0xfffffff0091fcdac"
+   ]
+  }
+ ],
+ "D130": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091fca98",
+   "func": "0xfffffff0091fc8ec",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".eq\t0xfffffff0091fcafc"
+   ]
+  }
+ ],
+ "D132": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091fcacc",
+   "func": "0xfffffff0091fc8ec",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".eq\t0xfffffff0091fcb10"
+   ]
+  }
+ ],
+ "D133": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091fcadc",
+   "func": "0xfffffff0091fc8ec",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".ne\t0xfffffff0091fcdac"
+   ]
+  }
+ ],
+ "D210": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091ffc8c",
+   "func": "0xfffffff0091ff824",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".eq\t0xfffffff0091ffcec"
+   ]
+  }
+ ],
+ "D211": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "addr": "0xfffffff0091ffc9c",
+   "func": "0xfffffff0091ff824",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".ne\t0xfffffff0091ffdac"
+   ]
+  }
+ ],
+ "D700": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a14c0bc",
+   "func": "0xfffffff00a14c020",
+   "reg": "w8",
+   "sizes": [],
+   "call": null
+  }
+ ],
+ "A400": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a162c60",
+   "func": "0xfffffff00a162ab8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": null
+  }
+ ],
+ "A401": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a162cc0",
+   "func": "0xfffffff00a162c80",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A402": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a162d18",
+   "func": "0xfffffff00a162c80",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": null
+  }
+ ],
+ "A403": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a162d64",
+   "func": "0xfffffff00a162c80",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": null
+  }
+ ],
+ "A404": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a162dcc",
+   "func": "0xfffffff00a162d84",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A405": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a162e34",
+   "func": "0xfffffff00a162df4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A406": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a162ee0",
+   "func": "0xfffffff00a162e5c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x10",
+    "w5, #0x8"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A407": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1631a4",
+   "func": "0xfffffff00a162f18",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x1d30",
+    "w5, #0xc"
+   ],
+   "call": [
+    "blraa",
+    "x9, x17"
+   ]
+  }
+ ],
+ "A408": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1633f4",
+   "func": "0xfffffff00a163208",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xff4",
+    "w5, #0xc"
+   ],
+   "call": [
+    "blraa",
+    "x9, x17"
+   ]
+  }
+ ],
+ "A409": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163558",
+   "func": "0xfffffff00a163458",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xd48",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x9, x17"
+   ]
+  }
+ ],
+ "A410": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1635e0",
+   "func": "0xfffffff00a163598",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A411": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163650",
+   "func": "0xfffffff00a163608",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A412": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1636b8",
+   "func": "0xfffffff00a163678",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A413": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16372c",
+   "func": "0xfffffff00a1636e4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A414": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1637d4",
+   "func": "0xfffffff00a163754",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x8"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A415": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163890",
+   "func": "0xfffffff00a16380c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0xc"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A416": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163910",
+   "func": "0xfffffff00a1638c8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A417": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163980",
+   "func": "0xfffffff00a163938",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A418": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1639f0",
+   "func": "0xfffffff00a1639a8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A419": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163a54",
+   "func": "0xfffffff00a163a18",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A420": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163b38",
+   "func": "0xfffffff00a163a78",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc10",
+    "w5, #0xc10"
+   ],
+   "call": [
+    "blraa",
+    "x9, x17"
+   ]
+  }
+ ],
+ "A421": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163c44",
+   "func": "0xfffffff00a163b84",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc10",
+    "w5, #0xc10"
+   ],
+   "call": [
+    "blraa",
+    "x9, x17"
+   ]
+  }
+ ],
+ "A422": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163d34",
+   "func": "0xfffffff00a163c90",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x50",
+    "w5, #0x4c"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A423": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163e14",
+   "func": "0xfffffff00a163d7c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x50",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A424": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163ec0",
+   "func": "0xfffffff00a163e3c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x8"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A425": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163f40",
+   "func": "0xfffffff00a163ef8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A426": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a163fb0",
+   "func": "0xfffffff00a163f68",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A427": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a164058",
+   "func": "0xfffffff00a163fd8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x8"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A428": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1640d8",
+   "func": "0xfffffff00a164090",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A429": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16424c",
+   "func": "0xfffffff00a164100",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x70",
+    "w5, #0x10"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A430": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1643b8",
+   "func": "0xfffffff00a1642c0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x34",
+    "w5, #0xc"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A431": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a164464",
+   "func": "0xfffffff00a16441c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A432": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1645b0",
+   "func": "0xfffffff00a16448c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x38",
+    "w5, #0x10"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A433": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16466c",
+   "func": "0xfffffff00a164624",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A434": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1646dc",
+   "func": "0xfffffff00a164694",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A435": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16474c",
+   "func": "0xfffffff00a164704",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A436": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1647bc",
+   "func": "0xfffffff00a164774",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A437": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a164870",
+   "func": "0xfffffff00a1647e4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x8"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A438": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a164964",
+   "func": "0xfffffff00a1648ac",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xa0",
+    "w5, #0xa0"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A439": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a164a0c",
+   "func": "0xfffffff00a1649c4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A440": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a164ab4",
+   "func": "0xfffffff00a164a34",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x8"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A441": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a164c8c",
+   "func": "0xfffffff00a164aec",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x106c",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x9, x17"
+   ]
+  }
+ ],
+ "A442": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a164e48",
+   "func": "0xfffffff00a164ce8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x5c",
+    "w5, #0x1004"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A443": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a164f08",
+   "func": "0xfffffff00a164ebc",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A444": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1650d0",
+   "func": "0xfffffff00a164f30",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x106c",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x9, x17"
+   ]
+  }
+ ],
+ "A445": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165180",
+   "func": "0xfffffff00a16512c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x18",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A446": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1651f4",
+   "func": "0xfffffff00a1651a8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A447": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165268",
+   "func": "0xfffffff00a16521c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A448": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165300",
+   "func": "0xfffffff00a165290",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x10",
+    "w5, #0x8"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A449": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1653ec",
+   "func": "0xfffffff00a165338",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x84",
+    "w5, #0x7c"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A450": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1654fc",
+   "func": "0xfffffff00a165444",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x28",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A451": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165564",
+   "func": "0xfffffff00a165524",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A452": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1655cc",
+   "func": "0xfffffff00a16558c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A453": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165664",
+   "func": "0xfffffff00a1655f4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x8"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A454": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1656e0",
+   "func": "0xfffffff00a1656a0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A455": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165738",
+   "func": "0xfffffff00a1656a0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": null
+  }
+ ],
+ "A456": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1657a0",
+   "func": "0xfffffff00a165758",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A457": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165810",
+   "func": "0xfffffff00a1657c8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A458": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165880",
+   "func": "0xfffffff00a165838",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A459": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1658f0",
+   "func": "0xfffffff00a1658a8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A460": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165960",
+   "func": "0xfffffff00a165918",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A461": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1659e0",
+   "func": "0xfffffff00a165988",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A462": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165ab8",
+   "func": "0xfffffff00a165a08",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x18",
+    "w5, #0x18"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A463": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165b7c",
+   "func": "0xfffffff00a165af8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x8"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A464": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165c38",
+   "func": "0xfffffff00a165bb4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x14",
+    "w5, #0x14"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A465": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165cac",
+   "func": "0xfffffff00a165c70",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A466": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165cfc",
+   "func": "0xfffffff00a165c70",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": null
+  }
+ ],
+ "A467": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165d84",
+   "func": "0xfffffff00a165d1c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A468": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165e2c",
+   "func": "0xfffffff00a165db4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0xc"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A469": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165eac",
+   "func": "0xfffffff00a165e70",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A470": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165f20",
+   "func": "0xfffffff00a165ed0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x14",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A471": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a165fac",
+   "func": "0xfffffff00a165f48",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x10",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A472": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a166014",
+   "func": "0xfffffff00a165fd4",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A473": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a166084",
+   "func": "0xfffffff00a16603c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A474": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1660e8",
+   "func": "0xfffffff00a1660ac",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x10",
+    "w5, #0"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A475": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16614c",
+   "func": "0xfffffff00a16610c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A476": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1661b4",
+   "func": "0xfffffff00a166178",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A477": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a166220",
+   "func": "0xfffffff00a1661d8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A478": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a166294",
+   "func": "0xfffffff00a166248",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A479": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a166300",
+   "func": "0xfffffff00a1662b8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x8",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A480": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1663f8",
+   "func": "0xfffffff00a166328",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0xc"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A481": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16652c",
+   "func": "0xfffffff00a16645c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0xc",
+    "w5, #0xc"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A482": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a166658",
+   "func": "0xfffffff00a166590",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x240",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A483": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16674c",
+   "func": "0xfffffff00a1666ac",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x230",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A484": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a166814",
+   "func": "0xfffffff00a166798",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x10",
+    "w5, #0x8"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A485": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16688c",
+   "func": "0xfffffff00a16684c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A486": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1668e4",
+   "func": "0xfffffff00a16684c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0"
+   ],
+   "call": null
+  }
+ ],
+ "A487": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a166940",
+   "func": "0xfffffff00a166904",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A488": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a1669a4",
+   "func": "0xfffffff00a166964",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A489": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a166a10",
+   "func": "0xfffffff00a1669d0",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A490": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a166a88",
+   "func": "0xfffffff00a166a3c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A491": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a166b1c",
+   "func": "0xfffffff00a166aac",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0x8"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A492": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a166bbc",
+   "func": "0xfffffff00a166b58",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x34",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "D421": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16a9ec",
+   "func": "0xfffffff00a16a830",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".le\t0xfffffff00a16aa3c"
+   ]
+  },
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16aa50",
+   "func": "0xfffffff00a16a830",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".ne\t0xfffffff00a16ac5c"
+   ]
+  }
+ ],
+ "D422": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16a9fc",
+   "func": "0xfffffff00a16a830",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".eq\t0xfffffff00a16aa84"
+   ]
+  }
+ ],
+ "D423": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16aa0c",
+   "func": "0xfffffff00a16a830",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".eq\t0xfffffff00a16aa70"
+   ]
+  }
+ ],
+ "D424": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16aa1c",
+   "func": "0xfffffff00a16a830",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".ne\t0xfffffff00a16ac5c"
+   ]
+  }
+ ],
+ "D420": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16aa40",
+   "func": "0xfffffff00a16a830",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".eq\t0xfffffff00a16aa98"
+   ]
+  }
+ ],
+ "A500": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16e6e8",
+   "func": "0xfffffff00a16e6a8",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x4",
+    "w5, #0"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "A501": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a16e74c",
+   "func": "0xfffffff00a16e70c",
+   "reg": "w1",
+   "sizes": [
+    "w3, #0x10",
+    "w5, #0x4"
+   ],
+   "call": [
+    "blraa",
+    "x8, x16"
+   ]
+  }
+ ],
+ "D601": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a171414",
+   "func": "0xfffffff00a1711f8",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".gt\t0xfffffff00a171454"
+   ]
+  },
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a171434",
+   "func": "0xfffffff00a1711f8",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".ne\t0xfffffff00a1718e8"
+   ]
+  }
+ ],
+ "D600": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a171424",
+   "func": "0xfffffff00a1711f8",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".eq\t0xfffffff00a1715a8"
+   ]
+  }
+ ],
+ "D602": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a171458",
+   "func": "0xfffffff00a1711f8",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".eq\t0xfffffff00a1715bc"
+   ]
+  }
+ ],
+ "D603": [
+  {
+   "file": "com.apple.iokit.IOMobileGraphicsFamily-D",
+   "addr": "0xfffffff00a171468",
+   "func": "0xfffffff00a1711f8",
+   "reg": "w8",
+   "sizes": [],
+   "call": [
+    "b",
+    ".ne\t0xfffffff00a1718e8"
+   ]
+  }
+ ],
+ "A987": [
+  {
+   "file": "com.apple.driver.AppleMobileDispH17P-DCP",
+   "dataoff": "0x1520"
+  }
+ ]
+}
