@@ -71,6 +71,7 @@ static void stl_le_p(void *p, uint32_t v)
 #define INSN_BTI_C          0xd503245fu
 #define INSN_MOVZ_X0_0      0xd2800000u /* movz x0, #0 */
 #define INSN_RETAB          0xd65f0fffu
+#define INSN_NOP            0xd503201fu /* nop */
 
 /*
  * Kernel-cache dyld-chained rebase pointers keep the in-cache target in their
@@ -1130,6 +1131,171 @@ bool apple_modern_kc_iouc_sandbox_compat(uint8_t *bootkc, size_t len,
     /* Apply writes */
     stl_le_p(bootkc + deny_fo, b_allow_insn);
     stl_le_p(bootkc + macf_cbz_off, b_macf_allow_insn);
+    return true;
+}
+
+/*
+ * amfi-csstatus-platform-compat: make csops / csops_audittoken(CS_OPS_STATUS)
+ * always report CS_PLATFORM_BINARY.
+ *
+ * In csops_internal's CS_OPS_STATUS handler the reported csflags gain
+ * CS_PLATFORM_BINARY|CS_ENFORCEMENT (0x04001000) only when
+ * csproc_get_platform_binary(proc) != 0.  On the pinned BootKC (sha a36b9241,
+ * com.apple.kernel VA 0xfffffff00b0e26c0) that is:
+ *
+ *     cbz  w0, #+0x14          ; 0x340000a0  (skip when NOT a platform binary)
+ *     movz w8, #0x1000         ; 0x52820008
+ *     movk w8, #0x400, lsl #16 ; 0x72a08008  (w8 = 0x04001000)
+ *     orr  w23, w22, w8        ; 0x2a0802d7
+ *     str  w23, [sp, #0x40]    ; 0xb90043f7
+ *
+ * NOP the gating CBZ so the platform bit is always OR'd in.  launchd's
+ * RequireTrusted event-stream subscriber check reduces to csops
+ * CS_PLATFORM_BINARY (the per-job trusted bit), so with every process reported
+ * as a platform binary launchd accepts backboardd's subscription to the
+ * com.apple.biome.compute.publisher stream and AttentionAwareness no longer
+ * wedges.  This changes only the value csops reports to userspace; it does NOT
+ * touch any in-kernel code-signing / exec / library-validation enforcement, and
+ * does not set CS_VALID.  Anchor on the five-word signature and require exactly
+ * one match.  Compatibility (trust-everything bring-up), not Apple fidelity.
+ */
+bool apple_modern_kc_amfi_csstatus_platform_compat(uint8_t *bootkc, size_t len,
+                                                   AppleModernAmfiCsStatusPatch *out,
+                                                   Error **errp)
+{
+    uint64_t kernel, texec_off, texec_size;
+    uint64_t anchor = 0;
+    unsigned hits = 0;
+
+    if (!bootkc) {
+        error_setg(errp, "amfi-csstatus-platform-compat: no kernel cache");
+        return false;
+    }
+    if (!find_fileset_entry(bootkc, len, "com.apple.kernel", &kernel)) {
+        error_setg(errp, "amfi-csstatus-platform-compat: com.apple.kernel "
+                   "fileset entry not found");
+        return false;
+    }
+    if (!find_segment(bootkc, len, kernel, "__TEXT_EXEC", NULL,
+                      &texec_off, &texec_size)) {
+        error_setg(errp, "amfi-csstatus-platform-compat: kernel __TEXT_EXEC "
+                   "not found");
+        return false;
+    }
+    if (texec_off > len || texec_size > len - texec_off ||
+        (texec_off & 3) != 0 || texec_size < 32) {
+        error_setg(errp, "amfi-csstatus-platform-compat: kernel __TEXT_EXEC "
+                   "outside image or unaligned");
+        return false;
+    }
+
+    for (uint64_t off = 0; off + 20 <= texec_size; off += 4) {
+        const uint8_t *p = bootkc + texec_off + off;
+
+        if (ldl_le_p(p)      == 0x340000a0u && /* cbz  w0, #0x14           */
+            ldl_le_p(p + 4)  == 0x52820008u && /* movz w8, #0x1000         */
+            ldl_le_p(p + 8)  == 0x72a08008u && /* movk w8, #0x400, lsl #16 */
+            ldl_le_p(p + 12) == 0x2a0802d7u && /* orr  w23, w22, w8        */
+            ldl_le_p(p + 16) == 0xb90043f7u) { /* str  w23, [sp, #0x40]    */
+            hits++;
+            anchor = texec_off + off;
+        }
+    }
+    if (hits != 1) {
+        error_setg(errp, "amfi-csstatus-platform-compat: CS_OPS_STATUS "
+                   "platform-gate signature matched %u times in the kernel "
+                   "__TEXT_EXEC, expected exactly 1; refusing to patch", hits);
+        return false;
+    }
+
+    if (out) {
+        out->anchor = anchor;
+        out->insn_before = ldl_le_p(bootkc + anchor);
+        out->insn_after = INSN_NOP;
+    }
+    stl_le_p(bootkc + anchor, INSN_NOP);
+    return true;
+}
+
+/*
+ * platform-binary-force-compat: csproc_get_platform_binary() -> return 1.
+ *
+ * On the pinned BootKC (sha a36b9241) the function head (com.apple.kernel VA
+ * 0xfffffff00b0a34e0) is:
+ *     bti  c                  ; 0xd503245f (BTI landing pad, preserved)
+ *     cbz  x0, #...           ; 0xb4000280 (proc == NULL -> 0)
+ *     ldr  x16, [x0, #0x538]  ; 0xf9429c10 (load cs_blob)
+ *     cbz  x16, #...          ; 0xb4000230
+ *     pacibsp / stp ...       ; frame build
+ * Rewrite the two instructions after the BTI to `mov w0, #1 ; ret`, so the
+ * function returns 1 before building its frame.  Every in-kernel platform-
+ * binary reader then treats every process as a platform binary.  Broader than
+ * amfi-csstatus-platform-compat; keep the BTI c so indirect-branch targets stay
+ * valid.  Anchor on the four-word head signature; require exactly one match.
+ * Compatibility (trust-everything bring-up), not Apple fidelity.
+ */
+bool apple_modern_kc_platform_binary_force_compat(uint8_t *bootkc, size_t len,
+                                                  AppleModernPlatBinPatch *out,
+                                                  Error **errp)
+{
+    uint64_t kernel, texec_va, texec_vmsize, texec_off, texec_size;
+    /* csproc_get_platform_binary head (bti c) on BootKC sha a36b9241. */
+    const uint64_t fn_va = UINT64_C(0xfffffff00b0a34e0);
+    uint64_t anchor = 0;
+
+    if (!bootkc) {
+        error_setg(errp, "platform-binary-force-compat: no kernel cache");
+        return false;
+    }
+    if (!find_fileset_entry(bootkc, len, "com.apple.kernel", &kernel)) {
+        error_setg(errp, "platform-binary-force-compat: com.apple.kernel "
+                   "fileset entry not found");
+        return false;
+    }
+    if (!find_segment_and_section_va(bootkc, len, kernel, "__TEXT_EXEC", NULL,
+                                     &texec_va, &texec_vmsize,
+                                     &texec_off, &texec_size)) {
+        error_setg(errp, "platform-binary-force-compat: kernel __TEXT_EXEC "
+                   "not found");
+        return false;
+    }
+    if (texec_off > len || texec_size > len - texec_off ||
+        (texec_off & 3) != 0 || texec_size < 32) {
+        error_setg(errp, "platform-binary-force-compat: kernel __TEXT_EXEC "
+                   "outside image or unaligned");
+        return false;
+    }
+    if (fn_va < texec_va || fn_va - texec_va >= texec_size ||
+        fn_va - texec_va > texec_size - 16) {
+        error_setg(errp, "platform-binary-force-compat: "
+                   "csproc_get_platform_binary VA 0x%" PRIx64 " outside kernel "
+                   "__TEXT_EXEC", fn_va);
+        return false;
+    }
+    anchor = texec_off + (fn_va - texec_va);
+
+    /* Verify the four-word head signature before patching. */
+    if (ldl_le_p(bootkc + anchor)      != 0xd503245fu || /* bti  c              */
+        ldl_le_p(bootkc + anchor + 4)  != 0xb4000280u || /* cbz  x0, #...       */
+        ldl_le_p(bootkc + anchor + 8)  != 0xf9429c10u || /* ldr x16,[x0,#0x538] */
+        ldl_le_p(bootkc + anchor + 12) != 0xb4000230u) { /* cbz  x16, #...      */
+        error_setg(errp, "platform-binary-force-compat: unexpected instructions "
+                   "at csproc_get_platform_binary head (0x%08x 0x%08x 0x%08x "
+                   "0x%08x); refusing to patch",
+                   ldl_le_p(bootkc + anchor), ldl_le_p(bootkc + anchor + 4),
+                   ldl_le_p(bootkc + anchor + 8), ldl_le_p(bootkc + anchor + 12));
+        return false;
+    }
+
+    if (out) {
+        out->anchor = anchor;
+        out->insn_before[0] = ldl_le_p(bootkc + anchor + 4);
+        out->insn_before[1] = ldl_le_p(bootkc + anchor + 8);
+        out->insn_after[0] = MOVZ_W_1_VAL;
+        out->insn_after[1] = INSN_RET;
+    }
+    stl_le_p(bootkc + anchor + 4, MOVZ_W_1_VAL); /* mov w0, #1 */
+    stl_le_p(bootkc + anchor + 8, INSN_RET);     /* ret        */
     return true;
 }
 

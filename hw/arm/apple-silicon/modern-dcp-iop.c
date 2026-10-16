@@ -828,15 +828,16 @@ static void dcp_iop_append_prop_push(AppleModernDcpIop *s, const char *key,
     cb->payload_len = 0x40;
 }
 
-/* Append the selected attach callbacks to active_cbs in the requested order. */
+/* Append the selected attach callbacks to active_cbs, always pushing MODES
+ * (TimingElements + DisplayAttributes via D126/D127/D128) BEFORE D575 so that
+ * IOMobileFramebufferAP::hotPlug_notify_gated(1) never inspects an empty
+ * TimingElements property when D575 fires. */
 static void dcp_iop_append_attach_cbs(AppleModernDcpIop *s)
 {
     g_auto(GStrv) tags = g_strsplit(s->attach_cbs, "+", -1);
 
     for (char **t = tags; *t && s->cb_count < ARRAY_SIZE(s->active_cbs); t++) {
         const char *tag = dcp_attach_tag(*t);
-        typeof(s->active_cbs[0]) *cb;
-
         if (!strcmp(tag, "MODES")) {
             /*
              * The AP hands the reassembled buffer to OSUnserializeXML(buf,
@@ -851,6 +852,23 @@ static void dcp_iop_append_attach_cbs(AppleModernDcpIop *s)
             dcp_iop_append_prop_push(s, "DisplayAttributes",
                                      dcp_av_display_attrs_xml,
                                      sizeof(dcp_av_display_attrs_xml));
+            /*
+             * ProductAttributes carries the display Name/DeviceName that
+             * CoreDisplay maps to kCADisplayName/kCADisplayDeviceName; without
+             * it +[CADisplay mainDisplay] keeps no reply dict and the main
+             * display is never minted (null id / FBSDisplayLayout timeout).
+             */
+            dcp_iop_append_prop_push(s, "ProductAttributes",
+                                     dcp_av_product_attrs_xml,
+                                     sizeof(dcp_av_product_attrs_xml));
+        }
+    }
+
+    for (char **t = tags; *t && s->cb_count < ARRAY_SIZE(s->active_cbs); t++) {
+        const char *tag = dcp_attach_tag(*t);
+        typeof(s->active_cbs[0]) *cb;
+
+        if (!strcmp(tag, "MODES")) {
             continue;
         }
 
@@ -1131,6 +1149,20 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                          !strcmp(tag_str, "A479") ||
                          !strcmp(tag_str, "A485"))) {
                         zeros[0] = 1;
+                    } else if (!strcmp(tag_str, "A353") && hdr.out_len >= 8) {
+                        /*
+                         * A353 display_healthcheck_rate_ns (in0/out8): the DCP
+                         * stub returns a u64 nanosecond period and the kernel
+                         * caller does `cbz x0`, skipping the
+                         * exclaves_display_healthcheck_rate report when it is
+                         * zero -- which left the panel looking unhealthy.
+                         * Falling through to the all-zero default was a bug
+                         * (Grok catalog emu_status u64_1h_ns; disasm-confirmed by
+                         * the dcp-hpd-subscribe RE).  Return 1 hour in ns
+                         * (0x34630B8A000).
+                         */
+                        stl_le_p(zeros, 0x30B8A000u);
+                        stl_le_p(zeros + 4, 0x00000346u);
                     } else if (!strcmp(tag_str, "A412") && hdr.out_len >= 4) {
                         /*
                          * A412 get_digital_out_state: in=0/out=4. The single 4-byte
@@ -1140,9 +1172,20 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                          */
                         stl_le_p(zeros, 0);
                     } else if (!strcmp(tag_str, "A437")) {
-                        /* V14_7+: get_block_dcp — timing/param blocks: log id, zeros for now */
+                        /*
+                         * V14_7+: get_block_dcp -- timing/param/calibration block.
+                         * The kernel reduces the reply to a "block present" bool
+                         * (out[0] & 1); an all-zero reply makes the DCP firmware
+                         * log "ACSS: get_block failed, no calibration data loaded"
+                         * so CoreDisplay cannot complete the display.  Report the
+                         * block present.  (A real per-selector payload keyed by
+                         * in[0:4] is the eventual complete fix; bytes unrecovered.)
+                         */
                         warn_report("apple-modern: dcp-iop v6-resumed A437 get_block id=0x%x",
                                     preview_len >= 4 ? ldl_le_p(in_preview) : 0);
+                        if (hdr.out_len >= 1) {
+                            zeros[0] = 1;
+                        }
                     } else if ((!strcmp(tag_str, "A406") ||
                                 (!strcmp(tag_str, "A407") && hdr.in_len < 0x80)) &&
                                hdr.out_len >= 8) {
@@ -1211,7 +1254,7 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                     g_free(zeros);
                 }
 
-                if (s->attach_cbs && s->attach_after_a453 && !s->attach_sent &&
+                if (s->attach_cbs && !s->attach_sent &&
                     s->normal_mode_seen && !s->a401_pending &&
                     !strcmp(tag_str, "A453")) {
                     memset(s->active_cbs, 0, sizeof(s->active_cbs));
@@ -1275,9 +1318,10 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                         s->cb_count = 2;
                         if (prop_val != 0 && s->attach_cbs &&
                             !s->attach_after_a453) {
-                            /* NormalModeEnable = 1: selected attach callbacks */
+                            /* NormalModeEnable = 1: push MODES+D575 now and
+                             * leave attach_sent false so the subsequent A453
+                             * query also sees a fresh hotplug edge. */
                             dcp_iop_append_attach_cbs(s);
-                            s->attach_sent = true;
                         }
                     }
                     s->a401_pending = true;

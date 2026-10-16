@@ -102,6 +102,8 @@ struct AppleModernMachine {
     bool root_rw_compat;
     bool txm_sc_compat;
     bool iouc_sandbox_compat;
+    bool amfi_csstatus_platform_compat;
+    bool platform_binary_force_compat;
     /* Declared, opt-in anchored image-patch set (default NULL = none). */
     char *image_patches;
     AppleModernImagePatchResult image_patch_result;
@@ -3030,6 +3032,41 @@ static void modern_init(MachineState *machine)
                     iouc.sandbox_deny_anchor, iouc.sandbox_deny_before, iouc.sandbox_deny_after,
                     iouc.macf_gate_anchor, iouc.macf_gate_before, iouc.macf_gate_after);
     }
+    if (s->amfi_csstatus_platform_compat) {
+        AppleModernAmfiCsStatusPatch acs = { 0 };
+        uint8_t *bootkc = (uint8_t *)s->blobs[ASSET_BOOTKC].data;
+
+        if (!apple_modern_kc_amfi_csstatus_platform_compat(
+                bootkc, s->blobs[ASSET_BOOTKC].size, &acs, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: applied opt-in amfi-csstatus-platform-compat "
+                    "patch to the in-memory kernel cache: csops CS_OPS_STATUS "
+                    "platform gate at 0x%" PRIx64 " (0x%08x->0x%08x) so "
+                    "csops/csops_audittoken(CS_OPS_STATUS) always report "
+                    "CS_PLATFORM_BINARY (satisfies launchd RequireTrusted "
+                    "subscriber trust). Compatibility, not Apple fidelity",
+                    acs.anchor, acs.insn_before, acs.insn_after);
+    }
+    if (s->platform_binary_force_compat) {
+        AppleModernPlatBinPatch pbf = { 0 };
+        uint8_t *bootkc = (uint8_t *)s->blobs[ASSET_BOOTKC].data;
+
+        if (!apple_modern_kc_platform_binary_force_compat(
+                bootkc, s->blobs[ASSET_BOOTKC].size, &pbf, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: applied opt-in platform-binary-force-compat "
+                    "patch to the in-memory kernel cache: "
+                    "csproc_get_platform_binary at 0x%" PRIx64 " forced to "
+                    "return 1 (+4/+8: 0x%08x/0x%08x -> 0x%08x/0x%08x) so every "
+                    "process is a platform binary kernel-wide. Compatibility, "
+                    "not Apple fidelity",
+                    pbf.anchor, pbf.insn_before[0], pbf.insn_before[1],
+                    pbf.insn_after[0], pbf.insn_after[1]);
+    }
     if (s->image_patches) {
         /*
          * Declared, opt-in anchored image patches on the board's private
@@ -3454,6 +3491,8 @@ BOOL_PROPERTY(md0_width_compat, md0_width_compat)
 BOOL_PROPERTY(root_rw_compat, root_rw_compat)
 BOOL_PROPERTY(txm_sc_compat, txm_sc_compat)
 BOOL_PROPERTY(iouc_sandbox_compat, iouc_sandbox_compat)
+BOOL_PROPERTY(amfi_csstatus_platform_compat, amfi_csstatus_platform_compat)
+BOOL_PROPERTY(platform_binary_force_compat, platform_binary_force_compat)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(el0_trap_trace, el0_trap_trace)
 BOOL_PROPERTY(sep_trace, sep_trace)
@@ -3806,6 +3845,12 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "iouc-sandbox-compat",
                                    get_iouc_sandbox_compat,
                                    set_iouc_sandbox_compat);
+    object_class_property_add_bool(oc, "amfi-csstatus-platform-compat",
+                                   get_amfi_csstatus_platform_compat,
+                                   set_amfi_csstatus_platform_compat);
+    object_class_property_add_bool(oc, "platform-binary-force-compat",
+                                   get_platform_binary_force_compat,
+                                   set_platform_binary_force_compat);
     object_class_property_add_str(oc, "image-patches", get_image_patches,
                                   set_image_patches);
     object_class_property_add_str(oc, "applied-image-patches",

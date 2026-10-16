@@ -237,5 +237,44 @@ bool apple_modern_kc_iouc_sandbox_compat(uint8_t *bootkc, size_t len,
                                          AppleModernIoucPatch *out,
                                          Error **errp);
 
+/*
+ * amfi-csstatus-platform-compat: NOP the platform-gate CBZ in csops_internal's
+ * CS_OPS_STATUS handler so csops / csops_audittoken(CS_OPS_STATUS) always report
+ * CS_PLATFORM_BINARY.  This makes every process satisfy launchd's RequireTrusted
+ * event-stream subscriber check (whose "trusted" bit is the csops
+ * CS_PLATFORM_BINARY flag), so backboardd's subscription to
+ * com.apple.biome.compute.publisher is accepted and its AttentionAwareness
+ * startup phase no longer wedges.  Trust-everything bring-up, not Apple fidelity.
+ */
+typedef struct AppleModernAmfiCsStatusPatch {
+    uint64_t anchor;      /* file offset of the gating CBZ */
+    uint32_t insn_before; /* 0x340000a0 cbz w0, #0x14 */
+    uint32_t insn_after;  /* 0xd503201f nop */
+} AppleModernAmfiCsStatusPatch;
+
+bool apple_modern_kc_amfi_csstatus_platform_compat(uint8_t *bootkc, size_t len,
+                                                   AppleModernAmfiCsStatusPatch *out,
+                                                   Error **errp);
+
+/*
+ * platform-binary-force-compat: force csproc_get_platform_binary() to return 1
+ * so EVERY in-kernel platform-binary reader (csops, audit-token resolution,
+ * AMFI, sandbox, debug gates) treats every process as a platform binary.
+ * Broader than amfi-csstatus-platform-compat (which only changes the value
+ * csops reports to userspace); use when a non-csops consumer also needs the
+ * platform status (e.g. launchd's RequireTrusted subscriber-trust cache if it
+ * is not populated through the csops CS_OPS_STATUS path).  Trust-everything
+ * bring-up, not Apple fidelity.
+ */
+typedef struct AppleModernPlatBinPatch {
+    uint64_t anchor;         /* file offset of the leading bti c */
+    uint32_t insn_before[2]; /* cbz x0 ; ldr x16,[x0,#0x538] */
+    uint32_t insn_after[2];  /* mov w0,#1 ; ret */
+} AppleModernPlatBinPatch;
+
+bool apple_modern_kc_platform_binary_force_compat(uint8_t *bootkc, size_t len,
+                                                  AppleModernPlatBinPatch *out,
+                                                  Error **errp);
+
 #endif
 
