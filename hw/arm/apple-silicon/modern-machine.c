@@ -4621,6 +4621,24 @@ static void modern_class_init(ObjectClass *oc, const void *data)
         "serve /chosen sepfw-load-at-boot = 0 so AppleSEPKeyStore and "
         "AppleCredentialManager do not wait for SEP firmware that never runs "
         "(declared guest modification, default off)");
+    /*
+     * sks-failfast: alias of sepfw-absent, named for the msg2862 / AppleSEPKeyStore
+     * IOServiceOpen unblock. Grok RE 2026-10-17 + angr proof
+     * (Grok/impl-20261017/re/symex/sks_release_symex.json) show that
+     * AppleSEPKeyStore::getEndpoint (0xfffffff0095ca694) blocks forever in
+     * sep_endpoint() when isSEPExpected (0xfffffff0095ca544) returns 1, and
+     * takes the no-wait "SEP is not booted" path when it returns 0. Serving
+     * /chosen sepfw-load-at-boot=0 forces that return to 0, releasing the
+     * synchronous io_service_open_extended (msgh_id 2862) wait that
+     * backboardd (PearlEventFilter -> MKBGetDeviceLockState -> aks_get_lock_state
+     * -> IOServiceOpen) and biomed both hit. Same storage as sepfw-absent.
+     */
+    object_class_property_add_bool(oc, "sks-failfast", get_sepfw_absent,
+                                   set_sepfw_absent);
+    object_class_property_set_description(oc, "sks-failfast",
+        "alias of sepfw-absent: make AppleSEPKeyStore open fail-fast (no SEP "
+        "endpoint wait) so io_service_open_extended (msg 2862) returns; "
+        "default off");
     object_class_property_add_bool(oc, "pmgr-ungate", get_pmgr_ungate,
                                    set_pmgr_ungate);
     object_class_property_add_bool(oc, "adt-dart-ids", get_adt_dart_ids,
