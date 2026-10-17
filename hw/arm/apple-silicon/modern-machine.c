@@ -134,6 +134,7 @@ struct AppleModernMachine {
     bool sep_mailbox;
     bool sep_sim;
     bool sep_dart;
+    char *sep_fw_filename;
     bool modern_pmgr;
     bool modern_mcc_dramcfg;
     uint32_t mcc_dramcfg_reset;
@@ -3490,7 +3491,7 @@ static void modern_init(MachineState *machine)
      * boot-data region extending topOfKernelData (not an unmanaged tail).
      */
     if (s->sep_sim && !s->sepfw_absent) {
-        metadata_input.sep_fw_carveout_size = 256 * KiB;
+        metadata_input.sep_fw_carveout_size = 16 * MiB;
         /*
          * Served ADT has /chosen chip-id = 0. SEPROMPanicBuffer REQUIREs a
          * nonzero chip-id (SEPROMPanicBuffer.cpp:32:
@@ -3801,10 +3802,37 @@ static void modern_init(MachineState *machine)
     if (s->metadata.layout.sep_fw_carveout_size) {
         warn_report("apple-modern: SEPFW boot-data region 0x%" PRIx64 " bytes "
                     "at 0x%" PRIx64 " published as /chosen/memory-map SEPFW "
-                    "(sep-sim; zeros; extends topOfKernelData — not an "
+                    "(sep-sim; extends topOfKernelData — not an "
                     "unmanaged memSize tail)",
                     s->metadata.layout.sep_fw_carveout_size,
                     s->metadata.layout.sep_fw_carveout_physical);
+        if (s->sep_fw_filename) {
+            gchar *data = NULL;
+            gsize len = 0;
+
+            if (!g_file_get_contents(s->sep_fw_filename, &data, &len, NULL)) {
+                error_report("apple-modern: sep-fw: cannot read '%s'",
+                             s->sep_fw_filename);
+                exit(EXIT_FAILURE);
+            }
+            if (!len || len > s->metadata.layout.sep_fw_carveout_size) {
+                error_report("apple-modern: sep-fw '%s' size %zu does not fit "
+                             "carveout 0x%" PRIx64,
+                             s->sep_fw_filename, (size_t)len,
+                             s->metadata.layout.sep_fw_carveout_size);
+                g_free(data);
+                exit(EXIT_FAILURE);
+            }
+            cpu_physical_memory_write(
+                s->metadata.layout.sep_fw_carveout_physical, data, len);
+            g_free(data);
+            warn_report("apple-modern: sep-fw loaded %zu bytes from '%s' into "
+                        "SEPFW carveout",
+                        (size_t)len, s->sep_fw_filename);
+        } else {
+            warn_report("apple-modern: sep-fw not set — SEPFW carveout remains "
+                        "zeros; pass sep-fw=/path/to/sepos.bin");
+        }
     }
     if (s->sep_sim && !s->sepfw_absent) {
         AppleModernBlob sep_compat = { 0 };
@@ -4516,6 +4544,19 @@ ASSET_PROPERTY(ramdisk, ASSET_RAMDISK)
 ASSET_PROPERTY(cryptex_trustcache, ASSET_CRYPTEX_TC)
 #undef ASSET_PROPERTY
 
+static char *get_sep_fw_filename(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->sep_fw_filename);
+}
+static void set_sep_fw_filename(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->sep_fw_filename);
+        s->sep_fw_filename = g_strdup(value);
+    }
+}
+
 #define BOOL_PROPERTY(name, field) \
     static bool get_##name(Object *obj, Error **errp) \
     { return APPLE_MODERN_MACHINE(obj)->field; } \
@@ -4838,6 +4879,10 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_sep_mailbox);
     object_class_property_add_bool(oc, "sep-sim", get_sep_sim, set_sep_sim);
     object_class_property_add_bool(oc, "sep-dart", get_sep_dart, set_sep_dart);
+    object_class_property_add_str(oc, "sep-fw", get_sep_fw_filename,
+                                  set_sep_fw_filename);
+    object_class_property_set_description(oc, "sep-fw",
+        "Host path to SEP firmware bytes copied into the SEPFW carveout when sep-sim is on");
     object_class_property_add_bool(oc, "modern-pmgr", get_modern_pmgr,
                                    set_modern_pmgr);
     object_class_property_add_bool(oc, "modern-mcc-dramcfg", get_modern_mcc_dramcfg,
