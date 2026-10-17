@@ -3941,6 +3941,28 @@ static void modern_init(MachineState *machine)
                     ks.anchor, ks.insn_before0, ks.insn_before1,
                     ks.insn_after0, ks.insn_after1);
     }
+    if (s->sepfw_absent) {
+        /*
+         * sks-failfast / sepfw-absent also NOPs the second AppleSEPKeyStore
+         * wait (user-client open BLRAA at 0xfffffff0095cf27c). See
+         * modern-kc-patch.h sks-open-wait-skip.
+         */
+        AppleModernSksOpenWaitPatch sow = { 0 };
+        uint8_t *bootkc = (uint8_t *)s->blobs[ASSET_BOOTKC].data;
+
+        if (!apple_modern_kc_sks_open_wait_skip(
+                bootkc, s->blobs[ASSET_BOOTKC].size, &sow, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: sks-failfast applied sks-open-wait-skip "
+                    "to the in-memory kernel cache: NOP'd AppleSEPKeyStore "
+                    "user-client open BLRAA at 0x%" PRIx64
+                    " (0x%08x->0x%08x) so waitForMatchingService(AppleSEPManager) "
+                    "is not taken; open still returns success. Compatibility, "
+                    "not Apple fidelity",
+                    sow.anchor, sow.insn_before, sow.insn_after);
+    }
     if (s->image_patches) {
         /*
          * Declared, opt-in anchored image patches on the board's private

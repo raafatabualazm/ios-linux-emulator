@@ -346,5 +346,42 @@ bool apple_modern_kc_keystore_persona_stub_compat(uint8_t *bootkc, size_t len,
                                                   AppleModernKeystoreStubPatch *out,
                                                   Error **errp);
 
+
+/*
+ * sks-open-wait-skip (applied automatically when sks-failfast / sepfw-absent is
+ * on): NOP the blocking virtual call at AppleSEPKeyStore
+ * sub_fffffff0095cefac + 0x95cf27c.
+ *
+ * ROOT CAUSE (Grok RE + angr 2026-10-17): that user-client open path does
+ *   tmp = (this+0xd8)->vt[0x378]();
+ *   tmp->vt[0xa0](this+0x110);   // BLRAA at 0xfffffff0095cf27c
+ * which descends into IOKit waitForMatchingService for AppleSEPManager with
+ * UINT64_MAX. Unlike getEndpoint, this wait is NOT gated by
+ * /chosen sepfw-load-at-boot. angr shows the only ways to avoid it are the
+ * early-fail paths (cast==NULL or parent-init==0); the success path always
+ * reaches the BLRAA. The BLRAA's return value is IGNORED; open returns 1
+ * either way — so NOPing it is behaviourally a fail-fast that still reports
+ * success to the caller (backboardd's io_service_open_extended).
+ *
+ * Preferred longer-term fix is publishing a real AppleSEPManager
+ * (adt-compat-restore=...+sep + sep-sim=on). This patch is the bounded
+ * fail-fast behind sks-failfast.
+ *
+ * Anchor (unique in BootKC a36b9241-era):
+ *   0xfffffff0095cf278  movk x16, imm 0x11e8 lsl 48   (0xf2e23d10)
+ *   0xfffffff0095cf27c  blraa x8, x16                (0xd73f0910)  <- patched
+ *   0xfffffff0095cf280  ldrh  w8, [x19, imm 0xf0]       (0x7941e268)
+ * Patch: blraa -> nop (0xd503201f). In-memory bootkc only.
+ */
+typedef struct AppleModernSksOpenWaitPatch {
+    uint64_t anchor;       /* file offset of the BLRAA */
+    uint32_t insn_before;  /* 0xd73f0910 blraa x8, x16 */
+    uint32_t insn_after;   /* 0xd503201f nop           */
+} AppleModernSksOpenWaitPatch;
+
+bool apple_modern_kc_sks_open_wait_skip(uint8_t *bootkc, size_t len,
+                                        AppleModernSksOpenWaitPatch *out,
+                                        Error **errp);
+
 #endif
 

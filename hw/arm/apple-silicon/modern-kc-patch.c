@@ -1496,3 +1496,74 @@ bool apple_modern_kc_keystore_persona_stub_compat(uint8_t *bootkc, size_t len,
     return true;
 }
 
+
+/*
+ * sks-open-wait-skip: see modern-kc-patch.h. Anchored at AppleSEPKeyStore
+ * sub_fffffff0095cefac's blocking BLRAA (vt[0xa0] wait for AppleSEPManager).
+ */
+#define SKS_OPEN_WAIT_VA     UINT64_C(0xfffffff0095cf27c)
+#define SKS_OPEN_WAIT_OLD    0xd73f0910u /* blraa x8, x16 */
+#define SKS_OPEN_WAIT_NEW    0xd503201fu /* nop */
+#define SKS_OPEN_WAIT_PRE    0xf2e23d10u /* movk x16, #0x11e8, lsl #48 */
+#define SKS_OPEN_WAIT_POST   0x7941e268u /* ldrh w8, [x19, #0xf0] */
+
+bool apple_modern_kc_sks_open_wait_skip(uint8_t *bootkc, size_t len,
+                                        AppleModernSksOpenWaitPatch *out,
+                                        Error **errp)
+{
+    uint64_t ks, texec_va, texec_vmsize, texec_off, texec_size, off;
+
+    if (!bootkc) {
+        error_setg(errp, "sks-open-wait-skip: no kernel cache");
+        return false;
+    }
+    if (!find_fileset_entry(bootkc, len, "com.apple.driver.AppleSEPKeyStore",
+                            &ks)) {
+        error_setg(errp, "sks-open-wait-skip: AppleSEPKeyStore fileset entry "
+                   "not found");
+        return false;
+    }
+    if (!find_segment_and_section_va(bootkc, len, ks, "__TEXT_EXEC", NULL,
+                                     &texec_va, &texec_vmsize,
+                                     &texec_off, &texec_size)) {
+        error_setg(errp, "sks-open-wait-skip: AppleSEPKeyStore __TEXT_EXEC "
+                   "not found");
+        return false;
+    }
+    if (texec_off > len || texec_size > len - texec_off ||
+        (texec_off & 3) != 0 || texec_size < 12) {
+        error_setg(errp, "sks-open-wait-skip: AppleSEPKeyStore __TEXT_EXEC "
+                   "outside image or unaligned");
+        return false;
+    }
+    if (SKS_OPEN_WAIT_VA < texec_va ||
+        SKS_OPEN_WAIT_VA - texec_va > texec_size - 4) {
+        error_setg(errp, "sks-open-wait-skip: VA 0x%" PRIx64
+                   " outside AppleSEPKeyStore __TEXT_EXEC", SKS_OPEN_WAIT_VA);
+        return false;
+    }
+    off = texec_off + (SKS_OPEN_WAIT_VA - texec_va);
+    if (off < 4 || off + 8 > len) {
+        error_setg(errp, "sks-open-wait-skip: anchor out of range");
+        return false;
+    }
+    if (ldl_le_p(bootkc + off - 4) != SKS_OPEN_WAIT_PRE ||
+        ldl_le_p(bootkc + off) != SKS_OPEN_WAIT_OLD ||
+        ldl_le_p(bootkc + off + 4) != SKS_OPEN_WAIT_POST) {
+        error_setg(errp, "sks-open-wait-skip: unexpected instructions "
+                   "0x%08x/0x%08x/0x%08x at AppleSEPKeyStore open-wait site "
+                   "(expected 0x%08x/0x%08x/0x%08x); refusing to patch",
+                   ldl_le_p(bootkc + off - 4), ldl_le_p(bootkc + off),
+                   ldl_le_p(bootkc + off + 4),
+                   SKS_OPEN_WAIT_PRE, SKS_OPEN_WAIT_OLD, SKS_OPEN_WAIT_POST);
+        return false;
+    }
+
+    if (out) {
+        out->anchor = off;
+        out->insn_before = SKS_OPEN_WAIT_OLD;
+        out->insn_after = SKS_OPEN_WAIT_NEW;
+    }
+    stl_le_p(bootkc + off, SKS_OPEN_WAIT_NEW);
+    return true;
+}
