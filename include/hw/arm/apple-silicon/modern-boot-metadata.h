@@ -113,6 +113,13 @@ typedef struct AppleModernBootMetadataInput {
      */
     bool chosen_sepfw_absent;
     /*
+     * Publish /chosen "chip-id" = this u32 when nonzero. The served Darwin
+     * tree carries chip-id=0; AppleSEPBooter::SEPROMPanicBuffer REQUIREs a
+     * nonzero chip-id from chosen (assert at SEPROMPanicBuffer.cpp:32).
+     * T8140 / iPhone17,3 uses 0x8140.
+     */
+    uint32_t chosen_chip_id;
+    /*
      * Optional property overrides. Every node must exist exactly once and the
      * (path, name) pairs must be unique. Nodes the loader already rewrites
      * (/chosen, /chosen/memory-map, /vram, /arm-io/aic) are refused; the

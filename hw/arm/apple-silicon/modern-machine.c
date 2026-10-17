@@ -3491,6 +3491,13 @@ static void modern_init(MachineState *machine)
      */
     if (s->sep_sim && !s->sepfw_absent) {
         metadata_input.sep_fw_carveout_size = 256 * KiB;
+        /*
+         * Served ADT has /chosen chip-id = 0. SEPROMPanicBuffer REQUIREs a
+         * nonzero chip-id (SEPROMPanicBuffer.cpp:32:
+         * entry = chosen->getProperty("chip-id"); _chip_id = *bytes).
+         * T8140 / d47ap (iPhone17,3) chip-id is 0x8140.
+         */
+        metadata_input.chosen_chip_id = 0x8140;
     }
     /*
      * Publish the acknowledge offset even when modern-aic is off: XNU's
