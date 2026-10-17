@@ -3482,8 +3482,8 @@ static void modern_init(MachineState *machine)
      * never touches the mailbox (v5/diag: all sep-sim MMIO counters stay 0
      * after the reset ANNOUNCE). sepfw-absent deliberately skips this: the
      * failfast path wants sepfw-load-at-boot=0 and no Booter dialogue.
-     * Size matches t8030's SEPFW_MAPPING_SIZE (16 MiB) and is aligned to the
-     * framebuffer granule so it stacks with the other unmanaged tails.
+     * Size matches t8030's SEPFW_MAPPING_SIZE (16 MiB). Placed as a normal
+     * boot-data region extending topOfKernelData (not an unmanaged tail).
      */
     if (s->sep_sim && !s->sepfw_absent) {
         metadata_input.sep_fw_carveout_size = 16 * MiB;
@@ -3804,11 +3804,10 @@ static void modern_init(MachineState *machine)
                     s->metadata.layout.gfx_carveout_physical);
     }
     if (s->metadata.layout.sep_fw_carveout_size) {
-        warn_report("apple-modern: SEPFW carveout reserved 0x%" PRIx64 " bytes "
-                    "of UNMANAGED DRAM at 0x%" PRIx64 " and published as "
-                    "/chosen/memory-map SEPFW (sep-sim; contents are zeros; "
-                    "AppleSEPFirmware::fromPreload needs the entry so Booter "
-                    "can drive the mailbox)",
+        warn_report("apple-modern: SEPFW boot-data region 0x%" PRIx64 " bytes "
+                    "at 0x%" PRIx64 " published as /chosen/memory-map SEPFW "
+                    "(sep-sim; zeros; extends topOfKernelData — not an "
+                    "unmanaged memSize tail)",
                     s->metadata.layout.sep_fw_carveout_size,
                     s->metadata.layout.sep_fw_carveout_physical);
     }
