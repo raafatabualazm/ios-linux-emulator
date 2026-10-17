@@ -313,6 +313,70 @@ static const AppleModernAdtOverride darts_rows[] = {
     {"/arm-io/dart-usb", "dart-id", darts_v43, (uint32_t)sizeof(darts_v43)},
 };
 
+/* --- claude-gui hand-add (not from gen_groups.py): ANS storage coprocessor.
+ * Darwin's prepared tree (dtree-noeapfs) strips the ASCWrap/RTBuddy/SART
+ * "compatible" from /arm-io/ans et al, so IOKit never starts AppleASCWrapV6 and
+ * the ANS never comes up (0 RTKit traffic). Restoring these three makes the
+ * match chain fire: iop,ascwrap-v6 -> iop-nub,rtbuddy-v2 -> RTBuddyService
+ * {role=ANS2} -> AppleANS2DARTNVMeController. The ascwrap-v6/rtbuddy-v2 bytes
+ * are byte-identical to the mtp group's, reused here. sart,coastguard is new. */
+static const uint8_t ans_sart_v[] = {0x73, 0x61, 0x72, 0x74, 0x2c, 0x63, 0x6f, 0x61, 0x73, 0x74, 0x67, 0x75, 0x61, 0x72, 0x64, 0x00};
+static const AppleModernAdtOverride ans_rows[] = {
+    {"/arm-io/ans", "compatible", hid_mtp_v0, (uint32_t)sizeof(hid_mtp_v0)},
+    {"/arm-io/ans/iop-ans-nub", "compatible", hid_mtp_v1, (uint32_t)sizeof(hid_mtp_v1)},
+    {"/arm-io/sart-ans", "compatible", ans_sart_v, (uint32_t)sizeof(ans_sart_v)},
+};
+
+/* --- claude-gui hand-add: restore /filesystems "e-apfs".
+ * The prepared trees (dtree-noeapfs / dtree-no-routes-noeapfs) RENAME the stock
+ * /filesystems property "e-apfs" (= 1) to "x-apfs" so that iOS stops treating
+ * the Data volume as encrypted apfs (which would demand a real SEP VEK).  That
+ * rename, however, starves usermanagerd: UMD_INIT logs "Could not Find EAPFS
+ * property in IODT", takes a degraded path and writes a persona manifest that
+ * com.apple.mobile.usermanagerd then refuses ("Daemon failed to load persona
+ * manifest" / SIGABRT), so persona type 6 (SYSTEM_PROXY) is never created and
+ * backboardd loops on "Unable to find persona with type 6".
+ * Adding "e-apfs" back is safe to TRY here only because
+ * vekd-unenc-data-compat already NOPs the apfs unencrypted-data guard, so a
+ * PLAIN Data volume still mounts.  Opt-in via adt-compat-restore=...+eapfs;
+ * the renamed "x-apfs" is left in place (iOS reads e-apfs). */
+static const uint8_t eapfs_v0[] = {0x01, 0x00, 0x00, 0x00};
+static const AppleModernAdtOverride eapfs_rows[] = {
+    {"/filesystems", "e-apfs", eapfs_v0, (uint32_t)sizeof(eapfs_v0)},
+};
+
+/* --- claude-gui hand-add: neuter the advertised GPU featureset, exactly as the
+ * ChefKiss-lineage sibling boards in this same source tree already do:
+ *   t8030.c:2919  graphics-featureset-class = "GLES2,0", fallbacks = ""
+ *   s8000.c:1547  graphics-featureset-class = "",        fallbacks = ""
+ * apple-modern never touched these, so /product still advertises the STOCK
+ * "APPLE9" (7 bytes) plus the full 73-byte fallback chain
+ * "APPLE8:APPLE7:...:GLES2,0" -- i.e. we tell iOS this device has a top-tier
+ * Apple9 Metal GPU while IOKit contains no accelerator at all (no /arm-io/sgx
+ * node is served, and the only IOAcceleratorES personality in the kernelcache
+ * is Apple's AGXAcceleratorG17P).  A userspace capability query then succeeds
+ * and the subsequent Metal-device lookup fails, which is the shape of
+ * CoreAnimation refusing to build a renderer.
+ * Those sibling boards reach a GUI with no GPU modelled, so advertising
+ * GLES2-class graphics is the configuration that is known to work in this
+ * codebase.  Opt-in via adt-compat-restore=...+gfxclass. */
+static const uint8_t gfxclass_v0[] = {0x47, 0x4c, 0x45, 0x53, 0x32, 0x2c, 0x30, 0x00}; /* "GLES2,0" */
+static const uint8_t gfxclass_v1[] = {0x00};                                           /* ""        */
+static const AppleModernAdtOverride gfxclass_rows[] = {
+    {"/product", "graphics-featureset-class", gfxclass_v0, (uint32_t)sizeof(gfxclass_v0)},
+    {"/product", "graphics-featureset-fallbacks", gfxclass_v1, (uint32_t)sizeof(gfxclass_v1)},
+};
+
+/* --- claude-gui hand-add: SEP coprocessor. Same stripping hits /arm-io/sep;
+ * restore iop-sep,ascwrap-v6 + the iop-nub,sep nub so AppleSEPManager matches
+ * its provider and drives the mailbox bootstrap (TZ0/IMG4 -> NOTIFY_ALIVE). */
+static const uint8_t sep_v0[] = {0x69, 0x6f, 0x70, 0x2d, 0x73, 0x65, 0x70, 0x2c, 0x61, 0x73, 0x63, 0x77, 0x72, 0x61, 0x70, 0x2d, 0x76, 0x36, 0x00};
+static const uint8_t sep_v1[] = {0x69, 0x6f, 0x70, 0x2d, 0x6e, 0x75, 0x62, 0x2c, 0x73, 0x65, 0x70, 0x00};
+static const AppleModernAdtOverride sep_rows[] = {
+    {"/arm-io/sep", "compatible", sep_v0, (uint32_t)sizeof(sep_v0)},
+    {"/arm-io/sep/iop-sep-nub", "compatible", sep_v1, (uint32_t)sizeof(sep_v1)},
+};
+
 const AppleModernCompatGroup apple_modern_compat_groups[] = {
     {"hid-mtp", hid_mtp_rows, sizeof(hid_mtp_rows) / sizeof(hid_mtp_rows[0]),
      "W-09 touch: the MTP coprocessor, its DockChannel transport and the multitouch decider"},
@@ -334,6 +398,14 @@ const AppleModernCompatGroup apple_modern_compat_groups[] = {
      "the GPU firmware coprocessors and the AGX firmware mapper"},
     {"darts", darts_rows, sizeof(darts_rows) / sizeof(darts_rows[0]),
      "the 22 remaining AppleT8110DARTs (dart-dcp/dart-disp0 are disp0-probe's, dart-mtp is hid-mtp's), each with its own declared dart-id"},
+    {"ans", ans_rows, sizeof(ans_rows) / sizeof(ans_rows[0]),
+     "the ANS storage coprocessor ASCWrap/RTBuddy + SART, so AppleANS2DARTNVMeController can match and the NVMe comes up"},
+    {"sep", sep_rows, sizeof(sep_rows) / sizeof(sep_rows[0]),
+     "the SEP coprocessor ASCWrap + nub, so AppleSEPManager matches and drives the mailbox bootstrap"},
+    {"eapfs", eapfs_rows, sizeof(eapfs_rows) / sizeof(eapfs_rows[0]),
+     "restores /filesystems e-apfs (renamed to x-apfs by the prepared trees) so usermanagerd finds EAPFS in the IODT and writes a loadable persona manifest (persona type 6)"},
+    {"gfxclass", gfxclass_rows, sizeof(gfxclass_rows) / sizeof(gfxclass_rows[0]),
+     "advertises GLES2-class graphics instead of the stock APPLE9 Metal featureset, matching the ChefKiss t8030/s8000 boards which reach a GUI with no GPU modelled"},
 };
 const size_t apple_modern_compat_group_count =
     sizeof(apple_modern_compat_groups) /

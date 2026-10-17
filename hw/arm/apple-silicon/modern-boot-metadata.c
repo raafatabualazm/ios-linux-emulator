@@ -65,6 +65,13 @@ typedef struct Tree {
     const AppleModernAdtOverride *overrides;
     size_t override_count;
     unsigned override_hits[APPLE_MODERN_MAX_ADT_OVERRIDES];
+    /*
+     * Synthesized node. added_path is parent + "/" + name, so the walk can
+     * refuse a tree that already carries the node instead of serving it twice.
+     */
+    const AppleModernAdtNode *added;
+    char added_path[512];
+    unsigned added_parents, added_collisions;
     const char *probe_path, *probe_name;
     AppleModernBlob probe_value;
     unsigned probe_nodes, probe_properties;
@@ -358,6 +365,14 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
             return fail(errp, "ambiguous ADT override path");
         }
     }
+    if (tree->added) {
+        if (!strcmp(path, tree->added->parent) && ++tree->added_parents > 1) {
+            return fail(errp, "ambiguous ADT synthesized-node parent");
+        }
+        if (!strcmp(path, tree->added_path)) {
+            tree->added_collisions++;
+        }
+    }
     if (dart) {
         /* Generation order is the depth-first order of the input blob. */
         tree->dart_pending = true;
@@ -422,6 +437,32 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
         }
         put32(tree->output + output_header + 4, children + 1);
         tree->map_count = 1;
+    }
+    /*
+     * Append the synthesized node last, after the parent's own children, so
+     * every unchanged node keeps its exact bytes and its position. The parent
+     * can never be /chosen (valid_added_node refuses the loader-owned nodes),
+     * so this and the memory-map append above can never both fire on one node.
+     */
+    if (tree->output && tree->added && !strcmp(path, tree->added->parent)) {
+        const AppleModernAdtNode *node = tree->added;
+        uint8_t header[8];
+
+        if (children == 8192 || ++tree->nodes > 8192) {
+            return fail(errp, "cannot append the synthesized ADT node");
+        }
+        put32(header, node->prop_count);
+        put32(header + 4, 0);
+        if (!emit(tree, header, sizeof(header), errp)) {
+            return false;
+        }
+        for (size_t i = 0; i < node->prop_count; i++) {
+            if (!property(tree, node->props[i].name, node->props[i].value,
+                          node->props[i].size, errp)) {
+                return false;
+            }
+        }
+        put32(tree->output + output_header + 4, children + 1);
     }
     return true;
 }
@@ -527,6 +568,27 @@ static bool overrides_alias_output(const AppleModernBootMetadataInput *input,
                                    const AppleModernBootMetadata *output)
 {
     size_t n = input->override_count;
+    const AppleModernAdtNode *node = input->added_node;
+    if (node) {
+        size_t props = node->prop_count;
+        if (props > APPLE_MODERN_MAX_ADT_NODE_PROPS) {
+            props = APPLE_MODERN_MAX_ADT_NODE_PROPS;
+        }
+        if (overlap(output, sizeof(*output), node, sizeof(*node)) ||
+            (node->props && overlap(output, sizeof(*output), node->props,
+                                    props * sizeof(*node->props)))) {
+            return true;
+        }
+        for (size_t i = 0; node->props && i < props; i++) {
+            const AppleModernAdtNodeProp *p = &node->props[i];
+            if ((p->name && overlap(output, sizeof(*output), p->name,
+                                    bounded_length(p->name, 32) + 1)) ||
+                (p->value && overlap(output, sizeof(*output), p->value,
+                                     p->size))) {
+                return true;
+            }
+        }
+    }
     if (!n || !input->overrides) {
         return false;
     }
@@ -550,11 +612,22 @@ static bool overrides_alias_output(const AppleModernBootMetadataInput *input,
     return false;
 }
 
-static bool valid_overrides(const AppleModernBootMetadataInput *input,
-                            Error **errp)
+/* The nodes whose own children/properties this file generates. */
+static bool loader_owned(const char *path)
 {
     static const char *const owned[] = {"/chosen", "/chosen/memory-map",
                                         "/vram", "/arm-io/aic"};
+    for (size_t i = 0; i < ARRAY_SIZE_LOCAL(owned); i++) {
+        if (!strcmp(path, owned[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool valid_overrides(const AppleModernBootMetadataInput *input,
+                            Error **errp)
+{
     if (!input->override_count) {
         return true;
     }
@@ -575,10 +648,8 @@ static bool valid_overrides(const AppleModernBootMetadataInput *input,
             !o->size || o->size > APPLE_MODERN_MAX_ADT_OVERRIDE_BYTES) {
             return fail(errp, "ADT override path, name or size is invalid");
         }
-        for (size_t j = 0; j < ARRAY_SIZE_LOCAL(owned); j++) {
-            if (!strcmp(o->path, owned[j])) {
-                return fail(errp, "ADT override targets a loader-owned node");
-            }
+        if (loader_owned(o->path)) {
+            return fail(errp, "ADT override targets a loader-owned node");
         }
         if (input->assign_dart_ids && !strcmp(o->name, "dart-id")) {
             return fail(errp, "ADT override conflicts with generated dart-id");
@@ -589,6 +660,69 @@ static bool valid_overrides(const AppleModernBootMetadataInput *input,
                 return fail(errp, "duplicate ADT override");
             }
         }
+    }
+    return true;
+}
+
+static bool valid_added_node(const AppleModernBootMetadataInput *input,
+                             Error **errp)
+{
+    const AppleModernAdtNode *node = input->added_node;
+    size_t parent_length, name_length, named = 0;
+
+    if (!node) {
+        return true;
+    }
+    if (!node->parent || !node->name || !node->props || !node->prop_count ||
+        node->prop_count > APPLE_MODERN_MAX_ADT_NODE_PROPS) {
+        return fail(errp, "synthesized ADT node has no parent, name or "
+                          "properties, or too many");
+    }
+    parent_length = bounded_length(node->parent, 256);
+    name_length = bounded_length(node->name, 32);
+    if (parent_length == 256 || parent_length < 2 || node->parent[0] != '/' ||
+        node->parent[parent_length - 1] == '/' || !name_length ||
+        name_length == 32 || strchr(node->name, '/') ||
+        !strcmp(node->name, ".") || !strcmp(node->name, "..")) {
+        return fail(errp, "synthesized ADT node parent or name is invalid");
+    }
+    if (loader_owned(node->parent)) {
+        return fail(errp, "synthesized ADT node targets a loader-owned node");
+    }
+    for (size_t i = 0; i < node->prop_count; i++) {
+        const AppleModernAdtNodeProp *p = &node->props[i];
+        size_t length;
+
+        if (!p->name || (p->size && !p->value)) {
+            return fail(errp, "synthesized ADT property has no name or value");
+        }
+        length = bounded_length(p->name, 32);
+        if (!length || length == 32 ||
+            p->size > APPLE_MODERN_MAX_ADT_OVERRIDE_BYTES) {
+            return fail(errp, "synthesized ADT property name or size is "
+                              "invalid");
+        }
+        for (size_t j = 0; j < i; j++) {
+            if (!strcmp(p->name, node->props[j].name)) {
+                return fail(errp, "duplicate synthesized ADT property");
+            }
+        }
+        if (!strcmp(p->name, "name")) {
+            named++;
+            /*
+             * walk() derives every node's path from its "name" property, so a
+             * node whose "name" disagreed with the name declared here would be
+             * served at a path the collision check never looked at.
+             */
+            if (p->size != name_length + 1 ||
+                memcmp(p->value, node->name, p->size)) {
+                return fail(errp, "synthesized ADT node name disagrees with "
+                                  "its \"name\" property");
+            }
+        }
+    }
+    if (named != 1) {
+        return fail(errp, "synthesized ADT node has no \"name\" property");
     }
     return true;
 }
@@ -636,7 +770,7 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
         return fail(errp, "missing metadata components");
     }
     components = input->components;
-    if (!valid_overrides(input, errp)) {
+    if (!valid_overrides(input, errp) || !valid_added_node(input, errp)) {
         return false;
     }
     if (input->command_line_length >= APPLE_MODERN_COMMAND_LINE_SIZE ||
@@ -673,6 +807,27 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
                 r->physical_address = prepared.layout.framebuffer_physical;
             }
         }
+    }
+    if (input->gfx_carveout_size) {
+        /*
+         * GPU/UAT carveout, immediately below the framebuffer tail. Same
+         * mechanism as the framebuffer: shrink memSize so these pages are
+         * never managed, which is what SPTM's
+         * iommu_bootstrap_register_io_range() demands of a GPU IO range.
+         */
+        uint64_t gfx_size = input->gfx_carveout_size;
+
+        if (gfx_size % APPLE_MODERN_FRAMEBUFFER_ALIGNMENT ||
+            gfx_size >= mem_size ||
+            prepared.layout.top_of_kernel_data - prepared.layout.dram_base >
+            mem_size - gfx_size) {
+            return fail(errp, "gfx carveout overlaps boot data or is "
+                        "misaligned");
+        }
+        mem_size -= gfx_size;
+        prepared.layout.gfx_carveout_physical = prepared.layout.dram_base +
+                                                mem_size;
+        prepared.layout.gfx_carveout_size = gfx_size;
     }
     video = input->video;
     if (prepared.layout.framebuffer_size) {
@@ -716,6 +871,15 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     tree.assign_dart_ids = input->assign_dart_ids;
     tree.overrides = input->overrides;
     tree.override_count = input->override_count;
+    if (input->added_node) {
+        tree.added = input->added_node;
+        if (snprintf(tree.added_path, sizeof(tree.added_path), "%s/%s",
+                     tree.added->parent, tree.added->name) >=
+            (int)sizeof(tree.added_path)) {
+            fail(errp, "synthesized ADT node path is too long");
+            goto failed;
+        }
+    }
     prepare_normal(&tree, &prepared.layout);
     if (!walk(&tree, "", 0, errp) || tree.cursor != components->dtree.size ||
         tree.chosen_count != 1 || tree.map_count != 1 ||
@@ -730,6 +894,14 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
             fail(errp, "ADT override node does not exist");
             goto failed;
         }
+    }
+    if (tree.added && tree.added_parents != 1) {
+        fail(errp, "synthesized ADT node parent does not exist");
+        goto failed;
+    }
+    if (tree.added && tree.added_collisions) {
+        fail(errp, "synthesized ADT node already exists in the served tree");
+        goto failed;
     }
     if (tree.assign_dart_ids && !tree.dart_count) {
         fail(errp, "dart-id assignment requested but the ADT has no "

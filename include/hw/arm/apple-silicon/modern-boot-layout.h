@@ -116,6 +116,13 @@ typedef struct AppleModernBootLayout {
     uint64_t ramdisk_size;
     uint64_t framebuffer_physical;
     uint64_t framebuffer_size;
+    /*
+     * GPU/UAT carveout, placed just below the framebuffer tail and likewise
+     * outside managed DRAM. Zero when not requested. See gfx_carveout_size in
+     * modern-boot-metadata.h for why SPTM requires unmanaged pages here.
+     */
+    uint64_t gfx_carveout_physical;
+    uint64_t gfx_carveout_size;
     uint64_t image_virtual_base[3];
     uint64_t image_entry_virtual[3];
     /*

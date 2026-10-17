@@ -34,6 +34,7 @@
 #include "hw/arm/apple-silicon/modern-dcp-asc.h"
 #include "hw/arm/apple-silicon/modern-dcp-iop.h"
 #include "hw/arm/apple-silicon/modern-disp-trace.h"
+#include "hw/arm/apple-silicon/modern-adt-sgx.h"
 #include "hw/arm/apple-silicon/modern-compat-groups.h"
 #include "hw/arm/apple-silicon/modern-smc.h"
 #include "hw/misc/apple-silicon/buttons.h"
@@ -50,6 +51,20 @@
 #include "hw/arm/apple-silicon/modern-boot-display.h"
 #include "hw/arm/apple-silicon/modern-disp0.h"
 #include "hw/arm/apple-silicon/modern-large-ramdisk.h"
+#include "hw/arm/apple-silicon/dt.h"
+#include "hw/arm/apple-silicon/dart.h"
+#include "hw/arm/apple-silicon/sart.h"
+#include "hw/pci-host/apcie.h"
+#include "hw/block/apple-silicon/ans.h"
+#include "hw/gpio/apple_gpio.h"
+#include "hw/misc/apple-silicon/a7iop/base.h"
+#include "hw/misc/apple-silicon/a7iop/rtkit.h"
+#include "hw/pci/pci_bridge.h"
+#include "hw/pci/msi.h"
+#include "hw/nvme/nvme.h"
+#include "system/block-backend.h"
+#include "block/block.h"
+#include "qobject/qdict.h"
 #include "hw/char/apple_uart.h"
 #include "system/address-spaces.h"
 #include "system/reset.h"
@@ -105,6 +120,10 @@ struct AppleModernMachine {
     bool amfi_csstatus_platform_compat;
     bool platform_binary_force_compat;
     bool rootvp_auth_skip_compat;
+    bool vekd_unenc_data_compat;
+    bool keystore_persona_stub_compat;
+    bool modern_ans;
+    char *modern_ans_image;
     /* Declared, opt-in anchored image-patch set (default NULL = none). */
     char *image_patches;
     AppleModernImagePatchResult image_patch_result;
@@ -213,6 +232,31 @@ struct AppleModernMachine {
     AddressSpace *disp0_dma_as;
     uint64_t disp0_dart_address, disp0_dart_size;
     DeviceState *sep_mbox;
+    /*
+     * Opt-in GPU coprocessor mailbox (gfx-asc). See map_gfx_mailbox().
+     */
+    bool gfx_asc;
+    DeviceState *gfx_mbox;
+    /* gfx-asc reg[1], the ASCWrap core register. See map_gfx_core(). */
+    MemoryRegion gfx_core_mr;
+    /* Opt-in GPU/UAT carveout (unmanaged DRAM tail). See map_gfx_core()'s
+     * sibling note and gfx_carveout_size in modern-boot-metadata.h. */
+    bool gfx_carveout;
+    /*
+     * Opt-in logging aperture over the GPU register windows, independent of
+     * sgx=on so it can back a node served under another name. The driver
+     * polls GPU registers during probe -- measured, the guest wedges forever
+     * on a single `ldr w23,[x8]` at win0+0xd04000 with the aperture absent.
+     */
+    bool gpu_trace;
+    /* Answer the probed GPU registers non-zero; see sgx_trace_read(). */
+    bool gpu_trace_answer;
+    /*
+     * Opt-in GPU node (/arm-io/sgx). See modern-adt-sgx.h and map_sgx_trace().
+     */
+    bool sgx;
+    MemoryRegion sgx_trace_mr[2];
+    unsigned sgx_trace_count;
     bool aic_trace;
     bool modern_aic;
     /* Opt-in: accept and record nonzero IRQ_CFG words (see apple-modern-aic.h). */
@@ -540,6 +584,301 @@ static bool arm_io_translate(AppleModernBlob dtree, uint64_t offset,
     }
     error_setg(errp, "device is outside the /arm-io bus ranges");
     return false;
+}
+
+/*
+ * modern-ans (EXPERIMENTAL, OPT-IN): wire an Apple ANS/NVMe storage controller
+ * into apple-modern by reusing the in-tree apcie.c/ans.c/sart.c creators. The
+ * creators take an AppleDTNode tree and self-map MMIO using reg[] as ABSOLUTE
+ * addresses, but apple-modern's blob ADT stores reg[] as /arm-io OFFSETS, so we
+ * deserialise the blob, translate each node's reg[] offset->absolute via
+ * arm_io_translate, then call the creators. Goal: let iOS enumerate the APFS
+ * container on NVMe so the Data volume mounts (gate-3). No NVMe namespace
+ * backing is attached yet -- this first wires the controller to test whether
+ * iOS initiates ANS traffic at all. Compatibility/experimental, not fidelity.
+ */
+static bool modern_ans_absolutize_regs(AppleModernBlob dtree, AppleDTNode *node,
+                                       Error **errp)
+{
+    AppleDTProp *reg = apple_dt_get_prop(node, "reg");
+    uint64_t *r;
+    size_t pairs, i;
+
+    if (!reg || !reg->data || (reg->len % 16) != 0 || reg->len == 0) {
+        error_setg(errp, "modern-ans: node has no usable reg property");
+        return false;
+    }
+    r = (uint64_t *)reg->data;
+    pairs = reg->len / 16;
+    for (i = 0; i < pairs; i++) {
+        uint64_t abs;
+        if (!arm_io_translate(dtree, r[i * 2], r[i * 2 + 1], &abs, errp)) {
+            return false;
+        }
+        r[i * 2] = abs;
+    }
+    return true;
+}
+
+/* Create one apcie DART (generic apple-dart) and register it as the machine
+ * link "dart-apcieN" that apple_pcie_create_port() looks up. Absent node -> skip. */
+static bool modern_create_apcie_dart(AppleModernMachine *s, AppleModernBlob dtree,
+                                     AppleDTNode *dt, const char *name,
+                                     Error **errp)
+{
+    char path[32];
+    AppleDTNode *n;
+    AppleDARTState *dart;
+    AppleDTProp *prop;
+    uint64_t *r;
+    size_t i;
+
+    snprintf(path, sizeof(path), "arm-io/%s", name);
+    n = apple_dt_get_node(dt, path);
+    if (!n) {
+        return true; /* not all ports present; skip missing DARTs */
+    }
+    prop = apple_dt_get_prop(n, "vm-base");
+    if (prop && prop->data && prop->len >= 4 && ldl_le_p(prop->data) == 0) {
+        stl_le_p(prop->data, 0x4000);
+    }
+    if (!modern_ans_absolutize_regs(dtree, n, errp)) {
+        return false;
+    }
+    dart = apple_dart_from_node(n);
+    if (!dart) {
+        error_setg(errp, "modern-ans: %s create failed", name);
+        return false;
+    }
+    object_property_add_child(qdev_get_machine(), name, OBJECT(dart));
+    r = (uint64_t *)apple_dt_get_prop(n, "reg")->data;
+    prop = apple_dt_get_prop(n, "reg");
+    for (i = 0; i < prop->len / 16; i++) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(dart), i, r[i * 2]);
+    }
+    if ((prop = apple_dt_get_prop(n, "interrupts")) && prop->data) {
+        uint32_t *ii = (uint32_t *)prop->data;
+        for (i = 0; i < prop->len / sizeof(uint32_t); i++) {
+            if (ii[i] < s->aic_num_irqs) {
+                sysbus_connect_irq(SYS_BUS_DEVICE(dart), i,
+                                   qdev_get_gpio_in(s->aic, ii[i]));
+            }
+        }
+    }
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dart), &error_fatal);
+    return true;
+}
+
+static bool modern_create_ans(AppleModernMachine *s, Error **errp)
+{
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+    AppleDTNode *dt, *apcie, *sartn, *ansn, *chosen;
+    AppleDTProp *prop;
+    SysBusDevice *pcie, *sart, *ans;
+    uint32_t chip_id = 0;
+    uint64_t *r;
+    size_t i;
+
+    dt = apple_dt_deserialise(s->metadata.dtree);
+    if (!dt) {
+        error_setg(errp, "modern-ans: device-tree deserialise failed");
+        return false;
+    }
+    chosen = apple_dt_get_node(dt, "chosen");
+    if (chosen && (prop = apple_dt_get_prop(chosen, "chip-id")) && prop->data &&
+        prop->len >= 4) {
+        chip_id = ldl_le_p(prop->data);
+    }
+
+    /* --- PCIe host (apple_pcie_from_node self-maps absolute reg + registers
+       pcie.host / pcie.bridgeN on the machine object) --- */
+    apcie = apple_dt_get_node(dt, "arm-io/apcie");
+    if (!apcie) {
+        error_setg(errp, "modern-ans: /arm-io/apcie node missing");
+        return false;
+    }
+    apple_dt_set_prop_null(apcie, "apcie-phy-tunables");
+    if (!modern_ans_absolutize_regs(dtree, apcie, errp)) {
+        return false;
+    }
+    /* apple_pcie_create_port() looks up machine links "dart-apcieN" per port;
+       create them first (generic apple-dart) from the dtree. */
+    if (!modern_create_apcie_dart(s, dtree, dt, "dart-apcie0", errp) ||
+        !modern_create_apcie_dart(s, dtree, dt, "dart-apcie1", errp) ||
+        !modern_create_apcie_dart(s, dtree, dt, "dart-apcie2", errp)) {
+        return false;
+    }
+    /* apcie clkreq handling looks up machine link "gpio"; provide it from the
+       t8140 gpio0 node (registered under the name apcie expects). */
+    {
+        AppleDTNode *g = apple_dt_get_node(dt, "arm-io/gpio0");
+        if (g && modern_ans_absolutize_regs(dtree, g, errp)) {
+            DeviceState *gpio = apple_gpio_from_node(g);
+            if (gpio) {
+                object_property_add_child(qdev_get_machine(), "gpio",
+                                          OBJECT(gpio));
+                r = (uint64_t *)apple_dt_get_prop(g, "reg")->data;
+                sysbus_mmio_map(SYS_BUS_DEVICE(gpio), 0, r[0]);
+                if ((prop = apple_dt_get_prop(g, "interrupts")) && prop->data) {
+                    uint32_t *ii = (uint32_t *)prop->data;
+                    for (i = 0; i < prop->len / sizeof(uint32_t); i++) {
+                        if (ii[i] < s->aic_num_irqs) {
+                            sysbus_connect_irq(SYS_BUS_DEVICE(gpio), i,
+                                               qdev_get_gpio_in(s->aic, ii[i]));
+                        }
+                    }
+                }
+                sysbus_realize_and_unref(SYS_BUS_DEVICE(gpio), &error_fatal);
+            }
+        } else if (g == NULL) {
+            error_setg(errp, "modern-ans: /arm-io/gpio0 node missing");
+            return false;
+        } else {
+            return false;
+        }
+    }
+    msi_nonbroken = true; /* apcie/nvme use MSI; AIC delivers via msi-vector-offset */
+    pcie = apple_pcie_from_node(apcie, chip_id);
+    if (!pcie) {
+        error_setg(errp, "modern-ans: apple_pcie_from_node failed");
+        return false;
+    }
+    {
+        uint32_t nreg = 0, msi_off = 0, msi_vec = 0;
+        /* apcie host sysbus IRQ layout is FIXED: [0..3]=irqs[4], [4..35]=msi_irqs[8*4]. */
+        if ((prop = apple_dt_get_prop(apcie, "interrupts")) && prop->data) {
+            uint32_t *ii = (uint32_t *)prop->data;
+            nreg = prop->len / sizeof(uint32_t);
+            if (nreg > 4) {
+                nreg = 4;
+            }
+            for (i = 0; i < nreg; i++) {
+                if (ii[i] < s->aic_num_irqs) {
+                    sysbus_connect_irq(pcie, i, qdev_get_gpio_in(s->aic, ii[i]));
+                }
+            }
+        }
+        if ((prop = apple_dt_get_prop(apcie, "msi-vector-offset")) &&
+            prop->data && prop->len >= 4) {
+            msi_off = ldl_le_p(prop->data);
+        }
+        if ((prop = apple_dt_get_prop(apcie, "#msi-vectors")) && prop->data &&
+            prop->len >= 4) {
+            msi_vec = ldl_le_p(prop->data);
+        }
+        if (msi_vec > 8 * APCIE_MAX_PORTS) {
+            msi_vec = 8 * APCIE_MAX_PORTS;
+        }
+        for (i = 0; i < msi_vec; i++) {
+            if (msi_off + i < s->aic_num_irqs) {
+                sysbus_connect_irq(pcie, 4 + i,
+                                   qdev_get_gpio_in(s->aic, msi_off + i));
+            }
+        }
+    }
+
+    /* --- SART (caller maps reg[0]) --- */
+    sartn = apple_dt_get_node(dt, "arm-io/sart-ans");
+    if (!sartn) {
+        error_setg(errp, "modern-ans: /arm-io/sart-ans node missing");
+        return false;
+    }
+    if (!modern_ans_absolutize_regs(dtree, sartn, errp)) {
+        return false;
+    }
+    sart = apple_sart_from_node(sartn);
+    if (!sart) {
+        error_setg(errp, "modern-ans: apple_sart_from_node failed");
+        return false;
+    }
+    r = (uint64_t *)apple_dt_get_prop(sartn, "reg")->data;
+    sysbus_mmio_map(sart, 0, r[0]);
+    sysbus_realize_and_unref(sart, &error_fatal);
+
+    /* --- ANS (needs a PCI sec_bus from the pcie bridge; caller maps 4 regs) --- */
+    ansn = apple_dt_get_node(dt, "arm-io/ans");
+    if (!ansn) {
+        error_setg(errp, "modern-ans: /arm-io/ans node missing");
+        return false;
+    }
+    if (!modern_ans_absolutize_regs(dtree, ansn, errp)) {
+        return false;
+    }
+    {
+        Object *brd_o = object_property_get_link(qdev_get_machine(),
+                                                 "pcie.bridge0", NULL);
+        PCIBus *sec;
+        Object *host_o;
+        if (!brd_o) {
+            error_setg(errp, "modern-ans: pcie.bridge0 link absent "
+                       "(apcie created no bridge0)");
+            return false;
+        }
+        sec = pci_bridge_get_sec_bus(PCI_BRIDGE(brd_o));
+        ans = apple_ans_from_node(ansn, APPLE_A7IOP_V6, sec);
+        if (!ans) {
+            error_setg(errp, "modern-ans: apple_ans_from_node failed");
+            return false;
+        }
+        object_property_add_const_link(OBJECT(ans), "dma-mr",
+                                       OBJECT(sysbus_mmio_get_region(sart, 1)));
+        r = (uint64_t *)apple_dt_get_prop(ansn, "reg")->data;
+        for (i = 0; i < 4; i++) {
+            sysbus_mmio_map(ans, i, r[i << 1]);
+        }
+        if ((prop = apple_dt_get_prop(ansn, "interrupts")) && prop->data) {
+            uint32_t *ii = (uint32_t *)prop->data;
+            for (i = 0; i < prop->len / sizeof(uint32_t); i++) {
+                if (ii[i] < s->aic_num_irqs) {
+                    sysbus_connect_irq(ans, i, qdev_get_gpio_in(s->aic, ii[i]));
+                }
+            }
+        }
+        host_o = object_property_get_link(qdev_get_machine(), "pcie.host", NULL);
+        if (host_o) {
+            qdev_connect_gpio_out_named(
+                DEVICE(host_o), "interrupt_pci", 0,
+                qdev_get_gpio_in_named(DEVICE(ans), "interrupt_pci", 0));
+        }
+        sysbus_realize_and_unref(ans, &error_fatal);
+    }
+
+    /* Optional: back the ANS NVMe with an APFS image as nsid 1 (readonly, so the
+       source image is never mutated) so iOS can enumerate a real namespace. */
+    if (s->modern_ans_image && s->modern_ans_image[0]) {
+        Object *nvme_o = object_resolve_path_component(OBJECT(ans), "nvme");
+        BlockBackend *blk;
+        DeviceState *ns;
+
+        if (!nvme_o) {
+            error_setg(errp, "modern-ans: nvme child not found on ans");
+            return false;
+        }
+        {
+            /* These "dmg" files are RAW APFS images, not UDIF DMGs -- force the
+               raw driver over a plain file so QEMU does not probe them as dmg. */
+            QDict *opts = qdict_new();
+            qdict_put_str(opts, "driver", "raw");
+            qdict_put_str(opts, "file.driver", "file");
+            qdict_put_str(opts, "file.filename", s->modern_ans_image);
+            blk = blk_new_open(NULL, NULL, opts, 0, errp);
+        }
+        if (!blk) {
+            return false;
+        }
+        ns = qdev_new(TYPE_NVME_NS);
+        qdev_prop_set_drive(ns, "drive", blk);
+        qdev_prop_set_uint32(ns, "nsid", 1);
+        qdev_realize_and_unref(ns, BUS(&NVME(nvme_o)->bus), &error_fatal);
+        warn_report("apple-modern: modern-ans attached nvme-ns nsid 1 (readonly) "
+                    "backed by %s", s->modern_ans_image);
+    }
+
+    warn_report("apple-modern: opt-in modern-ans wired apcie+sart+ans "
+                "(chip 0x%08x); EXPERIMENTAL IOKit storage controller, no NVMe "
+                "namespace backing yet. Compatibility, not Apple fidelity",
+                chip_id);
+    return true;
 }
 
 static bool adt_u32(AppleModernBlob dtree, const char *path, const char *name,
@@ -2317,6 +2656,251 @@ static bool map_sep_mailbox(AppleModernMachine *s, Error **errp)
     return true;
 }
 
+/*
+ * gfx-asc: the GPU's Apple System Coprocessor mailbox.
+ *
+ * Milestone A of the GPU bring-up. iOS 27's CoreAnimation render server is
+ * Metal-only on the display path: both server accessors in QuartzCore
+ * (AccelServer 0x184415838, VirtualServer 0x184629958) call
+ * MTLCreateSystemDefaultDevice and, on NULL, return a still-NULL renderer with
+ * no software fallback. Before that can ever succeed QuartzCore must find an
+ * IOKit service matching "AGXAccelerator" -- it does
+ * IOServiceMatching("AGXAccelerator") + IOServiceGetMatchingService and gives
+ * up on zero. That service is published by com.apple.AGXG17P, which cannot
+ * match while /arm-io/gfx-asc has no coprocessor behind it: the stock ADT
+ * describes the node (device_type 'gfx-asc', role 'GFX', iop-version 1,
+ * reg window 0 = 0x272600000/0x88000, four interrupts) but this board mapped
+ * nothing there, so the ASCWrap registers read as zeros through the arm-io
+ * catch-all and RTBuddy never comes up.
+ *
+ * This creates the wrapper exactly as map_sep_mailbox() does for the SEP:
+ * window 0 only, a bare AppleRTKit so the standard EP0 management handshake
+ * (EPMAP/rollcall/power) is answered, and the ADT's four interrupt lines wired
+ * positionally to the AIC. rtkit.c NULL-guards every ops callback, so no
+ * endpoint handlers are needed for the driver to begin its handshake.
+ *
+ * The real G17P firmware is on hand and unencrypted, so the next step is to
+ * trace what the guest driver asks for rather than guess:
+ *   evidence/firmware-20261009/GFX/armfw_g17p.im4p -> IM4P 'gfxf', no KBAG,
+ *   5770288 bytes, container 'rkosftab' of five Mach-O arm64e preload images
+ *   (a000/b000/b100 = variant g17p, a010/b010 = g17a),
+ *   RTKit_release-3514.0.15.release, declaring the channels
+ *   gfx_msgs / gfx_ints / gfx_iop_msgs / gfx_iop_ints.
+ * Opt-in via -M apple-modern,gfx-asc=on; it stays off by default because the
+ * register layout below is the same declared ascwrap-v6 reading the SEP
+ * mailbox uses, not Apple-documented, and no GPU hardware is modelled behind
+ * it (so no rendering can result from this alone).
+ */
+/*
+ * gfx-asc reg[1]: the ASCWrap CORE register window, eight bytes.
+ *
+ * Attested gate (AGX Milestone-A RE, BootKC a36b9241): AppleASCWrapV6 (vtable
+ * slot +0x6d8) reads 64 bits at offset 0 of this window and REQUIRE-panics
+ * "ASC firmware must be loaded by iBoot" (AppleASCWrapCommon.cpp:151) when
+ * BIT 0 IS CLEAR -- gate at 0xfffffff00856e31c:
+ *     ldr w8,[this,#0x188] ; ldr x9,[this,#0x198] ; ldr x8,[x9+x8]
+ *     tbz w8,#0 -> 0xfffffff00856e33c -> thunk 0xfffffff00856f588
+ * Unmapped, bit 0 reads 0 and the panic is certain. This is the same shape the
+ * project already attested for /arm-io/dcp in modern-dcp-asc.h, except the DCP
+ * core window is 0x4000 bytes while gfx-asc's is a single 64-bit register
+ * (real-device IODeviceMemory: address 19361234944, length 8).
+ *
+ * So bit 0 is answered as 1: a DECLARED claim that the bootloader loaded the
+ * ASC firmware. Nothing is actually placed -- exactly the declaration
+ * dcp-iop already makes for the DCP -- so this clears the wrapper gate only;
+ * RTBuddy's own _attemptFirmwareLoad (RTBuddy.cpp:346) still needs real
+ * firmware bytes and a carveout.
+ */
+#define APPLE_MODERN_GFX_CORE_LOADED 1
+
+/*
+ * The GPU coprocessor's user endpoints.
+ *
+ * The real a000 firmware declares its channels in its own __DATA descriptor
+ * tables (mgmt block at firmware VA 0xfffffc000006f4c0, iop block at
+ * 0xfffffc000005b540) as: management = 0x01, crashlog = 0x20,
+ * gfx_msgs = 0x21 (paired with gfx_ints), an unnamed 0x22, and
+ * gfx_iop_msgs = 0x23 (paired with gfx_iop_ints).
+ *
+ * rtkit.c numbers USER endpoints relatively: EP_USER_START is 32 (0x20) and
+ * apple_rtkit_register_user_ep()/send_user_msg() add it (rtkit.h:89-92,
+ * rtkit.c:142-149). So the raw channel numbers map to user-relative
+ * 0x21 - 0x20 = 1 and 0x23 - 0x20 = 3.
+ *
+ * MEASURED (v71): with no user endpoint registered at all, the GFX handshake
+ * still completes -- iop_start, HELLO, HELLO_ACK (protocol 0xc), EPMAP,
+ * rollcall_finished -- and then negotiates only raw 0x20, so the GPU's own
+ * channels are never brought up. Registering these two is what lets RTBuddy
+ * reach them. Messages are logged and otherwise unanswered: no AGX command
+ * semantics are implemented, and none can be until the firmware's initdata
+ * handshake (Asahi InitMsg type 0x81) is understood.
+ */
+#define APPLE_MODERN_GFX_EP_MSGS_USER 1     /* raw 0x21, gfx_msgs */
+#define APPLE_MODERN_GFX_EP_IOP_MSGS_USER 3 /* raw 0x23, gfx_iop_msgs */
+
+static void gfx_ep_handle_message(void *opaque, uint8_t ep, uint64_t msg)
+{
+    qemu_log_mask(LOG_UNIMP, "GFX-EP raw 0x%02x message 0x%016" PRIx64
+                  " (logged, unanswered: no AGX semantics are modelled)\n",
+                  ep, msg);
+}
+
+static uint64_t gfx_core_read(void *opaque, hwaddr offset, unsigned size)
+{
+    uint64_t value = (offset == 0) ? APPLE_MODERN_GFX_CORE_LOADED : 0;
+
+    qemu_log_mask(LOG_UNIMP, "GFX-CORE read  +0x%02" PRIx64 " size %u -> 0x%"
+                  PRIx64 "\n", (uint64_t)offset, size, value);
+    return value;
+}
+
+static void gfx_core_write(void *opaque, hwaddr offset, uint64_t value,
+                           unsigned size)
+{
+    qemu_log_mask(LOG_UNIMP, "GFX-CORE write +0x%02" PRIx64 " size %u value 0x%"
+                  PRIx64 "\n", (uint64_t)offset, size, value);
+}
+
+static const MemoryRegionOps gfx_core_ops = {
+    .read = gfx_core_read,
+    .write = gfx_core_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .impl = { .min_access_size = 1, .max_access_size = 8 },
+};
+
+static bool map_gfx_core(AppleModernMachine *s, const AppleModernBlob *reg,
+                         Error **errp)
+{
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    uint64_t offset = ldq_le_p(reg->data + 16);
+    uint64_t size = ldq_le_p(reg->data + 24);
+    uint64_t base;
+
+    if (!size || size > 0x1000) {
+        error_setg(errp, "modern gfx-asc core window is out of range");
+        return false;
+    }
+    if (!arm_io_translate(dtree, offset, size, &base, errp)) {
+        return false;
+    }
+    memory_region_init_io(&s->gfx_core_mr, NULL, &gfx_core_ops, s,
+                          "apple-modern.gfx-core", size);
+    memory_region_add_subregion(get_system_memory(), base, &s->gfx_core_mr);
+    warn_report("apple-modern: gfx-asc core window at 0x%" PRIx64 " size 0x%"
+                PRIx64 ", bit 0 of +0 DECLARED 1 so AppleASCWrapV6 does not "
+                "panic \"ASC firmware must be loaded by iBoot\"; no firmware "
+                "is actually placed", base, size);
+    return true;
+}
+
+static bool map_gfx_mailbox(AppleModernMachine *s, Error **errp)
+{
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    AppleModernBlob reg, ints, compatible;
+    uint64_t offset, size, base;
+
+    if (!apple_modern_adt_property(dtree, "/arm-io/gfx-asc", "reg", &reg,
+                                   errp)) {
+        return false;
+    }
+    if (reg.size != 32) {
+        error_setg(errp, "unsupported modern gfx-asc reg schema");
+        return false;
+    }
+    /* Window 0 only, matching the SEP treatment of the same wrapper. */
+    offset = ldq_le_p(reg.data);
+    size = ldq_le_p(reg.data + 8);
+    if (size < 0x10000 || size > 0x400000) {
+        error_setg(errp, "modern gfx-asc register span is out of range");
+        return false;
+    }
+    if (!arm_io_translate(dtree, offset, size, &base, errp)) {
+        return false;
+    }
+    /*
+     * Accept a missing compatible for the same reason the SEP does: Darwin's
+     * device-tree fixup strips it, and adt-compat-restore=...+gfx is what puts
+     * "iop,ascwrap-v6" back.
+     */
+    if (apple_modern_adt_property(dtree, "/arm-io/gfx-asc", "compatible",
+                                  &compatible, NULL)) {
+        if (compatible.size < sizeof("iop,ascwrap-v6") ||
+            memcmp(compatible.data, "iop,ascwrap-v6",
+                   sizeof("iop,ascwrap-v6"))) {
+            error_setg(errp, "unsupported modern gfx-asc wrapper (expected "
+                       "iop,ascwrap-v6; pass adt-compat-restore=...+gfx)");
+            return false;
+        }
+    } else {
+        warn_report("apple-modern: /arm-io/gfx-asc has no compatible string; "
+                    "assuming iop,ascwrap-v6 (pass adt-compat-restore=...+gfx "
+                    "to restore it)");
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io/gfx-asc", "interrupts",
+                                   &ints, errp)) {
+        return false;
+    }
+    if (ints.size != 16) {
+        error_setg(errp, "modern gfx-asc names %zu interrupt bytes, expected "
+                   "16", (size_t)ints.size);
+        return false;
+    }
+    if (!s->aic) {
+        error_setg(errp, "gfx-asc needs modern-aic: without a controller no "
+                   "doorbell can be delivered");
+        return false;
+    }
+
+    s->gfx_mbox = DEVICE(apple_rtkit_new(NULL, "GFX", size, APPLE_A7IOP_V6,
+                                         NULL));
+    /*
+     * Advertise the firmware's two message channels so the rollcall offers
+     * more than crashlog; see the endpoint note above.
+     */
+    apple_rtkit_register_user_ep(APPLE_RTKIT(s->gfx_mbox),
+                                 APPLE_MODERN_GFX_EP_MSGS_USER, s,
+                                 gfx_ep_handle_message);
+    apple_rtkit_register_user_ep(APPLE_RTKIT(s->gfx_mbox),
+                                 APPLE_MODERN_GFX_EP_IOP_MSGS_USER, s,
+                                 gfx_ep_handle_message);
+
+    /*
+     * Positional, as for the SEP: index i -> interrupts[i]. The ADT carries no
+     * interrupt-names on any node in this tree, so which of the four lines the
+     * GPU driver actually registers is still to be measured.
+     */
+    for (unsigned i = 0; i < APPLE_A7IOP_IRQ_MAX; i++) {
+        uint32_t line = ldl_le_p(ints.data + i * 4);
+
+        if (line >= s->aic_num_irqs) {
+            error_setg(errp, "modern gfx-asc interrupt %u is outside the %u "
+                       "controller inputs", line, s->aic_num_irqs);
+            return false;
+        }
+        sysbus_connect_irq(SYS_BUS_DEVICE(s->gfx_mbox), i,
+                           qdev_get_gpio_in(s->aic, line));
+    }
+    /* Connect before realize; see the note in map_sep_mailbox(). */
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(s->gfx_mbox), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->gfx_mbox), 0, base);
+    /*
+     * reg[1] is the ASCWrap core register and its bit 0 is the wrapper's
+     * "firmware loaded by iBoot" gate; without it AppleASCWrapV6 panics before
+     * RTBuddy is ever reached.
+     */
+    if (reg.size >= 32 && !map_gfx_core(s, &reg, errp)) {
+        return false;
+    }
+    warn_report("apple-modern: gfx-asc RTKit mailbox at 0x%" PRIx64 " size 0x%"
+                PRIx64 ", AIC inputs %u/%u/%u/%u (opt-in; no GPU hardware is "
+                "modelled behind it, so this cannot render -- it exists so "
+                "AGXG17P can probe and be traced)",
+                base, size, ldl_le_p(ints.data), ldl_le_p(ints.data + 4),
+                ldl_le_p(ints.data + 8), ldl_le_p(ints.data + 12));
+    return true;
+}
+
 static uint64_t sep_trace_read(void *opaque, hwaddr offset, unsigned size)
 {
     AppleModernSEPTrace *t = opaque;
@@ -2400,6 +2984,201 @@ static bool map_sep_trace(AppleModernMachine *s, Error **errp)
                     " size 0x%" PRIx64 " (observation only, not a device)",
                     s->sep_trace_count, base, size);
         s->sep_trace_count++;
+    }
+    return true;
+}
+
+/*
+ * Observation apertures over the two /arm-io/sgx register windows.
+ *
+ * The node restored by sgx=on is what AGXAcceleratorG17P matches, and nothing
+ * in this board models a GPU behind it: reads return zero, writes are
+ * discarded and every access is logged under -d unimp. That is deliberate for
+ * Milestone A -- the point is to find out what the accelerator touches first,
+ * and reads of zero are the behaviour the unmapped address range would have
+ * given anyway, minus the external abort an unassigned access would raise.
+ *
+ * Stock reg is two windows (/arm-io offsets, translated through the bus
+ * ranges): 0x270000000 + 0x4000000 -> 0x480000000, and 0x270d00000 + 0x12c000
+ * -> 0x480d00000. Both are published at a NEGATIVE priority so any real device
+ * mapped inside them keeps precedence -- modern-pmgr-storage, for one,
+ * declares a power-state block at 0x481000000, inside window 0.
+ */
+typedef struct AppleModernSGXTrace {
+    uint64_t base;
+    unsigned index;
+    bool answer;
+} AppleModernSGXTrace;
+
+/*
+ * Opt-in probe answer for the GPU register aperture (gpu-trace-answer=on).
+ *
+ * MEASURED (v81): with the aperture reading all zeroes, AGXG17P probes exactly
+ * seven registers and then stops, publishing no accelerator -- window 1
+ * offsets 0x4000, 0x4010, 0x4014, 0x4018, 0x401c, 0x4008, then 0x101500. That
+ * is the shape of an ID/capability register reading zero and the driver
+ * declining the hardware, so the probe is gated on values this model controls.
+ *
+ * This answers those offsets non-zero so the NEXT gate can be observed. The
+ * values are a DECLARED GUESS, not Apple-documented and not measured from
+ * hardware: the only corroborated facts are the G17P configuration the
+ * public agx-re corpus reports (num_cores 6, core_mask 61 = 0x3d, usc_gen 3,
+ * gpu_gen 17 = 0x11, gpu_var "P", is_sksm 1), and it is NOT established that
+ * these registers carry those fields. The point is purely to distinguish
+ * "zero means absent" from "the driver wants specific values"; whatever it
+ * reads next is the real information. Default off so no run silently depends
+ * on invented register content.
+ */
+static uint64_t sgx_trace_read(void *opaque, hwaddr offset, unsigned size)
+{
+    AppleModernSGXTrace *t = opaque;
+    uint64_t value = 0;
+
+    if (t->answer && t->index == 1) {
+        switch (offset) {
+        /*
+         * RE-DERIVED, not a guess. The reader at linked 0xfffffff0084cbe3c
+         * fetches this register via the helper 0xfffffff0084f6d4c (args:
+         * this, register offset; the six calls pass 0xd04000, +0x10, +0x14,
+         * +0x18, +0x1c, +0x08 -- exactly the offsets observed on the wire),
+         * then branches on its TOP BYTE:
+         *     lsr w8, w23, #0x18
+         *     cmp w8, #0xa ; b.eq 0xfffffff0084cbf58   (accepted)
+         *     cmp w8, #8   ; b.ne 0xfffffff0084cbf84   (-> stp xzr,xzr,[x19,#0x10],
+         *                                                 fields stay 0, probe bails)
+         * On the 0xa path it then needs byte 2 nonzero:
+         *     ubfx w8, w23, #0x10, #8 ; cbz w8 -> 0xfffffff0084cc36c
+         * So: top byte 0xa (or 8) and byte 2 nonzero. 0x0a010000 satisfies both.
+         * The field is evidently a GPU architecture/generation code; which of 8
+         * or 0xa is correct for G17P is NOT established -- this run tests 0xa.
+         */
+        case 0x4000: value = 0x0a020000; break;   /* byte2 MUST be 2 */
+        case 0x4008: value = 0x11; break;       /* gpu_gen 17, if it is that */
+        /*
+         * +0x30 and +0x44 are computed from THIS register (x21), and both must
+         * be non-zero or the caller bails:
+         *     w9 = ((x21>>8)&0xff) * ((x21>>16)&0xf)      -> stored at +0x64
+         *     +0x30 = +0x44 = w9 * (x21 & 0xff)
+         * 0x00010106 -> w9 = 1*1 = 1, field = 1*6 = 6 (non-zero). The low byte
+         * is plausibly a core count (G17P has 6 per the agx-re corpus); the
+         * two upper fields are set to 1 purely to make the product non-zero.
+         */
+        case 0x4010: value = 0x00010106; break;
+        case 0x4014: value = 0x3d; break;       /* core_mask 61 candidate */
+        case 0x4018: value = 0x3; break;        /* usc_gen candidate */
+        case 0x401c: value = 0x1; break;
+        case 0x101500: value = 0x1; break;
+        default: value = 0; break;
+        }
+    }
+    /*
+     * Log the GUEST PC/LR of the accessor. v82 proved the seven probed
+     * register VALUES are not the gate (answering them non-zero produced a
+     * byte-identical run), and no AGX kext ever logs anything, so the open
+     * question is WHO is reading: AGXAcceleratorG17P, or some other driver
+     * touching the aperture. The guest PC answers that directly and costs
+     * nothing -- map it against the kext load addresses in the same boot
+     * (e.g. the RTBuddy range com.apple.driver.RTBuddy@0xfffffff02a886cd0
+     * that appears in serial).
+     */
+    if (current_cpu != NULL) {
+        CPUARMState *env = &ARM_CPU(current_cpu)->env;
+
+        qemu_log_mask(LOG_UNIMP, "SGX-TRACE win%u read  0x%" PRIx64 " +0x%07"
+                      PRIx64 " size %u -> 0x%" PRIx64 "  [guest pc 0x%016"
+                      PRIx64 " lr 0x%016" PRIx64 "]\n", t->index, t->base,
+                      (uint64_t)offset, size, value, (uint64_t)env->pc,
+                      (uint64_t)env->xregs[30]);
+    } else {
+        qemu_log_mask(LOG_UNIMP, "SGX-TRACE win%u read  0x%" PRIx64 " +0x%07"
+                      PRIx64 " size %u -> 0x%" PRIx64 "  [no cpu context]\n",
+                      t->index, t->base, (uint64_t)offset, size, value);
+    }
+    return value;
+}
+
+static void sgx_trace_write(void *opaque, hwaddr offset, uint64_t value,
+                            unsigned size)
+{
+    AppleModernSGXTrace *t = opaque;
+
+    qemu_log_mask(LOG_UNIMP, "SGX-TRACE win%u write 0x%" PRIx64 " +0x%07"
+                  PRIx64 " size %u value 0x%" PRIx64 "\n", t->index, t->base,
+                  (uint64_t)offset, size, value);
+}
+
+static const MemoryRegionOps sgx_trace_ops = {
+    .read = sgx_trace_read,
+    .write = sgx_trace_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .impl = { .min_access_size = 1, .max_access_size = 8 },
+};
+
+static bool map_sgx_trace(AppleModernMachine *s, Error **errp)
+{
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    AppleModernBlob reg;
+    Error *local = NULL;
+
+    /*
+     * The served tree is the one the node was appended to -- but the GPU node
+     * is not always called "sgx". SPTM finds the GPU by PATH and panics in its
+     * UAT bootstrap when a node literally at /arm-io/sgx lacks iBoot's GPU
+     * handoff properties, while AGXAcceleratorG17P finds it by PROPERTY VALUE
+     * (IONameMatch gpu,t8140 on an AppleARMIODevice) and does not care about
+     * the name. Serving the same 26 properties as /arm-io/gpu0 therefore gets
+     * the accelerator to probe with SPTM's GPU path skipped entirely
+     * (measured: a node named sgx gives 0 bytes of serial, named gpu0 the
+     * guest boots). Accept either name so the trace aperture follows the node.
+     */
+    if (!apple_modern_adt_property(dtree, "/arm-io/sgx", "reg", &reg,
+                                   &local)) {
+        error_free(local);
+        local = NULL;
+        if (!apple_modern_adt_property(dtree, "/arm-io/gpu0", "reg", &reg,
+                                       &local)) {
+            error_propagate(errp, local);
+            return false;
+        }
+    }
+    if (reg.size != 32) {
+        error_setg(errp, "unsupported modern sgx reg schema");
+        return false;
+    }
+    for (size_t i = 0; i + 16 <= reg.size; i += 16) {
+        uint64_t offset = ldq_le_p(reg.data + i);
+        uint64_t size = ldq_le_p(reg.data + i + 8);
+        AppleModernSGXTrace *trace;
+        uint64_t base;
+        char name[32];
+
+        if (s->sgx_trace_count >= ARRAY_SIZE(s->sgx_trace_mr)) {
+            break;
+        }
+        if (!size || size > 0x8000000) {
+            error_setg(errp, "modern sgx register window is out of range");
+            return false;
+        }
+        if (!arm_io_translate(dtree, offset, size, &base, errp)) {
+            return false;
+        }
+        trace = g_new0(AppleModernSGXTrace, 1);
+        trace->base = base;
+        trace->index = s->sgx_trace_count;
+        trace->answer = s->gpu_trace_answer;
+        snprintf(name, sizeof(name), "apple-modern.sgx-trace%u",
+                 s->sgx_trace_count);
+        memory_region_init_io(&s->sgx_trace_mr[s->sgx_trace_count], NULL,
+                              &sgx_trace_ops, trace, name, size);
+        memory_region_add_subregion_overlap(get_system_memory(), base,
+                                            &s->sgx_trace_mr[s->sgx_trace_count],
+                                            -1);
+        warn_report("apple-modern: sgx trace window %u at 0x%" PRIx64
+                    " size 0x%" PRIx64 " (observation only, not a device: no "
+                    "GPU is modelled, so nothing can render)",
+                    s->sgx_trace_count, base, size);
+        s->sgx_trace_count++;
     }
     return true;
 }
@@ -2619,6 +3398,15 @@ static void modern_init(MachineState *machine)
     metadata_input.command_line_length = s->boot_command_line ?
                                          strlen(s->boot_command_line) : 0;
     metadata_input.has_mte = s->mte;
+    /*
+     * Opt-in GPU/UAT carveout. 4 MiB covers the four regions SPTM's unified
+     * address translator asks for (shared/ASC, TTBR1 shared L2, TTBAT, GPU
+     * handoff) with room to spare; see gfx_carveout_size in
+     * modern-boot-metadata.h. The resulting base is reported below so the ADT
+     * handoff properties can point at it.
+     */
+    metadata_input.gfx_carveout_size = s->gfx_carveout ?
+                                           APPLE_MODERN_FRAMEBUFFER_ALIGNMENT * 2 : 0;
     /*
      * Publish the acknowledge offset even when modern-aic is off: XNU's
      * AppleInterruptControllerV3 requires the property regardless of whether
@@ -2868,12 +3656,47 @@ static void modern_init(MachineState *machine)
         metadata_input.overrides = overrides;
         metadata_input.override_count = override_count;
     }
+    if (s->sgx) {
+        /*
+         * Serve the GPU node AGXAcceleratorG17P matches. An override can only
+         * set a property on a node that already exists, and the served tree
+         * DELETES /arm-io/sgx (measured: "gpu,t8140" occurs once in
+         * dtree.stock and in none of the 17 other trees in
+         * runtime/darwin-reference-27 nor in any prepared tree), so this goes
+         * through the synthesized-node path instead. See modern-adt-sgx.h.
+         */
+        metadata_input.added_node = apple_modern_adt_sgx_node();
+        warn_report("apple-modern: sgx=on serves /arm-io/sgx from the pinned "
+                    "stock tree (26 properties, compatible \"gpu,t8140\"), so "
+                    "AGXAcceleratorG17P can match AppleARMIODevice. MEASURED "
+                    "BOOT-STOPPER: SPTM keys its GPU address translator on this "
+                    "node and panics in uat_bootstrap_parse_dt before the "
+                    "console, because the stock node has no "
+                    "gfx-shared-region-base (see modern-adt-sgx.h). Expect zero "
+                    "serial output until /chosen gpu-iouat = 0 or the real "
+                    "carveout hand-off is served");
+    }
     metadata_input.assign_dart_ids = s->adt_dart_ids;
     if (!apple_modern_boot_metadata_build(&metadata_input, &s->metadata, &error) ||
         !uart_address(s->components.dtree, &uart, &uart_span, &s->uart_irq,
                       &error)) {
         error_report_err(error);
         exit(EXIT_FAILURE);
+    }
+    if (s->metadata.layout.gfx_carveout_size) {
+        /*
+         * Report the reserved range so the ADT GPU handoff properties
+         * (gfx-shared-region-base/-size, gfx-shared-l2-region-base/-size,
+         * gpu-region-base/-size, gfx-handoff-base/-size) can be pointed at
+         * unmanaged pages. All four must be 16 KiB aligned.
+         */
+        warn_report("apple-modern: gfx-carveout reserved 0x%" PRIx64 " bytes "
+                    "of UNMANAGED DRAM at 0x%" PRIx64 " (memSize reduced; "
+                    "point the ADT gfx-shared-region-base / "
+                    "gfx-shared-l2-region-base / gpu-region-base / "
+                    "gfx-handoff-base at this range)",
+                    s->metadata.layout.gfx_carveout_size,
+                    s->metadata.layout.gfx_carveout_physical);
     }
     if (s->boot_display && s->dcp_iop &&
         !strcmp(s->dcp_iop, APPLE_MODERN_DCP_IOP_NAME_V6_RESUMED)) {
@@ -3084,6 +3907,40 @@ static void modern_init(MachineState *machine)
                     "Compatibility, not Apple fidelity",
                     rvp.anchor, rvp.insn_before, rvp.insn_after);
     }
+    if (s->vekd_unenc_data_compat) {
+        AppleModernVekdPatch vekd = { 0 };
+        uint8_t *bootkc = (uint8_t *)s->blobs[ASSET_BOOTKC].data;
+
+        if (!apple_modern_kc_vekd_unenc_data_compat(
+                bootkc, s->blobs[ASSET_BOOTKC].size, &vekd, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: applied opt-in vekd-unenc-data-compat patch "
+                    "to the in-memory kernel cache: apfs unencrypted-data guard "
+                    "at 0x%" PRIx64 " (0x%08x->0x%08x) so a PLAIN Data volume "
+                    "mounts without the role64+unencrypted panic. "
+                    "Compatibility, not Apple fidelity",
+                    vekd.anchor, vekd.insn_before, vekd.insn_after);
+    }
+    if (s->keystore_persona_stub_compat) {
+        AppleModernKeystoreStubPatch ks = { 0 };
+        uint8_t *bootkc = (uint8_t *)s->blobs[ASSET_BOOTKC].data;
+
+        if (!apple_modern_kc_keystore_persona_stub_compat(
+                bootkc, s->blobs[ASSET_BOOTKC].size, &ks, &error)) {
+            error_report_err(error);
+            exit(EXIT_FAILURE);
+        }
+        warn_report("apple-modern: applied opt-in keystore-persona-stub-compat "
+                    "patch to the in-memory kernel cache: AppleSEPKeyStore "
+                    "persona-UUID mapping forced to success at 0x%" PRIx64
+                    " (0x%08x/0x%08x -> 0x%08x/0x%08x) so persona-6 bring-up "
+                    "does not fail 0xe007c022 on a PLAIN Data volume with no real "
+                    "SEP keybag. Compatibility, not Apple fidelity",
+                    ks.anchor, ks.insn_before0, ks.insn_before1,
+                    ks.insn_after0, ks.insn_after1);
+    }
     if (s->image_patches) {
         /*
          * Declared, opt-in anchored image patches on the board's private
@@ -3168,6 +4025,8 @@ static void modern_init(MachineState *machine)
     if (!map_amcc(s, &error) || !map_aic(s, &error) || !map_sep(s, &error) ||
         (s->sep_dart && !map_sep_dart(s, &error)) ||
         ((s->sep_mailbox || s->sep_sim) && !map_sep_mailbox(s, &error)) ||
+        (s->gfx_asc && !map_gfx_mailbox(s, &error)) ||
+        ((s->sgx || s->gpu_trace) && !map_sgx_trace(s, &error)) ||
         (s->sep_trace && !map_sep_trace(s, &error)) ||
         (s->modern_mcc_dramcfg && !map_mcc_dramcfg(s, uart, uart_span, &error)) ||
         (s->modern_mcc_quota && !map_mcc_quota(s, uart, uart_span, &error)) ||
@@ -3191,6 +4050,7 @@ static void modern_init(MachineState *machine)
         (s->pmgr_aon_fuse_image &&
          !map_pmgr_fuse(s, uart, uart_span, &error)) ||
         (s->modern_pmgr && !map_pmgr(s, uart, uart_span, &error)) ||
+        (s->modern_ans && !modern_create_ans(s, &error)) ||
         (s->disp0_pipe && !map_disp0(s, uart, uart_span, &error))) {
         error_report_err(error);
         exit(EXIT_FAILURE);
@@ -3455,6 +4315,20 @@ static void set_image_patches(Object *obj, const char *value, Error **errp)
     }
 }
 
+static char *get_modern_ans_image(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->modern_ans_image);
+}
+
+static void set_modern_ans_image(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->modern_ans_image);
+        s->modern_ans_image = (value && value[0]) ? g_strdup(value) : NULL;
+    }
+}
+
 /* Read-only: comma-separated names of the patches actually applied, for gates. */
 static char *get_applied_image_patches(Object *obj, Error **errp)
 {
@@ -3511,6 +4385,14 @@ BOOL_PROPERTY(iouc_sandbox_compat, iouc_sandbox_compat)
 BOOL_PROPERTY(amfi_csstatus_platform_compat, amfi_csstatus_platform_compat)
 BOOL_PROPERTY(platform_binary_force_compat, platform_binary_force_compat)
 BOOL_PROPERTY(rootvp_auth_skip_compat, rootvp_auth_skip_compat)
+BOOL_PROPERTY(vekd_unenc_data_compat, vekd_unenc_data_compat)
+BOOL_PROPERTY(keystore_persona_stub_compat, keystore_persona_stub_compat)
+BOOL_PROPERTY(gfx_asc, gfx_asc)
+BOOL_PROPERTY(gfx_carveout, gfx_carveout)
+BOOL_PROPERTY(gpu_trace, gpu_trace)
+BOOL_PROPERTY(gpu_trace_answer, gpu_trace_answer)
+BOOL_PROPERTY(sgx, sgx)
+BOOL_PROPERTY(modern_ans, modern_ans)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(el0_trap_trace, el0_trap_trace)
 BOOL_PROPERTY(sep_trace, sep_trace)
@@ -3872,6 +4754,25 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "rootvp-auth-skip-compat",
                                    get_rootvp_auth_skip_compat,
                                    set_rootvp_auth_skip_compat);
+    object_class_property_add_bool(oc, "vekd-unenc-data-compat",
+                                   get_vekd_unenc_data_compat,
+                                   set_vekd_unenc_data_compat);
+    object_class_property_add_bool(oc, "keystore-persona-stub-compat",
+                                   get_keystore_persona_stub_compat,
+                                   set_keystore_persona_stub_compat);
+    object_class_property_add_bool(oc, "gfx-asc", get_gfx_asc, set_gfx_asc);
+    object_class_property_add_bool(oc, "gfx-carveout", get_gfx_carveout,
+                                   set_gfx_carveout);
+    object_class_property_add_bool(oc, "gpu-trace", get_gpu_trace,
+                                   set_gpu_trace);
+    object_class_property_add_bool(oc, "gpu-trace-answer",
+                                   get_gpu_trace_answer,
+                                   set_gpu_trace_answer);
+    object_class_property_add_bool(oc, "sgx", get_sgx, set_sgx);
+    object_class_property_add_bool(oc, "modern-ans", get_modern_ans,
+                                   set_modern_ans);
+    object_class_property_add_str(oc, "modern-ans-image", get_modern_ans_image,
+                                  set_modern_ans_image);
     object_class_property_add_str(oc, "image-patches", get_image_patches,
                                   set_image_patches);
     object_class_property_add_str(oc, "applied-image-patches",

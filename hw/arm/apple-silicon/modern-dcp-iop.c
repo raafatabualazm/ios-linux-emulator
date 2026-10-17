@@ -880,7 +880,12 @@ static void dcp_iop_append_attach_cbs(AppleModernDcpIop *s)
             cb->out_len = 0x4c;
             stq_le_p(cb->payload, 1);   /* HPD state: attached */
             cb->payload[0x53] = 0;      /* bool argument */
-            cb->payload[0x54] = 1;      /* TiledDisplayInfo pointer is null */
+            cb->payload[0x54] = 1;      /* TiledDisplayInfo pointer is null.
+                                         * (2026-10-17: tested payload[0x54]=0 + zeroed struct in
+                                         * d575-tiledinfo-test — guest still never proceeded to
+                                         * A412/A443 and frames stayed cursor-only, no panic. The
+                                         * hotplug is held pending a userspace HPD subscribe, not
+                                         * gated on this payload; reverted.) */
             cb->payload_len = 0x58;
         } else {
             cb->in_len = 4;             /* D600: console mode off */
@@ -1129,17 +1134,24 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                          !strcmp(tag_str, "A401") ||
                          /*
                           * NOTE (Grok RE): A410/A411 (is_main_display), A456,
-                          * A473, A479 are NOT booleans -- their 4-byte out word
-                          * is an IOReturn STATUS where 1 = kIOReturnError (mapped
-                          * via 0xfffffff00a1881f0).  They must reply 0
+                          * A463, A473, A479 are NOT booleans -- their 4-byte out
+                          * word is an IOReturn STATUS where 1 = kIOReturnError
+                          * (mapped via 0xfffffff00a1881f0; status 1 ->
+                          * 0xe00002bc kIOReturnUnsupported).  They must reply 0
                           * (kIOReturnSuccess) and so are REMOVED from this
                           * out[0]=1 list (they fall through to the zero default).
                           * The is_main_display result travels via a separate
                           * out-pointer, not this status word.
+                          *
+                          * A463 (flush_supportsPower, in=8/out=8) was still on
+                          * this list and so returned status 1 -> the mint getter
+                          * saw kIOReturnUnsupported.  Grok Gate-B ledger
+                          * 2026-10-16 item 1: its status lane must be 0, so it is
+                          * removed here too (all-zero out satisfies the InOut
+                          * status lane).
                           */
                          !strcmp(tag_str, "A454") ||
                          !strcmp(tag_str, "A455") ||
-                         !strcmp(tag_str, "A463") ||
                          !strcmp(tag_str, "A465") ||
                          !strcmp(tag_str, "A466") ||
                          !strcmp(tag_str, "A468") ||
@@ -1163,12 +1175,24 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                         stl_le_p(zeros + 4, 0x00000346u);
                     } else if (!strcmp(tag_str, "A412") && hdr.out_len >= 4) {
                         /*
-                         * A412 get_digital_out_state: in=0/out=4. The single 4-byte
-                         * word is an IOReturn status (the state value travels via an
-                         * in/out pointer this call site passes NULL and discards).
-                         * kIOReturnSuccess = 0; the old value 1 was a non-success code.
+                         * A412 is is_main_display (UserClient selector 18, the
+                         * backing call for _IOMobileFramebufferIsMainDisplay),
+                         * NOT get_digital_out_state and NOT an IOReturn status.
+                         * The kernel masks the reply with #1 and the trampoline
+                         * stores it as scalarOutput[0], which userspace then
+                         * compares against 1.
+                         *
+                         * Replying 0 therefore tells userspace the internal
+                         * panel is NOT the main display -- exactly the shape of
+                         * the null +[CADisplay mainDisplay] / "publishing nil"
+                         * symptom.  Report the panel AS the main display.
+                         *
+                         * (Not exercised yet: nothing calls selector 18 until
+                         * backboardd gets past its AttentionAwareness phase and
+                         * runs the window-server phase, but the reply must be
+                         * right before that path can ever work.)
                          */
-                        stl_le_p(zeros, 0);
+                        zeros[0] = 1;
                     } else if (!strcmp(tag_str, "A437")) {
                         /*
                          * V14_7+: get_block_dcp -- timing/param/calibration block.
@@ -1219,9 +1243,26 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                         stl_le_p(zeros + 4, 0);
                     } else if (!strcmp(tag_str, "A453")) {
                         /*
-                         * Native A453 in pinned BootKC a36b9241... is:
-                         * virtual void IOMobileFramebufferShim::get_display_size(uint32_t*, uint32_t*) const
-                         * Output 8 bytes are width (1024) and height (768), with no IOReturn status field.
+                         * A453 is get_display_size(uint32_t *w, uint32_t *h) and
+                         * NOTHING ELSE.  The kernel stub (objvt+0x828,
+                         * 0xfffffff00a1655f4) builds the tag literally as "A453",
+                         * sends in_len 4 (two leading bytes are the
+                         * width_ptr==NULL / height_ptr==NULL flags; our traces
+                         * show in_hex=0000aaaa, i.e. both requested) and out_len
+                         * 8, then does *width = out[0]; *height = out[4].
+                         * There is NO IOReturn status word anywhere in it.
+                         *
+                         * An earlier revision of this file conditioned the reply
+                         * on normal_mode_seen and answered 0/0 after
+                         * NormalModeEnable, on the theory that the tag became
+                         * setOverscanSafeRegion.  That theory is FALSE and the
+                         * change was a regression: it published a 0x0 panel to
+                         * the AP.  Always answer the real geometry.
+                         *
+                         * Do NOT answer exactly 1920x1080: 0xfffffff00a15a57c
+                         * rewrites that to 2208x1242 whenever the HPD flag is
+                         * clear, which is our case.  Answer the geometry the
+                         * model's own framebuffer presents (1024x768).
                          */
                         if (hdr.out_len >= 8) {
                             stl_le_p(zeros, 1024);

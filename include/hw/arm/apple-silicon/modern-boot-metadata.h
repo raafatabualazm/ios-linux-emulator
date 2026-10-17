@@ -27,12 +27,61 @@ typedef struct AppleModernAdtOverride {
     uint32_t size;             /* 1..APPLE_MODERN_MAX_ADT_OVERRIDE_BYTES */
 } AppleModernAdtOverride;
 
+#define APPLE_MODERN_MAX_ADT_NODE_PROPS 64
+
+/*
+ * One property of a synthesized node. Unlike an override a zero-length
+ * property is allowed, because real ADT nodes carry presence-only properties
+ * (/arm-io/sgx "procedural-antialiasing") and the point of a synthesized node
+ * is to reproduce a pinned stock one byte for byte.
+ */
+typedef struct AppleModernAdtNodeProp {
+    const char *name;          /* 1..31 bytes, unique within the node */
+    const uint8_t *value;      /* size bytes; NULL only when size is zero */
+    uint32_t size;             /* 0..APPLE_MODERN_MAX_ADT_OVERRIDE_BYTES */
+} AppleModernAdtNodeProp;
+
+/*
+ * One whole node to append as the last child of an existing node. An override
+ * can only add a property to a node that already exists, so a tree that
+ * DELETES a node the kernel matches on cannot be repaired with overrides; this
+ * is the other half of that facility. The parent must exist exactly once and
+ * must not already have a child of this name, and the loader-owned nodes are
+ * refused (their own property generation assumes their child list).
+ */
+typedef struct AppleModernAdtNode {
+    const char *parent;        /* canonical slash path, node must exist once */
+    const char *name;          /* node name, matching the "name" property */
+    const AppleModernAdtNodeProp *props;
+    size_t prop_count;         /* 1..APPLE_MODERN_MAX_ADT_NODE_PROPS */
+} AppleModernAdtNode;
+
 typedef struct AppleModernBootMetadataInput {
     const AppleModernBootInput *components;
     /* Length excludes NUL; bytes must have no embedded NUL. NULL/0 is empty. */
     const char *command_line;
     size_t command_line_length;
     bool has_mte;
+    /*
+     * Optional GPU (UAT) carveout, in bytes; zero disables it.
+     *
+     * SPTM's unified address translator refuses to register a GPU IO range
+     * made of pages XNU manages -- measured, with the GPU node served and the
+     * handoff properties pointing into ordinary DRAM:
+     *   "iommu_bootstrap_register_io_range: IOMMU uat (3): Attempted to
+     *    register managed page as an IO range 0x0000010500000000 128"
+     * (and, with the properties absent, "uat_get_dt_prop: error -1 looking up
+     * gfx-shared-region-base"; both are SPTM panics at EL2 before the UART
+     * exists, so they present as a guest hang with zero serial output).
+     *
+     * So the GPU regions must live outside managed DRAM. This reserves them
+     * exactly the way the framebuffer handoff does: shrink memSize and place
+     * the carveout at the resulting boundary, adding no untyped bootstrap
+     * pages below topOfKernelData. Must be a multiple of the 16 KiB UAT
+     * granule; the framebuffer alignment is used so the two tails stack
+     * without breaking the framebuffer's own alignment check.
+     */
+    uint64_t gfx_carveout_size;
     /* Without a framebuffer reservation this retains the explicit ABI values.
      * Otherwise zero selects the derived text-console geometry; a nonzero
      * explicit description must exactly match that reserved framebuffer.
@@ -80,6 +129,12 @@ typedef struct AppleModernBootMetadataInput {
      * override that names "dart-id". Nothing else in the tree changes.
      */
     bool assign_dart_ids;
+    /*
+     * Optional, default NULL: one synthesized node appended to an existing
+     * parent. Refused when the parent is missing or ambiguous, when it already
+     * has a child of that name, or when the node is malformed.
+     */
+    const AppleModernAdtNode *added_node;
 } AppleModernBootMetadataInput;
 
 typedef struct AppleModernBootMetadata {

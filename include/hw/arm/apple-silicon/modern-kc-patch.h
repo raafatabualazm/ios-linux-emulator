@@ -299,5 +299,52 @@ bool apple_modern_kc_rootvp_auth_skip_compat(uint8_t *bootkc, size_t len,
                                              AppleModernRootvpSkipPatch *out,
                                              Error **errp);
 
+/*
+ * vekd-unenc-data-compat: NOP the apfs kext's "unencrypted data volume is not
+ * allowed" guard so a PLAIN (software-keyed) Data volume mounts without the
+ * role64+unencrypted panic.  On the pinned BootKC the deciding instruction is
+ * in com.apple.filesystems.apfs __TEXT_EXEC at VA 0xfffffff00a9cfc70:
+ *     tbnz w8, #0, 0xfffffff00a9cfc84   ; 0x370000a8 -> panic branch
+ * Replaced with a NOP (0xd503201f) so the branch is never taken.  Mirrors the
+ * one-NOP neutralization ZCode qualified as bootkc-vekd-compat; applied to the
+ * in-memory cache (trustcache stays valid).  Compatibility, not Apple fidelity.
+ */
+typedef struct AppleModernVekdPatch {
+    uint64_t anchor;      /* file offset of the unencrypted-data tbnz */
+    uint32_t insn_before; /* 0x370000a8 tbnz w8, #0, <panic> */
+    uint32_t insn_after;  /* 0xd503201f nop */
+} AppleModernVekdPatch;
+
+bool apple_modern_kc_vekd_unenc_data_compat(uint8_t *bootkc, size_t len,
+                                            AppleModernVekdPatch *out,
+                                            Error **errp);
+
+/*
+ * keystore-persona-stub-compat (OPT-IN, OFF by default): force the
+ * AppleSEPKeyStore persona-UUID -> volume mapping to SUCCEED, so persona type 6
+ * bring-up (usermanagerd) does not fail with 0xe007c022 when the emulator has no
+ * real SEP keybag populated with the persona UUID.  Only sound for a PLAIN
+ * (unencrypted) Data volume, where no real volume key is needed.  On the pinned
+ * BootKC the fail path in com.apple.driver.AppleSEPKeyStore is:
+ *     0xfffffff0095f3ef0  mov  w21, #0xc022     (0x52980455)
+ *     0xfffffff0095f3ef4  movk w21, #0xe007,16  (0x72bc00f5)  => w21 = 0xe007c022 (err)
+ * Patched so the fail path returns 0 (success):
+ *     mov w21, #0 (0x52800015) ; nop (0xd503201f)
+ * Grok P3 anchors; apply in-memory (trustcache stays valid).  Compatibility, not
+ * Apple fidelity.  Grok cautions this "lies" to callers, so it stays opt-in and is
+ * validated only once a real Data volume mounts (then persona-6 is testable).
+ */
+typedef struct AppleModernKeystoreStubPatch {
+    uint64_t anchor;       /* file offset of the first patched insn */
+    uint32_t insn_before0; /* 0x52980455 mov w21,#0xc022 */
+    uint32_t insn_after0;  /* 0x52800015 mov w21,#0      */
+    uint32_t insn_before1; /* 0x72bc00f5 movk w21,#0xe007,lsl#16 */
+    uint32_t insn_after1;  /* 0xd503201f nop             */
+} AppleModernKeystoreStubPatch;
+
+bool apple_modern_kc_keystore_persona_stub_compat(uint8_t *bootkc, size_t len,
+                                                  AppleModernKeystoreStubPatch *out,
+                                                  Error **errp);
+
 #endif
 
