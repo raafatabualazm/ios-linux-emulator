@@ -61,11 +61,17 @@ struct AppleSEPSimState {
     AddressSpace *dma_as;
     QemuMutex lock;
     bool rsep;
+    /* V6 (apple-modern) uses T8140 wire framing; V2/V4 keep the legacy container. */
+    bool sks_modern;
+    /* When true, unimplemented SKS opcodes stop the VM instead of silent drop. */
+    bool sks_fail_closed;
     uint32_t status;
     /* Read-only host diagnostics; never contain message payloads or keys. */
     uint64_t diagnostic_dispatches;
     uint64_t diagnostic_unsupported;
     uint64_t diagnostic_ool_errors;
+    uint64_t diagnostic_sks_rejected;
+    uint64_t diagnostic_sks_replies;
     uint32_t diagnostic_last_ep;
     uint32_t diagnostic_last_op;
     uint32_t diagnostic_last_unsupported_ep;

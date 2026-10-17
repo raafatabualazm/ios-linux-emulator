@@ -22,8 +22,11 @@
 #include "crypto/hash.h"
 #include "hw/arm/apple-silicon/dt.h"
 #include "hw/arm/apple-silicon/sep-sim.h"
+#include "hw/arm/apple-silicon/sep-sks-wire.h"
+#include "system/runstate.h"
 #include "hw/misc/apple-silicon/a7iop/core.h"
 #include "hw/misc/apple-silicon/a7iop/mailbox/core.h"
+#include "hw/qdev-properties.h"
 #include "hw/resettable.h"
 #include "qapi/error.h"
 #include "qemu/guest-random.h"
@@ -591,13 +594,14 @@ static const uint8_t apple_sep_sim_eps[] = {
     EP_LOGGER,
     EP_ART_STORAGE,
     EP_ART_REQUESTS,
+    EP_MOBILE_SKS,
     EP_SECURE_CREDENTIALS,
     EP_XART_SLAVE,
     EP_KEYSTORE,
     EP_XART_MASTER,
 };
 static const uint32_t apple_sep_sim_endpoint_names[] = {
-    'cntl', 'log ', 'arts', 'artr', 'scrd', 'xars', 'sks ', 'xarm',
+    'cntl', 'log ', 'arts', 'artr', 'msks', 'scrd', 'xars', 'sks ', 'xarm',
 };
 
 static void apple_sep_sim_advertise_eps(AppleSEPSimState *s)
@@ -731,20 +735,22 @@ static void apple_sep_sim_handle_bootstrap_msg(AppleSEPSimState *s,
     }
 }
 
-static uint8_t *apple_sep_sim_gen_sks_hash(uint8_t *buf,
-                                           const uint32_t msg_size)
+static uint8_t *apple_sep_sim_gen_sks_hash(uint8_t *buf, uint32_t msg_size,
+                                           bool modern)
 {
-    KeystoreIPCHeader *hdr;
+    AppleSEPSKSWire wire;
 
-    hdr = (KeystoreIPCHeader *)buf;
+    if (!apple_sep_sks_wire_parse(buf, msg_size, modern, &wire)) {
+        return NULL;
+    }
     struct iovec iov[] = {
         {
-            .iov_base = &hdr->ipc_version,
-            .iov_len = hdr->ipc_version == 2 ? 0x40 : 0x38,
+            .iov_base = buf + wire.hash_offset,
+            .iov_len = wire.hash_size,
         },
         {
-            .iov_base = buf + KEYSTORE_IPC_HEADER_SIZE,
-            .iov_len = msg_size - KEYSTORE_IPC_HEADER_SIZE,
+            .iov_base = buf + wire.body_offset,
+            .iov_len = wire.body_size,
         },
     };
     /* Not in an assert: -DNDEBUG would remove the call as well as the check. */
@@ -758,22 +764,44 @@ static uint8_t *apple_sep_sim_gen_sks_hash(uint8_t *buf,
     int ret =
         qcrypto_hash_bytesv(QCRYPTO_HASH_ALGO_SHA256, iov, ARRAY_SIZE(iov),
                             &hash, &hash_len, &error_fatal);
-    assert_cmpuint(ret, ==, 0);
-    assert_nonnull(hash);
-    assert_cmpuint(hash_len, ==, 32);
+    if (ret != 0 || hash == NULL || hash_len != 32) {
+        g_free(hash);
+        return NULL;
+    }
     return hash;
 }
 
 static void apple_sep_sim_keystore_send_ipc_resp(AppleSEPSimState *s,
                                                  const KeystoreMessage *msg,
                                                  uint8_t *resp_buf,
-                                                 const uint32_t resp_size)
+                                                 uint32_t resp_size)
 {
     KeystoreIPCHeader *resp_hdr;
     uint8_t *resp_hash;
 
     resp_hdr = (KeystoreIPCHeader *)resp_buf;
-    resp_hash = apple_sep_sim_gen_sks_hash(resp_buf, resp_size);
+    if (resp_size < sizeof(*resp_hdr) || resp_size > UINT16_MAX) {
+        s->diagnostic_sks_rejected++;
+        return;
+    }
+    /*
+     * Handlers pack the maximum-size internal header (0x54). Modern v1 omits
+     * the final eight bytes on the wire (T8140 AP helpers at
+     * 0xfffffff0095ec4c4 / 0xfffffff0095ec49c — header 72 excl. length).
+     */
+    if (s->sks_modern && resp_hdr->ipc_version == 1) {
+        memmove(resp_buf + 76, resp_buf + sizeof(*resp_hdr),
+                resp_size - sizeof(*resp_hdr));
+        stl_le_p(resp_buf, 72);
+        resp_size -= 8;
+    }
+    if (s->sks_modern &&
+        (resp_size > s->ool_state[EP_KEYSTORE].out_size ||
+         s->ool_state[EP_KEYSTORE].out_addr == 0)) {
+        s->diagnostic_sks_rejected++;
+        return;
+    }
+    resp_hash = apple_sep_sim_gen_sks_hash(resp_buf, resp_size, s->sks_modern);
     if (resp_hash == NULL) {
         /* Hashing is unavailable; an unhashed reply would fail validation. */
         return;
@@ -789,132 +817,181 @@ static void apple_sep_sim_keystore_send_ipc_resp(AppleSEPSimState *s,
 
     apple_sep_sim_send_message(s, msg->ep, msg->tag | KEYSTORE_MSG_TAG_REPLY,
                                msg->id, 0, resp_size << 16);
+    s->diagnostic_sks_replies++;
 }
 
+static void apple_sep_sim_keystore_fill_hdr(KeystoreIPCHeader *resp_hdr,
+                                            const KeystoreIPCHeader *msg_hdr,
+                                            bool modern)
+{
+    resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
+    resp_hdr->ipc_version = modern ? msg_hdr->ipc_version :
+                            KEYSTORE_IPC_VERSION_1;
+    resp_hdr->time_msecs = msg_hdr->time_msecs;
+    resp_hdr->id = msg_hdr->id;
+    resp_hdr->proc_uid = msg_hdr->proc_uid;
+    resp_hdr->audit_session_id = msg_hdr->audit_session_id;
+    memcpy(resp_hdr->ipc_digest, msg_hdr->ipc_digest,
+           sizeof(resp_hdr->ipc_digest));
+}
+
+/*
+ * Grounded SKS stubs for Keychain / lock-state bring-up.
+ *
+ * Command numbering and 0x0A success confirmed against j410 24A437 SEPOS
+ * sks Mach-O (dispatcher 0x140a90, jump table 0x14197c). Reply *bytes* follow
+ * the AP AppleSEPKeyStore contract (SKS-REPLIES.md §4 / §10): do NOT mirror
+ * A17 SEPOS 0x04 → -0xc @ 0x1415c4 — the iPhone17,3 kernel / MKB need unlock.
+ * These are structural stubs, not real SEP crypto (no VEK / FairPlay / wrap).
+ */
 static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
                                               KeystoreMessage *msg)
 {
     uint8_t msg_code = msg->tag & KEYSTORE_MSG_TAG_CODE_MASK;
-    uint8_t *msg_buf = g_new0(uint8_t, msg->size);
-    if (!apple_sep_sim_ool_read(s, s->ool_state[EP_KEYSTORE].in_addr, msg_buf,
-                                msg->size, "keystore request")) {
-        g_free(msg_buf);
+    AppleSEPSKSWire wire;
+    size_t body_min = 0;
+    g_autofree uint8_t *wire_buf = NULL;
+
+    if (msg->size < 24 || (s->sks_modern &&
+        (msg->size > s->ool_state[EP_KEYSTORE].in_size ||
+         s->ool_state[EP_KEYSTORE].in_addr == 0))) {
+        s->diagnostic_sks_rejected++;
         return;
     }
+    wire_buf = g_malloc0(msg->size);
+    if (!apple_sep_sim_ool_read(s, s->ool_state[EP_KEYSTORE].in_addr, wire_buf,
+                                msg->size, "keystore request")) {
+        return;
+    }
+    if (!apple_sep_sks_wire_parse(wire_buf, msg->size, s->sks_modern, &wire)) {
+        s->diagnostic_sks_rejected++;
+        return;
+    }
+    if (s->sks_modern) {
+        g_autofree uint8_t *hash =
+            apple_sep_sim_gen_sks_hash(wire_buf, msg->size, true);
+        if (!hash || memcmp(wire_buf + 4, hash, 16) ||
+            (wire.flags & KEYSTORE_IPC_FLAG_ENCRYPTED)) {
+            s->diagnostic_sks_rejected++;
+            return;
+        }
+    }
+    switch (msg_code) {
+    case 0x02:
+        body_min = 16;
+        break;
+    case 0x04:
+        body_min = 16;
+        break;
+    case 0x19:
+        body_min = 20;
+        break;
+    case 0x1b:
+        body_min = 4;
+        break;
+    }
+    if (wire.body_size < body_min) {
+        s->diagnostic_sks_rejected++;
+        return;
+    }
+    /* Normalize to the internal 0x54 header + body layout for handlers. */
+    uint8_t *msg_buf = g_malloc0(sizeof(KeystoreIPCHeader) + wire.body_size);
+    memcpy(msg_buf, wire_buf, MIN(wire.body_offset, sizeof(KeystoreIPCHeader)));
+    if (wire.body_offset < sizeof(KeystoreIPCHeader)) {
+        /* Modern v1: pad the omitted 8 trailing header bytes with zeros. */
+    }
+    memcpy(msg_buf + sizeof(KeystoreIPCHeader), wire_buf + wire.body_offset,
+           wire.body_size);
+    /* Ensure ipc_version / time / ids are readable via KeystoreIPCHeader. */
+    if (s->sks_modern && wire.version == 1) {
+        KeystoreIPCHeader *norm = (KeystoreIPCHeader *)msg_buf;
+        /* body_offset 76: bytes 0..75 already copied; unk0/unk_mbz stay 0. */
+        (void)norm;
+    }
     const KeystoreIPCHeader *msg_hdr = (KeystoreIPCHeader *)msg_buf;
-#if 0
-    char fn[128];
-    snprintf(fn, sizeof(fn), "/home/ios/SKSMessages/0x%02X_%lld.bin", msg_code,
-             msg_hdr->time_msecs);
-    g_file_set_contents(fn, (gchar *)msg_buf, msg->size, NULL);
-#endif
 
     switch (msg_code) {
     case 0x01: {
+        /* Create Keybag — structural success + stable handle (AP stub). */
         qemu_log_mask(LOG_GUEST_ERROR, "SEP KeyStore // Create Keybag\n");
 
         const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4 + 0x4;
         uint8_t *resp_buf = g_new0(uint8_t, resp_size);
-
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
-        resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
-        resp_hdr->time_msecs = msg_hdr->time_msecs;
-        resp_hdr->id = msg_hdr->id;
-        resp_hdr->proc_uid = msg_hdr->proc_uid;
-        resp_hdr->audit_session_id = msg_hdr->audit_session_id;
-        memcpy(resp_hdr->ipc_digest, msg_hdr->ipc_digest,
-               sizeof(resp_hdr->ipc_digest));
+        apple_sep_sim_keystore_fill_hdr(resp_hdr, msg_hdr, s->sks_modern);
 
         uint32_t *selector = (uint32_t *)(resp_hdr + 1);
         *selector = 1;
         uint32_t *kb_id = selector + 1;
-        *kb_id = 'BAG1';
+        *kb_id = 0x31474142; /* 'BAG1' — stable handle, not proof of crypto */
 
         apple_sep_sim_keystore_send_ipc_resp(s, msg, resp_buf, resp_size);
         g_free(resp_buf);
         break;
     }
     case 0x02: {
-        uint32_t *word0 = (uint32_t *)(msg_hdr + 1);
-        uint64_t *lword = (uint64_t *)(word0 + 1);
-        uint32_t *word1 = (uint32_t *)(lword + 1);
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "SEP KeyStore // Copy Keybag 0x%X 0x%" PRIx64 " 0x%X\n",
-                      *word0, *lword, *word1);
+        /* Copy Keybag — empty blob (no 0xAF theatre). */
+        qemu_log_mask(LOG_GUEST_ERROR, "SEP KeyStore // Copy Keybag\n");
 
-        const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4 + 0x4 + 0x10;
+        const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4 + 0x4;
         uint8_t *resp_buf = g_new0(uint8_t, resp_size);
-
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
-        resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
-        resp_hdr->time_msecs = msg_hdr->time_msecs;
-        resp_hdr->id = msg_hdr->id;
-        resp_hdr->proc_uid = msg_hdr->proc_uid;
-        resp_hdr->audit_session_id = msg_hdr->audit_session_id;
-        memcpy(resp_hdr->ipc_digest, msg_hdr->ipc_digest,
-               sizeof(resp_hdr->ipc_digest));
+        apple_sep_sim_keystore_fill_hdr(resp_hdr, msg_hdr, s->sks_modern);
 
         uint32_t *selector = (uint32_t *)(resp_hdr + 1);
         *selector = 0;
         uint32_t *payload_blob = selector + 1;
-        *payload_blob = 0x10;
-        memset(payload_blob + 1, 0xAF, *payload_blob);
+        *payload_blob = 0; /* empty keybag blob */
 
         apple_sep_sim_keystore_send_ipc_resp(s, msg, resp_buf, resp_size);
         g_free(resp_buf);
         break;
     }
     case 0x03: {
+        /*
+         * Load Keybag — only shared-path cmd with full success in j410 SEPOS
+         * (cmp w23,#3 @ 0x140d10). Return success + stable handle for AP.
+         */
         qemu_log_mask(LOG_GUEST_ERROR, "SEP KeyStore // Load Keybag\n");
 
         const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4 + 0x4;
         uint8_t *resp_buf = g_new0(uint8_t, resp_size);
-
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
-        resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
-        resp_hdr->time_msecs = msg_hdr->time_msecs;
-        resp_hdr->id = msg_hdr->id;
-        resp_hdr->proc_uid = msg_hdr->proc_uid;
-        resp_hdr->audit_session_id = msg_hdr->audit_session_id;
-        memcpy(resp_hdr->ipc_digest, msg_hdr->ipc_digest,
-               sizeof(resp_hdr->ipc_digest));
+        apple_sep_sim_keystore_fill_hdr(resp_hdr, msg_hdr, s->sks_modern);
 
         uint32_t *selector = (uint32_t *)(resp_hdr + 1);
         *selector = 0;
         uint32_t *kb_handle = selector + 1;
-        *kb_handle = 'BAG1';
+        *kb_handle = 0x31474142; /* 'BAG1' */
 
         apple_sep_sim_keystore_send_ipc_resp(s, msg, resp_buf, resp_size);
         g_free(resp_buf);
         break;
     }
     case 0x04: {
-        qemu_log_mask(LOG_GUEST_ERROR, "SEP KeyStore // Change Lock State\n");
+        /*
+         * Change Lock State — AP stub SUCCESS.
+         * SEPOS j410 24A437 returns -0xc for non-0x03 shared entry (@ 0x1415c4);
+         * do NOT mirror that. Intent: unlocked / no passcode for MKB/Pearl.
+         */
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "SEP KeyStore // Change Lock State (AP stub; "
+                      "SEPOS 0x04 returns -0xc @ 0x1415c4)\n");
 
         const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4 + 0x4 + 0x8;
         uint8_t *resp_buf = g_new0(uint8_t, resp_size);
-
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
-        resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
-        resp_hdr->time_msecs = msg_hdr->time_msecs;
-        resp_hdr->id = msg_hdr->id;
-        resp_hdr->proc_uid = msg_hdr->proc_uid;
-        resp_hdr->audit_session_id = msg_hdr->audit_session_id;
-        memcpy(resp_hdr->ipc_digest, msg_hdr->ipc_digest,
-               sizeof(resp_hdr->ipc_digest));
+        apple_sep_sim_keystore_fill_hdr(resp_hdr, msg_hdr, s->sks_modern);
 
-        // Mostly guessing
         uint32_t *selector = (uint32_t *)(resp_hdr + 1);
         *selector = 0;
         uint32_t *lock_state = selector + 1;
-        *lock_state = *(uint32_t *)(msg_buf + 0x60);
-        *lock_state |= (1 << 22);
+        /* Request lock word at body+0; OR bit22 (legacy sim carry). */
+        *lock_state = *(uint32_t *)(msg_buf + sizeof(KeystoreIPCHeader));
+        *lock_state |= (1u << 22);
         uint64_t *device_state = (uint64_t *)(lock_state + 1);
         *device_state = 0x1 | 0x2;
+
         apple_sep_sim_keystore_send_ipc_resp(s, msg, resp_buf, resp_size);
         g_free(resp_buf);
         break;
@@ -924,16 +1001,8 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 
         const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4;
         uint8_t *resp_buf = g_new0(uint8_t, resp_size);
-
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
-        resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
-        resp_hdr->time_msecs = msg_hdr->time_msecs;
-        resp_hdr->id = msg_hdr->id;
-        resp_hdr->proc_uid = msg_hdr->proc_uid;
-        resp_hdr->audit_session_id = msg_hdr->audit_session_id;
-        memcpy(resp_hdr->ipc_digest, msg_hdr->ipc_digest,
-               sizeof(resp_hdr->ipc_digest));
+        apple_sep_sim_keystore_fill_hdr(resp_hdr, msg_hdr, s->sks_modern);
 
         uint32_t *selector = (uint32_t *)(resp_hdr + 1);
         *selector = 0;
@@ -943,47 +1012,25 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
         break;
     }
     case 0x08: {
-        qemu_log_mask(LOG_GUEST_ERROR, "SEP KeyStore // KC Wrap\n");
-
-        // const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4;
-        // uint8_t *resp_buf = g_new0(uint8_t, resp_size);
-
-        // KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
-        // resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        // resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
-        // resp_hdr->time_msecs = msg_hdr->time_msecs;
-        // resp_hdr->id = msg_hdr->id;
-        // resp_hdr->proc_uid = msg_hdr->proc_uid;
-        // resp_hdr->audit_session_id = msg_hdr->audit_session_id;
-        // memcpy(resp_hdr->ipc_digest, msg_hdr->ipc_digest,
-        //        sizeof(resp_hdr->ipc_digest));
-
-        // uint32_t *selector = (uint32_t *)(resp_hdr + 1);
-        // *selector = 0;
-
-        // apple_sep_sim_keystore_send_ipc_resp(s, msg, resp_buf, resp_size);
-        // g_free(resp_buf);
+        /*
+         * KC Wrap — soft stub: empty success mailbox reply, no invented wrap
+         * bytes. Real Keychain item secrecy needs SEP AES-KW (cannot fake).
+         */
+        qemu_log_mask(LOG_GUEST_ERROR, "SEP KeyStore // KC Wrap (soft stub)\n");
         apple_sep_sim_send_message(
             s, msg->ep, msg->tag | KEYSTORE_MSG_TAG_REPLY, msg->id, 0, 0);
+        s->diagnostic_sks_replies++;
         break;
     }
     case 0x0A: {
+        /* Null D Key — SEPOS success (j410 @ 0x141688). */
         qemu_log_mask(LOG_GUEST_ERROR, "SEP KeyStore // Null D Key\n");
 
         const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4;
         uint8_t *resp_buf = g_new0(uint8_t, resp_size);
-
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
-        resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
-        resp_hdr->time_msecs = msg_hdr->time_msecs;
-        resp_hdr->id = msg_hdr->id;
-        resp_hdr->proc_uid = msg_hdr->proc_uid;
-        resp_hdr->audit_session_id = msg_hdr->audit_session_id;
-        memcpy(resp_hdr->ipc_digest, msg_hdr->ipc_digest,
-               sizeof(resp_hdr->ipc_digest));
+        apple_sep_sim_keystore_fill_hdr(resp_hdr, msg_hdr, s->sks_modern);
 
-        // Uh... who?
         uint32_t *selector = (uint32_t *)(resp_hdr + 1);
         *selector = 0;
 
@@ -992,22 +1039,19 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
         break;
     }
     case 0x0C: {
-        qemu_log_mask(LOG_GUEST_ERROR, "SEP KeyStore // Unwrap D Key\n");
+        /*
+         * Unwrap D Key — soft stub selector=0. AP may log
+         * "Failed to unwrap class D key. Continuing anyways."
+         * Do not invent VEK / class-key bytes.
+         */
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "SEP KeyStore // Unwrap D Key (soft stub)\n");
 
         const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4;
         uint8_t *resp_buf = g_new0(uint8_t, resp_size);
-
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
-        resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
-        resp_hdr->time_msecs = msg_hdr->time_msecs;
-        resp_hdr->id = msg_hdr->id;
-        resp_hdr->proc_uid = msg_hdr->proc_uid;
-        resp_hdr->audit_session_id = msg_hdr->audit_session_id;
-        memcpy(resp_hdr->ipc_digest, msg_hdr->ipc_digest,
-               sizeof(resp_hdr->ipc_digest));
+        apple_sep_sim_keystore_fill_hdr(resp_hdr, msg_hdr, s->sks_modern);
 
-        // Guessing...
         uint32_t *selector = (uint32_t *)(resp_hdr + 1);
         *selector = 0;
 
@@ -1020,18 +1064,9 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
 
         const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4;
         uint8_t *resp_buf = g_new0(uint8_t, resp_size);
-
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
-        resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
-        resp_hdr->time_msecs = msg_hdr->time_msecs;
-        resp_hdr->id = msg_hdr->id;
-        resp_hdr->proc_uid = msg_hdr->proc_uid;
-        resp_hdr->audit_session_id = msg_hdr->audit_session_id;
-        memcpy(resp_hdr->ipc_digest, msg_hdr->ipc_digest,
-               sizeof(resp_hdr->ipc_digest));
+        apple_sep_sim_keystore_fill_hdr(resp_hdr, msg_hdr, s->sks_modern);
 
-        // Guessing.
         uint32_t *selector = (uint32_t *)(resp_hdr + 1);
         *selector = 0;
 
@@ -1040,57 +1075,40 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
         break;
     }
     case 0x19: {
-        uint32_t *word0 = (uint32_t *)(msg_hdr + 1);
-        uint64_t *lword = (uint64_t *)(word0 + 1);
-        uint32_t *word1 = (uint32_t *)(lword + 1);
-        uint32_t *word2 = (uint32_t *)(word1 + 1);
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "SEP KeyStore // Get Device State 0x%X 0x%" PRIx64
-                      " 0x%X 0x%X\n",
-                      *word0, *lword, *word1, *word2);
+        /*
+         * Get Device State — empty ASN.1 SEQUENCE DER {0x30,0x00}.
+         * Replaces legacy "applehax" (which broke _decode_extended_state).
+         * j410 handler @ 0x141388.
+         */
+        qemu_log_mask(LOG_GUEST_ERROR, "SEP KeyStore // Get Device State\n");
 
-        const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4 + 0x4 + 0x8;
+        const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4 + 0x4 + 0x2;
         uint8_t *resp_buf = g_new0(uint8_t, resp_size);
-
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
-        resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
-        resp_hdr->time_msecs = msg_hdr->time_msecs;
-        resp_hdr->id = msg_hdr->id;
-        resp_hdr->proc_uid = msg_hdr->proc_uid;
-        resp_hdr->audit_session_id = msg_hdr->audit_session_id;
-        memcpy(resp_hdr->ipc_digest, msg_hdr->ipc_digest,
-               sizeof(resp_hdr->ipc_digest));
+        apple_sep_sim_keystore_fill_hdr(resp_hdr, msg_hdr, s->sks_modern);
 
-        // Again, guessing.
         uint32_t *selector = (uint32_t *)(resp_hdr + 1);
         *selector = 0;
-        // FIXME: This is a DER! See `_decode_extended_state`.
         uint32_t *state_blob = selector + 1;
-        *state_blob = 0x8;
-        memcpy(state_blob + 1, "applehax", *state_blob);
+        *state_blob = 2;
+        uint8_t *der = (uint8_t *)(state_blob + 1);
+        der[0] = 0x30;
+        der[1] = 0x00;
 
         apple_sep_sim_keystore_send_ipc_resp(s, msg, resp_buf, resp_size);
         g_free(resp_buf);
         break;
     }
     case 0x1B: {
+        /* Client Terminate — j410 @ 0x1410e4. */
         const uint32_t *selector = (uint32_t *)(msg_hdr + 1);
         qemu_log_mask(LOG_GUEST_ERROR,
                       "SEP KeyStore // Client Terminate (0x%X)\n", *selector);
 
         const uint32_t resp_size = KEYSTORE_IPC_HEADER_SIZE + 0x4;
         uint8_t *resp_buf = g_new0(uint8_t, resp_size);
-
         KeystoreIPCHeader *resp_hdr = (KeystoreIPCHeader *)resp_buf;
-        resp_hdr->header_body_size = KEYSTORE_IPC_HEADER_SIZE - 0x4;
-        resp_hdr->ipc_version = KEYSTORE_IPC_VERSION_1;
-        resp_hdr->time_msecs = msg_hdr->time_msecs;
-        resp_hdr->id = msg_hdr->id;
-        resp_hdr->proc_uid = msg_hdr->proc_uid;
-        resp_hdr->audit_session_id = msg_hdr->audit_session_id;
-        memcpy(resp_hdr->ipc_digest, msg_hdr->ipc_digest,
-               sizeof(resp_hdr->ipc_digest));
+        apple_sep_sim_keystore_fill_hdr(resp_hdr, msg_hdr, s->sks_modern);
 
         uint32_t *resp_selector = (uint32_t *)(resp_hdr + 1);
         *resp_selector = 0;
@@ -1100,18 +1118,19 @@ static void apple_sep_sim_handle_keystore_msg(AppleSEPSimState *s,
         break;
     }
     default: {
+        /*
+         * Unknown SKS opcode — fail closed: never echo the request as success.
+         * Optional sks-fail-closed stops the VM for research traps.
+         */
         apple_sep_sim_note_unsupported(s, msg->ep, msg_code);
-        qemu_log_mask(LOG_GUEST_ERROR, "SEP KeyStore // Unknown (0x%02X)\n",
-                      msg_code);
-
-        if (!apple_sep_sim_ool_write(s, s->ool_state[EP_KEYSTORE].out_addr,
-                                     msg_buf, msg->size,
-                                     "keystore unknown-opcode echo")) {
-            break;
+        s->diagnostic_sks_rejected++;
+        error_report("SEP sim: unimplemented SKS opcode 0x%02X "
+                     "(ep=%u tag=0x%02X id=%u size=%u) — no reply",
+                     msg_code, msg->ep, msg->tag, msg->id, msg->size);
+        if (s->sks_fail_closed) {
+            error_report("SEP sim: sks-fail-closed — stopping VM");
+            qemu_system_vmstop_request(RUN_STATE_INTERNAL_ERROR);
         }
-        apple_sep_sim_send_message(s, msg->ep,
-                                   msg->tag | KEYSTORE_MSG_TAG_REPLY, msg->id,
-                                   0, (uint32_t)msg->size << 16);
         break;
     }
     }
@@ -1216,6 +1235,9 @@ AppleSEPSimState *apple_sep_sim_new(const char *role, uint64_t mmio_size,
                      apple_sep_sim_handle_messages);
     qemu_mutex_init(&s->lock);
     s->dma_as = dma_as;
+    /* V6 wrappers speak the T8140 SKS wire; older boards keep legacy packing. */
+    s->sks_modern = version == APPLE_A7IOP_V6;
+    s->sks_fail_closed = false;
     /* Diagnostics contain counts and routing bytes only, never payloads. */
     AppleA7IOP *a7iop = APPLE_A7IOP(s);
     Object *obj = OBJECT(s);
@@ -1236,6 +1258,12 @@ AppleSEPSimState *apple_sep_sim_new(const char *role, uint64_t mmio_size,
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "sim-ool-error-count",
                                    &s->diagnostic_ool_errors,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "sim-sks-rejected-count",
+                                   &s->diagnostic_sks_rejected,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "sim-sks-reply-count",
+                                   &s->diagnostic_sks_replies,
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "wrapper-mmio-read-count",
                                    &a7iop->diagnostic_mmio_reads,
@@ -1333,6 +1361,8 @@ static void apple_sep_sim_reset_hold(Object *obj, ResetType type)
     s->diagnostic_dispatches = 0;
     s->diagnostic_unsupported = 0;
     s->diagnostic_ool_errors = 0;
+    s->diagnostic_sks_rejected = 0;
+    s->diagnostic_sks_replies = 0;
     s->diagnostic_last_ep = 0;
     s->diagnostic_last_op = 0;
     s->diagnostic_last_unsupported_ep = 0;
@@ -1385,6 +1415,11 @@ static void apple_sep_sim_reset_hold(Object *obj, ResetType type)
     apple_a7iop_send_ap(a7iop, msg);
 }
 
+static const Property apple_sep_sim_properties[] = {
+    DEFINE_PROP_BOOL("sks-fail-closed", AppleSEPSimState, sks_fail_closed,
+                     false),
+};
+
 static void apple_sep_sim_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
@@ -1398,6 +1433,7 @@ static void apple_sep_sim_class_init(ObjectClass *klass, const void *data)
                                     &sc->parent_realize);
     dc->desc = "Simulated Apple Secure Enclave Processor";
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+    device_class_set_props(dc, apple_sep_sim_properties);
 }
 
 static const TypeInfo apple_sep_sim_info = {
