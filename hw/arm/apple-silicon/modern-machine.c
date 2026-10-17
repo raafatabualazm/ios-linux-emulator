@@ -35,6 +35,7 @@
 #include "hw/arm/apple-silicon/modern-dcp-iop.h"
 #include "hw/arm/apple-silicon/modern-disp-trace.h"
 #include "hw/arm/apple-silicon/modern-adt-sgx.h"
+#include "hw/arm/apple-silicon/modern-adt-ioaccelerator-es.h"
 #include "hw/arm/apple-silicon/modern-compat-groups.h"
 #include "hw/arm/apple-silicon/modern-smc.h"
 #include "hw/misc/apple-silicon/buttons.h"
@@ -257,6 +258,14 @@ struct AppleModernMachine {
     bool sgx;
     MemoryRegion sgx_trace_mr[2];
     unsigned sgx_trace_count;
+    /*
+     * Opt-in /arm-io/IOAcceleratorES nub for QC NameMatching fail-fast.
+     * Mutually exclusive with sgx=on (both use added_node). See
+     * modern-adt-ioaccelerator-es.h.
+     */
+    bool stub_ioacceles;
+    /* Serve /chosen gpu-iouat = 0 (SPTM UAT off). See modern-adt-sgx.h. */
+    bool gpu_iouat_zero;
     bool aic_trace;
     bool modern_aic;
     /* Opt-in: accept and record nonzero IRQ_CFG words (see apple-modern-aic.h). */
@@ -3656,7 +3665,27 @@ static void modern_init(MachineState *machine)
         metadata_input.overrides = overrides;
         metadata_input.override_count = override_count;
     }
-    if (s->sgx) {
+    if (s->gpu_iouat_zero) {
+        metadata_input.chosen_gpu_iouat_zero = true;
+        warn_report("apple-modern: gpu-iouat-zero serves /chosen gpu-iouat = 0 "
+                    "(SPTM uat_is_enabled returns false; declared: no GPU UAT)");
+    }
+    if (s->stub_ioacceles) {
+        /*
+         * Publish /arm-io/IOAcceleratorES so QC's NameMatching wait exits on
+         * the first poll without a DSC text poke (CS-safe). Mutually exclusive
+         * with sgx=on: both use the single added_node slot. See
+         * modern-adt-ioaccelerator-es.h.
+         */
+        if (s->sgx) {
+            warn_report("apple-modern: stub-ioacceles=on ignores sgx=on "
+                        "(added_node is singular; prefer stub for Metal fail-fast)");
+        }
+        metadata_input.added_node = apple_modern_adt_ioaccelerator_es_node();
+        warn_report("apple-modern: stub-ioacceles=on serves /arm-io/"
+                    "IOAcceleratorES (name+phandle) for QC "
+                    "IOServiceNameMatching fail-fast");
+    } else if (s->sgx) {
         /*
          * Serve the GPU node AGXAcceleratorG17P matches. An override can only
          * set a property on a node that already exists, and the served tree
@@ -4414,6 +4443,8 @@ BOOL_PROPERTY(gfx_carveout, gfx_carveout)
 BOOL_PROPERTY(gpu_trace, gpu_trace)
 BOOL_PROPERTY(gpu_trace_answer, gpu_trace_answer)
 BOOL_PROPERTY(sgx, sgx)
+BOOL_PROPERTY(stub_ioacceles, stub_ioacceles)
+BOOL_PROPERTY(gpu_iouat_zero, gpu_iouat_zero)
 BOOL_PROPERTY(modern_ans, modern_ans)
 BOOL_PROPERTY(pauth_compat, pauth_compat)
 BOOL_PROPERTY(el0_trap_trace, el0_trap_trace)
@@ -4809,6 +4840,10 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    get_gpu_trace_answer,
                                    set_gpu_trace_answer);
     object_class_property_add_bool(oc, "sgx", get_sgx, set_sgx);
+    object_class_property_add_bool(oc, "stub-ioacceles", get_stub_ioacceles,
+                                   set_stub_ioacceles);
+    object_class_property_add_bool(oc, "gpu-iouat-zero", get_gpu_iouat_zero,
+                                   set_gpu_iouat_zero);
     object_class_property_add_bool(oc, "modern-ans", get_modern_ans,
                                    set_modern_ans);
     object_class_property_add_str(oc, "modern-ans-image", get_modern_ans_image,

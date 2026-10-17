@@ -54,6 +54,7 @@ typedef struct Tree {
     unsigned chosen_count, map_count, vram_count, aic_count;
     uint32_t aic_iack_offset;
     bool chosen_sepfw_absent;
+    bool chosen_gpu_iouat_zero;
     /*
      * dart-id generation. dart_pending and dart_value describe only the node
      * whose properties are being emitted: walk() sets them after reading the
@@ -205,7 +206,9 @@ static bool normal_property(const Tree *tree, const char *path,
     if (!strcmp(path, "/chosen")) {
         return !strcmp(name, "dram-base") || !strcmp(name, "dram-size") ||
                (tree->chosen_sepfw_absent &&
-                !strcmp(name, "sepfw-load-at-boot"));
+                !strcmp(name, "sepfw-load-at-boot")) ||
+               (tree->chosen_gpu_iouat_zero &&
+                !strcmp(name, "gpu-iouat"));
     }
     if (!strcmp(path, "/chosen/memory-map")) {
         for (size_t i = 0; i < tree->normal_count; i++) {
@@ -256,7 +259,15 @@ static bool emit_normal(Tree *tree, const char *path, Error **errp)
         }
         if (tree->chosen_sepfw_absent) {
             put32(bytes, 0);
-            return property(tree, "sepfw-load-at-boot", bytes, 4, errp);
+            if (!property(tree, "sepfw-load-at-boot", bytes, 4, errp)) {
+                return false;
+            }
+        }
+        if (tree->chosen_gpu_iouat_zero) {
+            put32(bytes, 0);
+            if (!property(tree, "gpu-iouat", bytes, 4, errp)) {
+                return false;
+            }
         }
         return true;
     }
@@ -405,7 +416,7 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
         cursor += size;
     }
     if (tree->output) {
-        size_t added = chosen ? 2 + tree->chosen_sepfw_absent :
+        size_t added = chosen ? 2 + tree->chosen_sepfw_absent + tree->chosen_gpu_iouat_zero :
                        map ? tree->normal_count : vram ? 1 : aic ? 1 : 0;
         added += override_nodes_at(tree, path);
         added += tree->dart_pending;
@@ -868,6 +879,7 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     tree.capacity = capacity;
     tree.aic_iack_offset = input->aic_iack_offset;
     tree.chosen_sepfw_absent = input->chosen_sepfw_absent;
+    tree.chosen_gpu_iouat_zero = input->chosen_gpu_iouat_zero;
     tree.assign_dart_ids = input->assign_dart_ids;
     tree.overrides = input->overrides;
     tree.override_count = input->override_count;

@@ -106,6 +106,13 @@ typedef struct AppleModernBootMetadataInput {
      */
     bool chosen_sepfw_absent;
     /*
+     * Serve /chosen "gpu-iouat" = u32 0.  SPTM uat_is_enabled() fail-opens when
+     * the property is absent; only an explicit zero disables the GPU UAT so
+     * /arm-io/sgx can be visible to IOKit without the gfx-shared-region-* panic
+     * (see modern-adt-sgx.h).  Loader-owned /chosen; default off.
+     */
+    bool chosen_gpu_iouat_zero;
+    /*
      * Optional property overrides. Every node must exist exactly once and the
      * (path, name) pairs must be unique. Nodes the loader already rewrites
      * (/chosen, /chosen/memory-map, /vram, /arm-io/aic) are refused; the
