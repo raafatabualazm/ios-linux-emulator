@@ -7265,6 +7265,16 @@ static void add_cpreg_to_hashtable(ARMCPU *cpu, const ARMCPRegInfo *r,
     if (!(r->type & ARM_CP_OVERRIDE)) {
         const ARMCPRegInfo *oldreg = ARMCPRegTable_cget(cpu->cp_regs, key);
         if (oldreg) {
+            if (!(oldreg->type & ARM_CP_OVERRIDE)) {
+                fprintf(stderr,
+                        "CP OVERRIDE collide: new=%s old=%s key=0x%llx "
+                        "opc0=%d opc1=%d crn=%d crm=%d opc2=%d\n",
+                        r->name ? r->name : "?",
+                        oldreg->name ? oldreg->name : "?",
+                        (unsigned long long)key,
+                        r->opc0, r->opc1, r->crn, r->crm, r->opc2);
+                fflush(stderr);
+            }
             assert(oldreg->type & ARM_CP_OVERRIDE);
         }
     }

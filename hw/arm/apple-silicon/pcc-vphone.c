@@ -43,6 +43,7 @@
 #include "system/address-spaces.h"
 #include "system/reset.h"
 #include "system/system.h"
+#include "system/runstate.h"
 #include "cpu.h"
 #include "internals.h"
 #include "hw/intc/arm_gic.h"
@@ -134,18 +135,28 @@ static void load_prepared_memory(VPhonePccMachine *s)
 }
 
 /*
- * Drop to EL1h with a VHE-style identity for the guest: HCR_EL2.RW|E2H|TGE,
+ * Drop to EL1h with a VHE-style identity for the guest: HCR_EL2.RW|E2H,
  * so SCTLR_EL1, TTBR0/1_EL1, TCR_EL1 and VBAR_EL1 that SPTM programs apply to the
  * currently-running (EL1) context. Evidence: the vresearch1 SPTM never
  * touches HCR_EL2 (0 times versus 29 in the t8140 SPTM) and its entry
  * prologue at 0xfffffff0270a7000 programs OSLAR_EL1 and VBAR_EL1.
+ *
+ * HCR_APK|HCR_API: without APK, access_pauth traps APCTL_EL1 / KERNELKEY*
+ * MRS/MSR from EL1 to EL2 (EC=0x18). v11: undef at phys 0x770a75b0
+ * (mrs s3_4_c15_c0_4 = APCTL_EL1) -> EL2 PC 0x400 -> prefetch 0x200.
  */
 static void enter_el1h(CPUARMState *env)
 {
     uint32_t spsr;
 
     /* E2H only: TGE would collapse EL1 into EL2 and trap OSLAR_EL1. */
-    env->cp15.hcr_el2 = HCR_RW | HCR_E2H;
+    env->cp15.hcr_el2 = HCR_RW | HCR_E2H | HCR_APK | HCR_API;
+    /*
+     * With E2H, CPTR_EL2.FPEN/ZEN/SMEN use the CPACR layout. Reset FPEN=0
+     * traps EL1 SIMD (ldnp q*) to EL2 (v14: ELR 0xfffffe00070a7ec4,
+     * ESR EC=0x07). Permit FP/SVE/SME at EL0/EL1/EL2.
+     */
+    env->cp15.cptr_el[2] |= (3ULL << 20) | (3ULL << 16) | (3ULL << 24);
     spsr = aarch64_pstate_mode(1, true); /* EL1h = 5 */
     spsr |= PSTATE_D | PSTATE_A | PSTATE_I | PSTATE_F;
     aarch64_save_sp(env, 2);
@@ -169,6 +180,9 @@ static void pcc_reset(void *opaque)
     env->cp15.cpacr_el1 |= 3U << 20;
     cs->halted = s->prepare_only;
     arm_rebuild_hflags(env);
+    if (s->prepare_only) {
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+    }
 }
 
 static void create_gic(VPhonePccMachine *s)
@@ -343,9 +357,22 @@ static void pcc_init(MachineState *machine)
     object_property_set_bool(cpu, "has_el2", true, &error_fatal);
     object_property_set_bool(cpu, "has_el3", false, &error_fatal);
     object_property_set_bool(cpu, "pauth-noop", false, &error_fatal);
-    /* GXF banks only for this bring-up. Timers/sysregs conflict with the
-     * stock "max" CPU's encodings on this tree (OVERRIDE assert); tracked. */
+    /*
+     * Full apple-modern CPU profile. APSTS_EL1 (s3_6_c15_c12_4) must reset
+     * ready=1: SPTM polls its bit0 right after programming TCR/TTBR/MAIR
+     * (see modern-apsts.c and the spin at VA 0xfffffff0270a75a4).
+     */
     object_property_set_bool(cpu, "apple-modern-gxf", true, &error_fatal);
+    object_property_set_bool(cpu, "apple-modern-timers", true, &error_fatal);
+    object_property_set_bool(cpu, "apple-modern-guarded", true, &error_fatal);
+    object_property_set_bool(cpu, "apple-modern-sprr", true, &error_fatal);
+    object_property_set_bool(cpu, "apple-modern-apsts", true, &error_fatal);
+    /*
+     * sysregs: registration ORs ARM_CP_OVERRIDE and skips pauth/VMSA-owned
+     * EL1 names (see arm_register_apple_modern_sysregs). Needed for
+     * PREDAKEY* (s3_4_c15_c10_0..3) right after APCTL key setup.
+     */
+    object_property_set_bool(cpu, "apple-modern-sysregs", true, &error_fatal);
     object_property_set_bool(cpu, "apple-modern-pauth-compat", true,
                              &error_fatal);
     object_property_set_link(cpu, "memory", OBJECT(get_system_memory()),

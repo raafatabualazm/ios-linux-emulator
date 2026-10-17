@@ -13,9 +13,11 @@
  * own modules and are excluded from this table.
  */
 #include "qemu/osdep.h"
+#include <string.h>
 #include "qapi/error.h"
 #include "cpu.h"
 #include "internals.h"
+#include "cpregs.h"
 #include "cpu-features.h"
 #include "system/tcg.h"
 #include "modern-sysregs.h"
@@ -75,17 +77,60 @@ static const ARMCPRegInfo apple_modern_pmc_regs[] = {
       .resetfn = apple_modern_pmc_reset },
 };
 
+/*
+ * Stock "max" already owns a few of these encodings as CONST stubs
+ * (L2ACTLR↔PMCR0_EL1, CPUACTLR↔PMCR2_EL1, CBAR↔PMCR3_EL1) and pauth_reginfo
+ * owns APCTL_EL1 / KERNELKEY* with real writefns. Force OVERRIDE for the
+ * opaque compatibility stores, but skip the pauth/VMSA-owned EL1 names so
+ * we keep apctl_write / keys.kernel / vmsa_lock_el1_write.
+ */
+static bool apple_modern_sysreg_skip_name(const char *name)
+{
+    static const char *const skip[] = {
+        "APCTL_EL1",
+        "KERNKEYLO_EL1",
+        "KERNKEYHI_EL1",
+        "VMSA_LOCK_EL1",
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(skip); i++) {
+        if (strcmp(name, skip[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void arm_register_apple_modern_sysregs(ARMCPU *cpu)
 {
     assert(cpu->apple_modern_sysregs);
-    define_arm_cp_regs(cpu, apple_modern_sysregs);
-    define_arm_cp_regs(cpu, apple_modern_pmc_regs);
+    for (size_t i = 0; i < ARRAY_SIZE(apple_modern_sysregs); i++) {
+        ARMCPRegInfo r = apple_modern_sysregs[i];
+        if (apple_modern_sysreg_skip_name(r.name)) {
+            continue;
+        }
+        r.type |= ARM_CP_OVERRIDE;
+        define_one_arm_cp_reg(cpu, &r);
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(apple_modern_pmc_regs); i++) {
+        ARMCPRegInfo r = apple_modern_pmc_regs[i];
+        r.type |= ARM_CP_OVERRIDE;
+        define_one_arm_cp_reg(cpu, &r);
+    }
 }
 
 void arm_register_apple_modern_sysreg_aliases(ARMCPU *cpu)
 {
     assert(cpu->apple_modern_sysregs);
     for (size_t i = 0; i < ARRAY_SIZE(apple_modern_sysreg_aliases); i++) {
+        const char *src_name = apple_modern_sysreg_aliases[i].src_name;
+        /*
+         * pauth_reginfo registers KERNELKEYLO_EL1 at the KERNKEYLO encoding;
+         * arm_define_vhe_alias asserts the hashtable name matches src_name.
+         * Skip aliases whose EL1 side we deliberately left to pauth/VMSA.
+         */
+        if (apple_modern_sysreg_skip_name(src_name)) {
+            continue;
+        }
         arm_define_vhe_alias(cpu, apple_modern_sysreg_aliases[i].src,
                              apple_modern_sysreg_aliases[i].dst,
                              apple_modern_sysreg_aliases[i].alias,
