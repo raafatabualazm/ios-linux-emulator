@@ -61,6 +61,20 @@ typedef struct Tree {
      * child is walked.
      */
     bool assign_dart_ids, dart_pending;
+    /*
+     * Resolve ADT property placeholders: clear the 0x80000000 "value supplied
+     * by iBoot" flag in each emitted property length word. iBoot always does
+     * this (filling in the real syscfg value and clearing the flag) before any
+     * downstream consumer. XNU's SecureDTGetProperty masks the flag off, so
+     * clearing it is a no-op for XNU; but the vresearch1 SPTM SecureDT walker
+     * (sptm.vresearch1.release, DTFindEntry at VA 0xfffffff0270af1e0) uses the
+     * raw length word for the property-skip stride WITHOUT masking, so a
+     * surviving 0x80000000 bit makes it skip ~2 GiB past the node and trip the
+     * silent out-of-bounds panic (bl 0xfffffff0270d1ea0) while walking the ADT
+     * root — before it ever reaches chosen/memory-map. Enabled for the vmapple1
+     * / PCC path only, so the t8140 byte-exact regression fixtures are intact.
+     */
+    bool resolve_placeholders;
     uint32_t dart_value, dart_count;
     const AppleModernAdtOverride *overrides;
     size_t override_count;
@@ -398,6 +412,21 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
         if (tree->output) {
             if (normal_property(tree, path, (const char *)p)) {
                 replaced++;
+            } else if (tree->resolve_placeholders &&
+                       (get32(p + 32) & 0x80000000)) {
+                /*
+                 * iBoot resolves this placeholder property; we have no syscfg,
+                 * so keep the placeholder-key bytes but clear the flag in the
+                 * length word (see Tree::resolve_placeholders). Emit the 32-byte
+                 * name, a corrected length, then the data+padding verbatim.
+                 */
+                uint8_t header[36];
+                memcpy(header, p, 36);
+                put32(header + 32, length);
+                if (!emit(tree, header, 36, errp) ||
+                    !emit(tree, p + 36, size - 36, errp)) {
+                    return false;
+                }
             } else if (!emit(tree, p, size, errp)) {
                 return false;
             }
@@ -869,6 +898,7 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     tree.aic_iack_offset = input->aic_iack_offset;
     tree.chosen_sepfw_absent = input->chosen_sepfw_absent;
     tree.assign_dart_ids = input->assign_dart_ids;
+    tree.resolve_placeholders = components->platform_vmapple1;
     tree.overrides = input->overrides;
     tree.override_count = input->override_count;
     if (input->added_node) {
