@@ -83,6 +83,14 @@ typedef struct AppleModernBootInput {
      * False keeps the version-1-only acceptance of every earlier revision.
      */
     bool trustcache_v2;
+    /*
+     * Opt-in (grok/pcc-vmapple): accept the PCC/vphone virtual platform
+     * ("arm-io,vmapple1", e.g. DeviceTree.vphone600ap from cloudOS 23E5207q)
+     * instead of T8140, and any nonzero 16 KiB-aligned DRAM base below 1 TiB
+     * (vmapple DRAM starts at 0x70000000). False keeps the T8140-only checks
+     * of every earlier revision byte for byte.
+     */
+    bool platform_vmapple1;
 } AppleModernBootInput;
 
 typedef struct AppleModernBootRegion {

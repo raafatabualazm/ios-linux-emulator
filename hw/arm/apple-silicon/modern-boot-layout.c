@@ -63,6 +63,7 @@ typedef struct DTree {
     size_t cursor;
     uint32_t nodes;
     bool platform, cpu0;
+    bool vmapple1;
 } DTree;
 
 static uint32_t le32(const uint8_t *p)
@@ -340,8 +341,12 @@ static bool parse_node(DTree *tree, const char *parent, unsigned depth,
         const uint8_t *value = p + 36;
         if (!strcmp(path, "/arm-io") && !strcmp((const char *)p, "compatible")) {
             static const char compatible[] = "arm-io,t8140";
-            if (tree->platform || length < sizeof(compatible) ||
-                memcmp(value, compatible, sizeof(compatible))) {
+            static const char vmapple1[] = "arm-io,vmapple1";
+            const char *want = tree->vmapple1 ? vmapple1 : compatible;
+            size_t want_size = tree->vmapple1 ? sizeof(vmapple1) :
+                                                sizeof(compatible);
+            if (tree->platform || length < want_size ||
+                memcmp(value, want, want_size)) {
                 return fail(errp, "unsupported or duplicate device tree platform");
             }
             tree->platform = true;
@@ -491,7 +496,7 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
     static const char *const bkc_names[] = {"__TEXT_EXEC", "__TEXT_BOOT_EXEC", "__TEXT", "__PRELINK_TEXT", "__DATA_CONST", "__DATA_SPTM", "__PRELINK_INFO", "__DATA", "__LINKEDIT"};
     static const char *const sptm_names[] = {"__TEXT", "__DATA_CONST", "__LATE_CONST", "__TEXT_EXEC", "__LAST", "__DATA", "__BOOTDATA", "__LINKEDIT"};
     Image images[3] = {0};
-    DTree tree = { .blob = in->dtree };
+    DTree tree = { .blob = in->dtree, .vmapple1 = in->platform_vmapple1 };
     uint64_t tc_size, before, index, cursor, sptm_base, start;
     uint32_t tc_modules = 1;
     uint64_t framebuffer_size = 0;
@@ -526,7 +531,15 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
             return fail(errp, "framebuffer reservation exceeds 64 MiB");
         }
     }
-    if (!in->dram_size || in->dram_base != (UINT64_C(1) << 40) ||
+    if (in->platform_vmapple1) {
+        if (!in->dram_size || !in->dram_base ||
+            in->dram_base % APPLE_MODERN_PAGE_SIZE ||
+            in->dram_base >= (UINT64_C(1) << 40) ||
+            in->dram_size > VIRTUAL_INDEX_MASK + 1 ||
+            in->dram_size % APPLE_MODERN_PAGE_SIZE) {
+            return fail(errp, "unsupported/unaligned vmapple1 DRAM");
+        }
+    } else if (!in->dram_size || in->dram_base != (UINT64_C(1) << 40) ||
         in->dram_size > VIRTUAL_INDEX_MASK + 1 ||
         in->dram_size % APPLE_MODERN_PAGE_SIZE ||
         in->dram_size > UINT64_MAX - in->dram_base) {
@@ -605,7 +618,7 @@ static bool build(const AppleModernBootInput *in, AppleModernBootLayout *out,
     out->virtual_base = bkc->low & ~VIRTUAL_INDEX_MASK;
     out->dtree_node_count = tree.nodes;
     out->fileset_entry_count = bkc->filesets;
-    strcpy(out->platform, "t8140");
+    strcpy(out->platform, in->platform_vmapple1 ? "vmapple1" : "t8140");
     if (!round_page(in->dtree.size + APPLE_MODERN_DT_SLACK,
                     &out->dtree_capacity, errp) ||
         !round_page(in->trustcache.size + in->cryptex_trustcache.size +

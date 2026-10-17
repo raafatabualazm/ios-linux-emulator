@@ -25,6 +25,8 @@ typedef struct AppleModernGXFState {
     uint64_t esr_gl[3];
     uint64_t elr_gl[3];
     uint64_t far_gl[3];
+    /* vresearch1 SPTM early-boot IMPDEF (s3_6_c15_c1_{0,5,6}). */
+    uint64_t early_impdef[16];
 } AppleModernGXFState;
 
 enum { APPLE_MODERN_GXF_ALIAS_COUNT = 9 };

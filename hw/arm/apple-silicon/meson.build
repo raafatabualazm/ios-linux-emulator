@@ -46,6 +46,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'modern-boot-input.c',
     'modern-board-regions.c',
     'modern-machine.c',
+    'pcc-vphone.c',
     'mt-spi.c',
     'sep-sim.c',
     'sep-sks-wire.c',
