@@ -100,6 +100,24 @@ static bool apple_modern_sysreg_skip_name(const char *name)
     return false;
 }
 
+/*
+ * Apple IMPDEF EL1 registers in the CRn=1,CRm=2 block that the generated
+ * table (qemu-sptm dump) does not cover but the vresearch1/vphone BootKC
+ * (XNU) programs during early CPU bring-up. Without a definition the stock
+ * "max" model raises an Undefined Instruction, which under the EL1h/E2H
+ * identity this board uses is taken to EL2 (VBAR_EL2 = 0) and spins. Evidence
+ * (gdbstub + -d int): after SPTM->TXM->XNU hand-off, XNU does
+ *   msr s3_0_c1_c2_4, xzr   @ VA 0xfffffe0028e5c9ec
+ * (ESR 0x623807e4: EC 0x18, op0=3 op1=0 CRn=1 CRm=2 op2=4, write). These are
+ * read-as-written compatibility stores with no hardware effect, exactly like
+ * the generated table.
+ */
+static const ARMCPRegInfo apple_modern_xnu_el1_regs[] = {
+    { .name = "APPLE_S3_0_C1_C2_4", .state = ARM_CP_STATE_AA64, .access = PL1_RW,
+      .opc0 = 3, .opc1 = 0, .crn = 1, .crm = 2, .opc2 = 4,
+      .type = ARM_CP_CONST | ARM_CP_OVERRIDE, .resetvalue = 0 },
+};
+
 void arm_register_apple_modern_sysregs(ARMCPU *cpu)
 {
     assert(cpu->apple_modern_sysregs);
@@ -109,6 +127,10 @@ void arm_register_apple_modern_sysregs(ARMCPU *cpu)
             continue;
         }
         r.type |= ARM_CP_OVERRIDE;
+        define_one_arm_cp_reg(cpu, &r);
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(apple_modern_xnu_el1_regs); i++) {
+        ARMCPRegInfo r = apple_modern_xnu_el1_regs[i];
         define_one_arm_cp_reg(cpu, &r);
     }
     for (size_t i = 0; i < ARRAY_SIZE(apple_modern_pmc_regs); i++) {
