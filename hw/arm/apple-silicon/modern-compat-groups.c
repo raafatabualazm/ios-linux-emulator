@@ -378,8 +378,16 @@ static const uint8_t sep_v1[] = {0x69, 0x6f, 0x70, 0x2d, 0x6e, 0x75, 0x62, 0x2c,
 static const uint8_t sep_v2[] = {0x64, 0x61, 0x72, 0x74, 0x2c, 0x74, 0x38, 0x31, 0x31, 0x30, 0x00};
 static const uint8_t sep_v3[] = {0x16, 0x00, 0x00, 0x00}; /* dart-id 22, same as darts_v39 */
 static const uint8_t sep_v4[] = {0x69, 0x6f, 0x6d, 0x6d, 0x75, 0x2d, 0x6d, 0x61, 0x70, 0x70, 0x65, 0x72, 0x00};
+/*
+ * rom-panic-bytes: AppleSEPBooter::initForSEP (VA 0xfffffff009619d34) REQUIREs
+ * an OSData of length 4 whose u32 value is 8-byte-aligned (asserts
+ * panicBytesData != nullptr / getLength()==4 / panic_length%8==0). Not in
+ * stock or served ADT — iBoot normally publishes it. 0x1000 bytes.
+ */
+static const uint8_t sep_v5[] = {0x00, 0x10, 0x00, 0x00};
 static const AppleModernAdtOverride sep_rows[] = {
     {"/arm-io/sep", "compatible", sep_v0, (uint32_t)sizeof(sep_v0)},
+    {"/arm-io/sep", "rom-panic-bytes", sep_v5, (uint32_t)sizeof(sep_v5)},
     {"/arm-io/sep/iop-sep-nub", "compatible", sep_v1, (uint32_t)sizeof(sep_v1)},
     {"/arm-io/dart-sep", "compatible", sep_v2, (uint32_t)sizeof(sep_v2)},
     {"/arm-io/dart-sep", "dart-id", sep_v3, (uint32_t)sizeof(sep_v3)},
