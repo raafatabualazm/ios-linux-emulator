@@ -1208,6 +1208,31 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                         if (hdr.out_len >= 1) {
                             zeros[0] = 1;
                         }
+                    } else if (!strcmp(tag_str, "A386") && hdr.out_len >= 1) {
+                        /*
+                         * A386 (in_len 0, out_len 4) is a BOOLEAN predicate, not
+                         * a status.  Its AP stub (bootkc file 0x21dd798, the
+                         * A0xx/A3xx table at 0x21d78f4) poisons the out word with
+                         * 0xAAAAAAAA, dispatches with in_len 0 / out_len 4, then
+                         * returns `out_byte[0] & 1` -- exactly the A437 shape
+                         * handled above.
+                         *
+                         * Measured in the v70 logo run (features-20261017/
+                         * v70-logo-capture): the window server's per-swap cycle is
+                         *   A406 swap_start -> id N, A434(N), A435(N), A386 x2,
+                         * repeating with N incrementing, and the AP then ABANDONS
+                         * the swap -- A407 swap_submit is issued 0 times in
+                         * 107380 RPCs -- while CoreAnimation logs
+                         * "display 1 swap_end returned error 0xE00002D1"
+                         * (kIOReturnBadMedia) 19449 times and the boot logo
+                         * overlay is never dismissed.  Replying 0 made this
+                         * predicate false on every swap.  A434/A435 are NOT the
+                         * cause: their tail converter (bootkc 0x31841f0) maps a
+                         * DCP status through a table of 18 IOReturns and sends
+                         * anything outside 1..18 -- including our 0 -- to
+                         * `mov w0, #0`, i.e. kIOReturnSuccess.
+                         */
+                        zeros[0] = 1;
                     } else if ((!strcmp(tag_str, "A406") ||
                                 (!strcmp(tag_str, "A407") && hdr.in_len < 0x80)) &&
                                hdr.out_len >= 8) {
