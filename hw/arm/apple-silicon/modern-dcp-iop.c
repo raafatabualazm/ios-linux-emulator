@@ -1070,8 +1070,18 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                                         " tag='%s' in[+0x%03x]=0x%016" PRIx64,
                                         s->messages, tag_str, off_w, val);
                         }
-                        if ((!strcmp(tag_str, "A407") || !strcmp(tag_str, "A408")) &&
-                            (val >> 36) == UINT64_C(0x10) &&
+                        /*
+                         * DIAGNOSTIC (v73): the surface probe below was gated on
+                         * A407/A408, which this guest never issues (0 of 15524
+                         * swap cycles).  Widen the probe to EVERY RPC input so we
+                         * can answer the prior question: does the window server's
+                         * composited output exist in the DCP DART space at all?
+                         * If CA composites into a surface and only the present
+                         * fails, some surface will hold non-trivial pixel content.
+                         * Blitting stays gated on A407/A408 below -- this change
+                         * only reads and reports.
+                         */
+                        if ((val >> 36) == UINT64_C(0x10) &&
                             (val & UINT64_C(0xfffffffff)) != 0 &&
                             s->disp0_dma_as) {
                             const uint32_t fb_bytes = 1024 * 768 * 4;
@@ -1088,12 +1098,17 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                                         nonzero_rgb++;
                                     }
                                 }
-                                warn_report("apple-modern: dcp-iop v6-resumed "
-                                            "%s surface at in[+0x%03x] "
-                                            "dva=0x%" PRIx64 " via=dart-disp0(trunc36) "
-                                            "nonzero_rgb_pixels=%u",
-                                            tag_str, off_w, val, nonzero_rgb);
-                                if (nonzero_rgb > 0 && s->scanout_pa &&
+                                /* Throttle: only non-trivial content is news. */
+                                if (nonzero_rgb > 256) {
+                                    warn_report("apple-modern: dcp-iop v6-resumed "
+                                                "%s surface at in[+0x%03x] "
+                                                "dva=0x%" PRIx64 " via=dart-disp0(trunc36) "
+                                                "nonzero_rgb_pixels=%u",
+                                                tag_str, off_w, val, nonzero_rgb);
+                                }
+                                if ((!strcmp(tag_str, "A407") ||
+                                     !strcmp(tag_str, "A408")) &&
+                                    nonzero_rgb > 0 && s->scanout_pa &&
                                     s->scanout_size >= fb_bytes) {
                                     address_space_write(&address_space_memory,
                                                         s->scanout_pa,
@@ -1208,6 +1223,33 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                         if (hdr.out_len >= 1) {
                             zeros[0] = 1;
                         }
+                    } else if ((!strcmp(tag_str, "A414") ||
+                                !strcmp(tag_str, "A415") ||
+                                !strcmp(tag_str, "A420") ||
+                                !strcmp(tag_str, "A421") ||
+                                !strcmp(tag_str, "A424") ||
+                                !strcmp(tag_str, "A427")) &&
+                               hdr.in_len == hdr.out_len && hdr.in_len > 0) {
+                        /*
+                         * Symmetric in/out RPCs: the AP hands the DCP a struct
+                         * and expects the same struct back (an InOutPtr), not a
+                         * fresh value.  Their stubs confirm the shape -- each
+                         * passes in_len == out_len and copies the reply straight
+                         * back to the caller's buffer:
+                         *   A414 8/8, A415 0xc/0xc, A424 8/8, A427 8/8,
+                         *   A420 0xc10/0xc10, A421 0xc10/0xc10 (3088-byte
+                         *   display config/capability blocks).
+                         * Replying with g_malloc0'd zeros therefore ZEROES the
+                         * AP's own data rather than leaving it untouched, which
+                         * is why display setup polls A450 x4 / A411 / A453 in
+                         * rounds and then enters a swap loop that never submits
+                         * (A407 issued 0 times; swap_end -> kIOReturnBadMedia).
+                         * Echo the input back: a DCP that changes nothing is a
+                         * strictly better approximation than one that clears the
+                         * whole block.
+                         */
+                        dma_memory_read(as, pkt_dva + sizeof(hdr), zeros,
+                                        hdr.out_len, MEMTXATTRS_UNSPECIFIED);
                     } else if (!strcmp(tag_str, "A386") && hdr.out_len >= 1) {
                         /*
                          * A386 (in_len 0, out_len 4) is a BOOLEAN predicate, not
