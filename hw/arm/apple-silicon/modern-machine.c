@@ -2542,7 +2542,11 @@ static bool map_sep_dart(AppleModernMachine *s, Error **errp)
 
 static uint64_t sep_core_read(void *opaque, hwaddr offset, unsigned size)
 {
-    return (offset == 0) ? APPLE_MODERN_SEP_CORE_LOADED : 0;
+    uint64_t value = (offset == 0) ? APPLE_MODERN_SEP_CORE_LOADED : 0;
+
+    qemu_log_mask(LOG_UNIMP, "SEP-CORE read  +0x%02" PRIx64 " size %u -> 0x%"
+                  PRIx64 "\n", (uint64_t)offset, size, value);
+    return value;
 }
 
 static void sep_core_write(void *opaque, hwaddr offset, uint64_t value,
@@ -3486,7 +3490,7 @@ static void modern_init(MachineState *machine)
      * boot-data region extending topOfKernelData (not an unmanaged tail).
      */
     if (s->sep_sim && !s->sepfw_absent) {
-        metadata_input.sep_fw_carveout_size = 16 * MiB;
+        metadata_input.sep_fw_carveout_size = 256 * KiB;
     }
     /*
      * Publish the acknowledge offset even when modern-aic is off: XNU's

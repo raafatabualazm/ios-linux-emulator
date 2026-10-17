@@ -1,7 +1,7 @@
 # IMPLEMENTATION-SKS — Full SKS protocol replies (not just sks-failfast)
 
 **Date:** 2026-10-17 (Africa/Cairo)  
-**Branch:** `grok/sks-unblock` @ `3460507`  
+**Branch:** `grok/sks-unblock` @ tip (gap-1 commits `235a019`+)  
 **Worktree:** `Grok/impl-20261017/src`  
 **Isolation:** edits only under `Grok/`; Claude/Codex/Gemini trees untouched.
 
@@ -199,12 +199,27 @@ ACK/IRQ path.
 **Next:** v6 boot failfast OFF → expect non-zero MMIO/dispatch counters,
 `SEP/OS is alive`, live 0x03/0x04/0x19/0x1B, and msg 2862 clear.
 
-## Remaining gaps (post gap-1 fix; update after v6)
+## v6 / v6b / v6c boot results (failfast OFF, after gap-1 commits)
 
-1. Confirm v6 failfast OFF: MMIO counters, `SEP/OS is alive`, live SKS 0x03/04/19/1B, 2862 clear.
-2. After alive: verify `aks_get_lock_state` / MKB unlocked via 0x04/0x19 replies.
+| Run | SEPFW placement | Result |
+| --- | --- | --- |
+| v6 | unmanaged memSize tail 16MiB | **Nested panic** `frame_release:rw_guard_release_shared` early; serial stuck ~12KB |
+| v6b | boot-data region 16MiB (extends topOfKernelData) | **No panic**; serial grows; keybagd/applekeystored spawn; **SEP-CORE reads=0, mailbox MMIO=0** |
+| v6c | boot-data 256KiB + SEP-CORE read logging | Same: **0 SEP-CORE reads**, 0 mailbox counters, no `SEP/OS is alive` |
+
+**Conclusion:** SEPFW + core window + nub flags are necessary but **not sufficient**.
+AppleASCWrapV6SEP never reaches initialize (would have logged SEP-CORE reads at
+`reg[1]+0`). Matching/start of the ASCWrap kext is still broken upstream of
+Booter/mailbox. Next: why `AppleASCWrapV6SEP` (IONameMatch `iop-sep,ascwrap-v6`,
+provider `AppleARMIODevice`) never attaches — power-gates empty? kext not
+starting? AppleARMIO skipping the node?
+
+## Remaining gaps
+
+1. **AppleASCWrapV6SEP never starts** (0 core reads, 0 mailbox MMIO) despite
+   restored compatible, SEPFW memory-map, core bit0=1, nub pre-loaded/running.
+2. After ASCWrap+Booter alive: confirm live SKS 0x03/04/19/1B and 2862 clear.
 3. Still cannot fake VEK / FairPlay / real Keychain wrap.
-4. Encrypted d47 SEP firmware is unused; carveout is zeros (sim ACK path only).
 
 ## Hashes (recap)
 
