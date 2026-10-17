@@ -372,9 +372,19 @@ static const AppleModernAdtOverride gfxclass_rows[] = {
  * its provider and drives the mailbox bootstrap (TZ0/IMG4 -> NOTIFY_ALIVE). */
 static const uint8_t sep_v0[] = {0x69, 0x6f, 0x70, 0x2d, 0x73, 0x65, 0x70, 0x2c, 0x61, 0x73, 0x63, 0x77, 0x72, 0x61, 0x70, 0x2d, 0x76, 0x36, 0x00};
 static const uint8_t sep_v1[] = {0x69, 0x6f, 0x70, 0x2d, 0x6e, 0x75, 0x62, 0x2c, 0x73, 0x65, 0x70, 0x00};
+/* dart-sep + mapper nubs: served tree strips these; AppleSEPManager looks up
+ * /arm-io/dart-sep (VA 0xfffffff0096248c4). Missing DART is recoverable
+ * (fixed-DVA / TXM path), but restoring matchables unblocks the mapper path. */
+static const uint8_t sep_v2[] = {0x64, 0x61, 0x72, 0x74, 0x2c, 0x74, 0x38, 0x31, 0x31, 0x30, 0x00};
+static const uint8_t sep_v3[] = {0x16, 0x00, 0x00, 0x00}; /* dart-id 22, same as darts_v39 */
+static const uint8_t sep_v4[] = {0x69, 0x6f, 0x6d, 0x6d, 0x75, 0x2d, 0x6d, 0x61, 0x70, 0x70, 0x65, 0x72, 0x00};
 static const AppleModernAdtOverride sep_rows[] = {
     {"/arm-io/sep", "compatible", sep_v0, (uint32_t)sizeof(sep_v0)},
     {"/arm-io/sep/iop-sep-nub", "compatible", sep_v1, (uint32_t)sizeof(sep_v1)},
+    {"/arm-io/dart-sep", "compatible", sep_v2, (uint32_t)sizeof(sep_v2)},
+    {"/arm-io/dart-sep", "dart-id", sep_v3, (uint32_t)sizeof(sep_v3)},
+    {"/arm-io/dart-sep/mapper-sep", "compatible", sep_v4, (uint32_t)sizeof(sep_v4)},
+    {"/arm-io/dart-sep/mapper-sep-mpm", "compatible", sep_v4, (uint32_t)sizeof(sep_v4)},
 };
 
 const AppleModernCompatGroup apple_modern_compat_groups[] = {
@@ -401,7 +411,7 @@ const AppleModernCompatGroup apple_modern_compat_groups[] = {
     {"ans", ans_rows, sizeof(ans_rows) / sizeof(ans_rows[0]),
      "the ANS storage coprocessor ASCWrap/RTBuddy + SART, so AppleANS2DARTNVMeController can match and the NVMe comes up"},
     {"sep", sep_rows, sizeof(sep_rows) / sizeof(sep_rows[0]),
-     "the SEP coprocessor ASCWrap + nub, so AppleSEPManager matches and drives the mailbox bootstrap"},
+     "SEP ASCWrap + nub + dart-sep/mapper-sep matchables so AppleSEPManager can find the DART"},
     {"eapfs", eapfs_rows, sizeof(eapfs_rows) / sizeof(eapfs_rows[0]),
      "restores /filesystems e-apfs (renamed to x-apfs by the prepared trees) so usermanagerd finds EAPFS in the IODT and writes a loadable persona manifest (persona type 6)"},
     {"gfxclass", gfxclass_rows, sizeof(gfxclass_rows) / sizeof(gfxclass_rows[0]),

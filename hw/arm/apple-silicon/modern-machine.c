@@ -3565,30 +3565,14 @@ static void modern_init(MachineState *machine)
             overrides[override_count++] = flags[i];
         }
     }
-    if (s->sep_sim && !s->sepfw_absent) {
-        /*
-         * Same DECLARED iBoot flags modern-smc puts on iop-smc-nub. Measured
-         * that the stock Darwin-derived tree has neither; without them the
-         * ASC/RTBuddy paths that gate on "firmware already running" stay
-         * closed. Presence-only would be wrong: the SMC/DCP paths write the
-         * literal u32 1.
-         */
-        static const uint8_t one[4] = { 1, 0, 0, 0 };
-        static const AppleModernAdtOverride sep_sim_flags[] = {
-            {"/arm-io/sep/iop-sep-nub", "pre-loaded", one, sizeof(one)},
-            {"/arm-io/sep/iop-sep-nub", "running", one, sizeof(one)},
-        };
-        if (override_count > APPLE_MODERN_MAX_ADT_OVERRIDES ||
-            sizeof(sep_sim_flags) / sizeof(sep_sim_flags[0]) >
-            APPLE_MODERN_MAX_ADT_OVERRIDES - override_count) {
-            error_report("sep-sim exceeds ADT override capacity");
-            exit(EXIT_FAILURE);
-        }
-        for (size_t i = 0; i < sizeof(sep_sim_flags) / sizeof(sep_sim_flags[0]);
-             i++) {
-            overrides[override_count++] = sep_sim_flags[i];
-        }
-    }
+    /*
+     * Do NOT set pre-loaded/running on iop-sep-nub for sep-sim.
+     * Attested (v6b/v6c): with those flags Booter is skipped (iBoot already
+     * "started" SEP) but sep-sim only emits CONTROL_OP_NOTIFY_ALIVE after
+     * BOOT_IMG4, so "SEP/OS is alive" never happens and mailbox MMIO stays 0.
+     * SMC/DCP need the flags because their QEMU peers complete the RTKit
+     * handshake themselves; sep-sim needs the AP Booter dialogue instead.
+     */
     if (s->adt_compat_restore) {
         Error *groups_error = NULL;
         size_t before = override_count;
@@ -3814,6 +3798,22 @@ static void modern_init(MachineState *machine)
                     "unmanaged memSize tail)",
                     s->metadata.layout.sep_fw_carveout_size,
                     s->metadata.layout.sep_fw_carveout_physical);
+    }
+    if (s->sep_sim && !s->sepfw_absent) {
+        AppleModernBlob sep_compat = { 0 };
+        AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+
+        if (apple_modern_adt_property(dtree, "/arm-io/sep", "compatible",
+                                      &sep_compat, NULL)) {
+            warn_report("apple-modern: /arm-io/sep compatible present (%zu bytes) "
+                        "for sep-sim; iop-sep-nub has NO pre-loaded/running "
+                        "(Booter must drive TZ0/IMG4 → NOTIFY_ALIVE)",
+                        (size_t)sep_compat.size);
+        } else {
+            error_report("apple-modern: sep-sim needs /arm-io/sep compatible "
+                         "(pass adt-compat-restore=...+sep)");
+            exit(EXIT_FAILURE);
+        }
     }
     if (s->boot_display && s->dcp_iop &&
         !strcmp(s->dcp_iop, APPLE_MODERN_DCP_IOP_NAME_V6_RESUMED)) {
