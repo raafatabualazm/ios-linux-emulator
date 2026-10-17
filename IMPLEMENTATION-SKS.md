@@ -230,3 +230,53 @@ starting? AppleARMIO skipping the node?
 | `sep-sks-wire.c` | `180afb0dbe4e50b295c53b585a22d934c5bcd2aa19f0d336455565ffe44d2bbc` |
 | Commit | `3460507` |
 | Patch | `patches/0004-apple-modern-grounded-SKS-protocol-replies-EP18.patch` |
+
+## Gap: ASCWrap attach / Booter bring-up (task 3, 2026-10-17)
+
+Branch tip: `e89e0e7`
+
+### Finding: AppleASCWrapV6SEP *does* attach once Booter is not skipped
+
+v6b/v6c had 0 SEP-CORE reads and 0 mailbox MMIO. That was **not** a missing
+AppleARMIODevice nub. Static RE + v7 ladder:
+
+| Step | Evidence |
+| --- | --- |
+| IOKit match | BootKC `AppleASCWrapV6SEP` IONameMatch `iop-sep,ascwrap-v6` on `AppleARMIODevice`; `adt-compat-restore=smc+sep` restores compatible |
+| Stock `/arm-io/sep` | empty `power-gates`, no `iommu-parent`, has `cpu-ctrl-filtered` (empty) — same in served |
+| `cpu-ctrl-filtered` | AppleA7IOP::start @ `0xfffffff008570154` clears flag; AppleASCWrapV6 firmware gate skips CORE read — **0 CORE reads is expected for SEP** |
+| v6b/c root cause | `iop-sep-nub` `pre-loaded`/`running` (copied from SMC/DCP) **skips Booter**; sep-sim only emits `NOTIFY_ALIVE` after `BOOT_IMG4` |
+
+### Fixes landed
+
+1. **Remove** `pre-loaded`/`running` on `iop-sep-nub` for sep-sim (`9912b4e`)
+2. Expand `sep` compat group: `dart-sep` + `mapper-sep`/`mpm` + `dart-id=22` (do not combine with `darts` group)
+3. Publish `rom-panic-bytes=0x1000` on `/arm-io/sep` and `iop-sep-nub` — Booter `initForSEP` @ `0xfffffff009619d34` REQUIREs OSData len=4, u32 8-aligned
+4. Publish `/chosen chip-id=0x8140` when sep-sim — `SEPROMPanicBuffer` REQUIREs nonzero chip-id from chosen (`SEPROMPanicBuffer.cpp:32`)
+
+### Boot ladder
+
+| Run | Result |
+| --- | --- |
+| v7 | ASCWrap+SEPManager+Booter; panic `panicBytesData != nullptr` |
+| v7c | past rom-panic-bytes; panic `_chip_id` from chosen chip-id=0 |
+| v7d | **no panic**, userspace (keybagd/backboardd); Booter init OK; **still 0 mailbox MMIO**; msg **2862 stuck** (tid 694, backboardd) |
+
+### Remaining gap
+
+`AppleSEPBooter::initForSEP` succeeds but the TZ0/IMG4 mailbox dialogue never
+starts (no `SEP booting` / `SEP/OS is alive`, counters stay at reset ANNOUNCE).
+Next: why `_bootSEP` / `fromPreload`→`prepare` does not post to sep-sim after
+init (zero-filled SEPFW parse? deferred boot gate? power-late?).
+
+### Commits
+
+```
+e89e0e7 apple-modern: publish /chosen chip-id=0x8140 for sep-sim Booter
+4224710 apple-modern: also put rom-panic-bytes on iop-sep-nub for Booter getProperty
+644170d apple-modern: publish /arm-io/sep rom-panic-bytes for AppleSEPBooter
+9912b4e apple-modern: do not set SEP nub pre-loaded/running; restore dart-sep matchables
+7939473 apple-modern: SEP gap-1 follow-up — log core reads, 256KiB SEPFW
+c9f84ed apple-modern: place SEPFW as boot-data region, not unmanaged tail
+
+```
