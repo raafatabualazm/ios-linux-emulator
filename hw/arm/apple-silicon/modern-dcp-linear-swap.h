@@ -14,6 +14,7 @@
 typedef struct DcpLinearSwap {
     uint32_t id;
     uint64_t iova;
+    uint64_t requested_time;
 } DcpLinearSwap;
 
 static inline uint32_t dcp_swap_u32(const uint8_t *p)
@@ -96,7 +97,9 @@ static inline const char *dcp_linear_swap_decode(const uint8_t *p, size_t len,
         iova > UINT64_C(0x1000000000) - DCP_LINEAR_SWAP_BYTES) {
         return "unsupported display DVA or extent";
     }
-    *out = (DcpLinearSwap) { .id = id, .iova = iova };
+    /* Native timestamp type1 is the requested display-presentation time. */
+    *out = (DcpLinearSwap) { .id = id, .iova = iova,
+                           .requested_time = dcp_swap_u64(p) };
     return NULL;
 }
 

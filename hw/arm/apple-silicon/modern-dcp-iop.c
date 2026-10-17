@@ -23,10 +23,12 @@
 #include "hw/qdev-properties.h"
 #include "hw/misc/apple-silicon/a7iop/rtkit.h"
 #include "system/dma.h"
+#include "target/arm/cpu.h"
 #endif
 #include "hw/arm/apple-silicon/modern-dcp-iop.h"
 #include "dcp-av-modes.h"
 #include "modern-dcp-linear-swap.h"
+#include "modern-dcp-frame-info.h"
 
 #ifdef APPLE_MODERN_LAYOUT_STANDALONE
 static void error_setg(Error **errp, const char *format, ...)
@@ -662,6 +664,8 @@ struct AppleModernDcpIop {
         uint32_t id;
         uint8_t ep;
         uint8_t *pixels;
+        uint64_t issued_time;
+        uint64_t requested_time;
     } swaps[16];
     unsigned swap_head, swap_count;
     uint32_t last_accepted_swap_id;
@@ -780,12 +784,51 @@ static void dcp_iop_clear_swaps(AppleModernDcpIop *s)
     s->swap_callback_pending = false;
 }
 
+static bool dcp_iop_clock(int64_t *ns, uint64_t *ticks, unsigned *period)
+{
+    ARMCPU *cpu;
+
+    if (!first_cpu) {
+        return false;
+    }
+    cpu = ARM_CPU(first_cpu);
+    /* The qualified iOS27 fixture uses commpage mode3 (ACNTVCT_EL0),
+     * commpage offset0, and zero architectural counter offsets. Its CPU
+     * helper reads QEMU_CLOCK_VIRTUAL / gt_cntfrq_period_ns, including that
+     * helper's integer rounding. Other clock-offset profiles are unsupported.
+     */
+    if (cpu->env.cp15.cntvoff_el2 || cpu->env.cp15.cntpoff_el2) {
+        return false;
+    }
+    *period = gt_cntfrq_period_ns(cpu);
+    if (!*period) {
+        return false;
+    }
+    *ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    *ticks = (uint64_t)*ns / *period;
+    return true;
+}
+
 static void dcp_iop_schedule_swap(AppleModernDcpIop *s)
 {
     if (s->swap_count && !s->swap_callback_pending &&
         !timer_pending(s->swap_timer)) {
-        timer_mod(s->swap_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000);
+        int64_t ns;
+        uint64_t ticks, earliest;
+        unsigned period;
+
+        if (!dcp_iop_clock(&ns, &ticks, &period)) {
+            /* Preserve the accepted request; never invent a clock sample. */
+            timer_mod(s->swap_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 16666667);
+            return;
+        }
+        earliest = MAX((uint64_t)ns,
+                       s->swaps[s->swap_head].requested_time * period);
+        /* Declared 60Hz software display. Use a real future presentation
+         * boundary at or after the requested tick, not a future timestamp
+         * attached to a frame that was already completed early. */
+        timer_mod(s->swap_timer, (earliest / 16666667 + 1) * 16666667);
     }
 }
 
@@ -798,6 +841,16 @@ static const char *dcp_iop_prepare_swap(AppleModernDcpIop *s,
 
     if (reason) {
         return reason;
+    }
+    {
+        int64_t ns;
+        uint64_t ticks;
+        unsigned period;
+
+        if (!dcp_iop_clock(&ns, &ticks, &period) ||
+            swap->requested_time > (INT64_MAX - 16666667) / period) {
+            return "unsupported presentation clock or target time";
+        }
     }
     if (!s->disp0_dma_as || !s->scanout_pa ||
         s->scanout_size < DCP_LINEAR_SWAP_BYTES) {
@@ -853,13 +906,24 @@ static void dcp_iop_retry_swap(AppleModernDcpIop *s, const char *reason)
 static void dcp_iop_complete_swap(void *opaque)
 {
     AppleModernDcpIop *s = opaque;
-    uint8_t packet[12 + 0x730] = { 0 };
+    uint8_t packet[DCP_FRAME_INFO_PACKET_SIZE];
     uint64_t dva = s->shmem_dva + 0x40000, resolved;
     uint32_t probe = 0;
     const char *which;
     AddressSpace *as;
+    int64_t ns;
+    uint64_t presented;
+    unsigned period;
 
     if (!s->swap_count || s->swap_callback_pending) {
+        return;
+    }
+    if (!dcp_iop_clock(&ns, &presented, &period)) {
+        dcp_iop_retry_swap(s, "unsupported presentation clock");
+        return;
+    }
+    if (presented < s->swaps[s->swap_head].requested_time) {
+        dcp_iop_schedule_swap(s);
         return;
     }
     as = dcp_iop_select_dma_as(s, dva, &probe, sizeof(probe), &which, &resolved);
@@ -874,11 +938,15 @@ static void dcp_iop_complete_swap(void *opaque)
         dcp_iop_retry_swap(s, "scanout write failed");
         return;
     }
-    memcpy(packet, "495D", 4);
-    stl_le_p(packet + 4, 0x730);
-    stl_le_p(packet + 12, s->swaps[s->swap_head].id);
-    packet[12 + 4] = 1;       /* transfer surface to current display */
-    packet[12 + 0x72c] = 1;   /* optional descriptor is null; blob_count=0 */
+    /* Sample after scanout succeeds. No host wall clock or copied future
+     * request is reported as the actual presentation event. */
+    if (!dcp_iop_clock(&ns, &presented, &period)) {
+        dcp_iop_retry_swap(s, "presentation clock changed during scanout");
+        return;
+    }
+    dcp_frame_info_encode(packet, s->swaps[s->swap_head].id,
+                          s->swaps[s->swap_head].issued_time,
+                          s->swaps[s->swap_head].requested_time, presented);
     if (dma_memory_write(as, resolved, packet, sizeof(packet),
                          MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
         dcp_iop_retry_swap(s, "completion DMA write failed");
@@ -886,8 +954,10 @@ static void dcp_iop_complete_swap(void *opaque)
     }
     s->swap_dma_retries = 0;
     s->swap_callback_pending = true;
-    warn_report("apple-modern: D594 completing swap id=%u queue=%u",
-                s->swaps[s->swap_head].id, s->swap_count);
+    warn_report("apple-modern: D594 completing swap id=%u queue=%u "
+                "frame-info=1 requested=%" PRIu64 " presented=%" PRIu64,
+                s->swaps[s->swap_head].id, s->swap_count,
+                s->swaps[s->swap_head].requested_time, presented);
     apple_rtkit_send_user_msg(APPLE_RTKIT(s), s->swaps[s->swap_head].ep,
                               ((uint64_t)sizeof(packet) << 32) | UINT64_C(0x302));
 }
@@ -1060,6 +1130,7 @@ static void dcp_iop_send_next_startup_cb(AppleModernDcpIop *s)
         const char *tag = s->active_cbs[s->cb_index].tag;
         uint32_t in_len = s->active_cbs[s->cb_index].in_len;
         uint32_t out_len = s->active_cbs[s->cb_index].out_len;
+        uint32_t payload_len = s->active_cbs[s->cb_index].payload_len;
         uint32_t prop_id = s->active_cbs[s->cb_index].prop_id;
         const char *prop_key = s->active_cbs[s->cb_index].prop_key;
         uint32_t prop_val32 = s->active_cbs[s->cb_index].prop_val32;
@@ -1073,6 +1144,15 @@ static void dcp_iop_send_next_startup_cb(AppleModernDcpIop *s)
         uint64_t cb_dva = raw_cb_dva;
         const char *which = "none";
         uint8_t pkt_buf[0x1020] = { 0 };
+        if (in_len > sizeof(pkt_buf) - sizeof(DcpRpcPacketHeader) ||
+            out_len > sizeof(pkt_buf) - sizeof(DcpRpcPacketHeader) - in_len ||
+            payload_len > in_len ||
+            payload_len > sizeof(s->active_cbs[s->cb_index].payload)) {
+            warn_report("apple-modern: refusing malformed startup CB #%u "
+                        "('%s') in=%u out=%u payload=%u",
+                        s->cb_index, tag, in_len, out_len, payload_len);
+            return;
+        }
         DcpRpcPacketHeader hdr = {
             .tag = { tag[3], tag[2], tag[1], tag[0] },
             .in_len = in_len,
@@ -1138,6 +1218,7 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
         s->a401_pending = false;
         s->cb_index = 0;
         s->cb_count = 0;
+        memset(s->active_cbs, 0, sizeof(s->active_cbs));
         /* A newly registered region starts powered off. Do not expose a
          * stale state or claim INITIALIZED if its required DMA fails. */
         if (!dcp_iop_write_power_state(s, shmem_dva, 0)) {
@@ -1638,11 +1719,24 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                                 hdr.out_len > 7 ? zeros[7] : 0);
                     g_free(zeros);
                     if (a408_accepted) {
+                        int64_t ns;
+                        uint64_t issued;
+                        unsigned period;
                         unsigned tail = (s->swap_head + s->swap_count) %
                                         ARRAY_SIZE(s->swaps);
+
+                        /* prepare_swap already checked this clock, and no
+                         * guest code executes between the two samples. */
+                        if (!dcp_iop_clock(&ns, &issued, &period)) {
+                            warn_report("apple-modern: A408 clock lost before "
+                                        "ACK; no completion queued");
+                            return;
+                        }
                         s->swaps[tail].id = a408_swap.id;
                         s->swaps[tail].ep = ep;
                         s->swaps[tail].pixels = g_steal_pointer(&a408_pixels);
+                        s->swaps[tail].issued_time = issued;
+                        s->swaps[tail].requested_time = a408_swap.requested_time;
                         s->swap_count++;
                         s->last_accepted_swap_id = a408_swap.id;
                         warn_report("apple-modern: A408 accepted id=%u "
@@ -1671,6 +1765,10 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                 }
 
                 if (ctx == 2 && !strcmp(tag_str, "A401")) {
+                    /* A previous attach sequence used payload-backed D127
+                     * entries. Never carry those XML bytes into D300 on
+                     * a later initialization (including guest reboot). */
+                    memset(s->active_cbs, 0, sizeof(s->active_cbs));
                     s->a401_pending = true;
                     s->a401_ep = ep;
                     s->pending_rpc_ctx = ctx;
@@ -2046,6 +2144,9 @@ static void dcp_iop_reset_hold(Object *obj, ResetType type)
     s->a401_pending = false;
     s->a401_ep = 0;
     s->cb_index = 0;
+    s->cb_count = 0;
+    s->pending_rpc_ctx = 0;
+    memset(s->active_cbs, 0, sizeof(s->active_cbs));
     s->normal_mode_seen = false;
     s->attach_sent = false;
 }
