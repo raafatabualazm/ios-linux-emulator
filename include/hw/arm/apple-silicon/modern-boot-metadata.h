@@ -82,6 +82,13 @@ typedef struct AppleModernBootMetadataInput {
      * without breaking the framebuffer's own alignment check.
      */
     uint64_t gfx_carveout_size;
+    /*
+     * Optional SEPFW carveout (bytes); zero disables. Same shrink-memSize
+     * placement as gfx_carveout. sep-sim sets this so AppleSEPManager's
+     * fromPreload finds /chosen/memory-map SEPFW and Booter can drive the
+     * mailbox. Must be a multiple of APPLE_MODERN_FRAMEBUFFER_ALIGNMENT.
+     */
+    uint64_t sep_fw_carveout_size;
     /* Without a framebuffer reservation this retains the explicit ABI values.
      * Otherwise zero selects the derived text-console geometry; a nonzero
      * explicit description must exactly match that reserved framebuffer.

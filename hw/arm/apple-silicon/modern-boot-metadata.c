@@ -14,7 +14,7 @@
 
 #define MAX_ADT_BYTES ((UINT64_C(16) << 20) + APPLE_MODERN_DT_SLACK)
 #define MAX_NORMAL_PROPS 48
-_Static_assert(APPLE_MODERN_MAX_REGIONS + 15 <= MAX_NORMAL_PROPS,
+_Static_assert(APPLE_MODERN_MAX_REGIONS + 16 <= MAX_NORMAL_PROPS,
                "normal metadata property budget");
 
 #ifdef APPLE_MODERN_LAYOUT_STANDALONE
@@ -549,6 +549,17 @@ static void prepare_normal(Tree *tree, const AppleModernBootLayout *layout)
     for (size_t i = 0; i < sizeof(unused) / sizeof(unused[0]); i++) {
         add_normal(tree, unused[i], UINT64_MAX, UINT64_MAX);
     }
+    /*
+     * SEPFW for sep-sim. Attested (AppleSEPFirmware preload @
+     * 0xfffffff0096108c8): a missing or zero-size SEPFW makes fromPreload
+     * REQUIRE-fail, so AppleSEPBooter::bootSEP never posts BootTmmManifest
+     * and the mailbox stays idle. SEPPatches/uStuff are both absent here,
+     * which the same function accepts (both-or-neither).
+     */
+    if (layout->sep_fw_carveout_size) {
+        add_normal(tree, "SEPFW", layout->sep_fw_carveout_physical,
+                   layout->sep_fw_carveout_size);
+    }
     if (!layout->ramdisk_size) {
         add_normal(tree, "RAMDisk", UINT64_MAX, UINT64_MAX);
     }
@@ -828,6 +839,21 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
         prepared.layout.gfx_carveout_physical = prepared.layout.dram_base +
                                                 mem_size;
         prepared.layout.gfx_carveout_size = gfx_size;
+    }
+    if (input->sep_fw_carveout_size) {
+        uint64_t sep_size = input->sep_fw_carveout_size;
+
+        if (sep_size % APPLE_MODERN_FRAMEBUFFER_ALIGNMENT ||
+            sep_size >= mem_size ||
+            prepared.layout.top_of_kernel_data - prepared.layout.dram_base >
+            mem_size - sep_size) {
+            return fail(errp, "SEPFW carveout overlaps boot data or is "
+                        "misaligned");
+        }
+        mem_size -= sep_size;
+        prepared.layout.sep_fw_carveout_physical = prepared.layout.dram_base +
+                                                   mem_size;
+        prepared.layout.sep_fw_carveout_size = sep_size;
     }
     video = input->video;
     if (prepared.layout.framebuffer_size) {

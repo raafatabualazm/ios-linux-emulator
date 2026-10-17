@@ -123,6 +123,15 @@ typedef struct AppleModernBootLayout {
      */
     uint64_t gfx_carveout_physical;
     uint64_t gfx_carveout_size;
+    /*
+     * SEPFW carveout for sep-sim. Published as /chosen/memory-map "SEPFW"
+     * so AppleSEPFirmware::fromPreload (AppleSEPManager @ 0xfffffff0096108c8)
+     * finds a non-zero address+size. Without it Booter never posts to the
+     * mailbox (measured: sep-sim MMIO counters stay at the reset ANNOUNCE
+     * only). Contents are not validated by sep-sim; zeros are fine.
+     */
+    uint64_t sep_fw_carveout_physical;
+    uint64_t sep_fw_carveout_size;
     uint64_t image_virtual_base[3];
     uint64_t image_entry_virtual[3];
     /*
