@@ -389,6 +389,8 @@ static const AppleModernAdtOverride sep_rows[] = {
     {"/arm-io/sep", "compatible", sep_v0, (uint32_t)sizeof(sep_v0)},
     {"/arm-io/sep", "rom-panic-bytes", sep_v5, (uint32_t)sizeof(sep_v5)},
     {"/arm-io/sep/iop-sep-nub", "compatible", sep_v1, (uint32_t)sizeof(sep_v1)},
+    /* Booter initForSEP getProperty may land on the nub, not the ASC parent. */
+    {"/arm-io/sep/iop-sep-nub", "rom-panic-bytes", sep_v5, (uint32_t)sizeof(sep_v5)},
     {"/arm-io/dart-sep", "compatible", sep_v2, (uint32_t)sizeof(sep_v2)},
     {"/arm-io/dart-sep", "dart-id", sep_v3, (uint32_t)sizeof(sep_v3)},
     {"/arm-io/dart-sep/mapper-sep", "compatible", sep_v4, (uint32_t)sizeof(sep_v4)},
