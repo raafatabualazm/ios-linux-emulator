@@ -19,12 +19,14 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/error-report.h"
+#include "qemu/timer.h"
 #include "hw/qdev-properties.h"
 #include "hw/misc/apple-silicon/a7iop/rtkit.h"
 #include "system/dma.h"
 #endif
 #include "hw/arm/apple-silicon/modern-dcp-iop.h"
 #include "dcp-av-modes.h"
+#include "modern-dcp-linear-swap.h"
 
 #ifdef APPLE_MODERN_LAYOUT_STANDALONE
 static void error_setg(Error **errp, const char *format, ...)
@@ -655,6 +657,16 @@ struct AppleModernDcpIop {
     uint64_t scanout_pa;
     uint64_t scanout_size;
     uint32_t next_swap_id;
+    QEMUTimer *swap_timer;
+    struct {
+        uint32_t id;
+        uint8_t ep;
+        uint8_t *pixels;
+    } swaps[16];
+    unsigned swap_head, swap_count;
+    uint32_t last_accepted_swap_id;
+    unsigned swap_dma_retries;
+    bool swap_callback_pending;
     uint64_t shmem_dva;
     bool a401_pending;
     uint8_t a401_ep;
@@ -731,6 +743,153 @@ static AddressSpace *dcp_iop_select_dma_as(AppleModernDcpIop *s, uint64_t dva,
     *which = "none";
     *resolved_dva = dva;
     return NULL;
+}
+
+static bool dcp_iop_write_power_state(AppleModernDcpIop *s,
+                                      uint64_t shmem_dva, uint32_t state)
+{
+    const uint64_t dva_mask = UINT64_C(0xfffffffff);
+    const uint64_t power_offset = UINT64_C(0x80000);
+    uint64_t base = shmem_dva & dva_mask;
+    uint8_t state_le[4];
+
+    /* The native AP power cache reads the first word of the shared-state
+     * region at RPC shmem + 0x80000, independently of A484's reply. */
+    if (!shmem_dva || !s->dcp_dma_as ||
+        base > dva_mask - power_offset - (sizeof(state_le) - 1)) {
+        return false;
+    }
+    stl_le_p(state_le, state);
+    return dma_memory_write(s->dcp_dma_as, base + power_offset,
+                            state_le, sizeof(state_le),
+                            MEMTXATTRS_UNSPECIFIED) == MEMTX_OK;
+}
+
+static void dcp_iop_clear_swaps(AppleModernDcpIop *s)
+{
+    if (s->swap_timer) {
+        timer_del(s->swap_timer);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(s->swaps); i++) {
+        g_free(s->swaps[i].pixels);
+        memset(&s->swaps[i], 0, sizeof(s->swaps[i]));
+    }
+    s->swap_head = s->swap_count = 0;
+    s->last_accepted_swap_id = 0;
+    s->swap_dma_retries = 0;
+    s->swap_callback_pending = false;
+}
+
+static void dcp_iop_schedule_swap(AppleModernDcpIop *s)
+{
+    if (s->swap_count && !s->swap_callback_pending &&
+        !timer_pending(s->swap_timer)) {
+        timer_mod(s->swap_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000);
+    }
+}
+
+static const char *dcp_iop_prepare_swap(AppleModernDcpIop *s,
+                                       const uint8_t *input, size_t input_size,
+                                       DcpLinearSwap *swap, uint8_t **pixels)
+{
+    const char *reason = dcp_linear_swap_decode(input, input_size, swap);
+    uint32_t delta;
+
+    if (reason) {
+        return reason;
+    }
+    if (!s->disp0_dma_as || !s->scanout_pa ||
+        s->scanout_size < DCP_LINEAR_SWAP_BYTES) {
+        return "display DMA or complete scanout buffer unavailable";
+    }
+    if (s->swap_count == ARRAY_SIZE(s->swaps)) {
+        return "completion queue full";
+    }
+    for (unsigned i = 0; i < s->swap_count; i++) {
+        unsigned index = (s->swap_head + i) % ARRAY_SIZE(s->swaps);
+        if (s->swaps[index].id == swap->id) {
+            return "duplicate outstanding swap";
+        }
+    }
+    /* This bounded profile submits and completes monotonically, with u32 wrap. */
+    delta = swap->id - s->last_accepted_swap_id;
+    if (s->last_accepted_swap_id && (!delta || delta > INT32_MAX)) {
+        return "reused or out-of-order swap id";
+    }
+    *pixels = g_try_malloc(DCP_LINEAR_SWAP_BYTES);
+    if (!*pixels) {
+        return "frame allocation failed";
+    }
+    if (dma_memory_read(s->disp0_dma_as, swap->iova, *pixels,
+                        DCP_LINEAR_SWAP_BYTES, MEMTXATTRS_UNSPECIFIED) !=
+        MEMTX_OK) {
+        g_clear_pointer(pixels, g_free);
+        return "display surface DMA read failed";
+    }
+    return NULL;
+}
+
+static void dcp_iop_retry_swap(AppleModernDcpIop *s, const char *reason)
+{
+    /* Keep the accepted frame owned and never assert successful presentation
+     * after a failed write. A new SET_SHMEM/reset cancels this retry state. */
+    if (++s->swap_dma_retries == 1 ||
+        !(s->swap_dma_retries & (s->swap_dma_retries - 1))) {
+        warn_report("apple-modern: D594 id=%u retry=%u: %s",
+                    s->swaps[s->swap_head].id, s->swap_dma_retries, reason);
+    }
+    timer_mod(s->swap_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 16000000);
+}
+
+/* Native iOS 27 D594 (BootKC a36b9241, handler 0xfffffff00a175764):
+ * swap_complete_ap_gated(id, update_display, optional_descriptor, blobs, ...).
+ * A408's synchronous reply alone does not retire the queued IOSurface.
+ * Deliver this asynchronously, once, in submission order. Native ASYNC context
+ * 3 uses the separate inbound window at +0x40000 (init a169990). Context 0
+ * shares the synchronous A408 reply latch and can overwrite its unread ACK.
+ */
+static void dcp_iop_complete_swap(void *opaque)
+{
+    AppleModernDcpIop *s = opaque;
+    uint8_t packet[12 + 0x730] = { 0 };
+    uint64_t dva = s->shmem_dva + 0x40000, resolved;
+    uint32_t probe = 0;
+    const char *which;
+    AddressSpace *as;
+
+    if (!s->swap_count || s->swap_callback_pending) {
+        return;
+    }
+    as = dcp_iop_select_dma_as(s, dva, &probe, sizeof(probe), &which, &resolved);
+    if (!as) {
+        dcp_iop_retry_swap(s, "completion DMA unavailable");
+        return;
+    }
+    if (address_space_write(&address_space_memory, s->scanout_pa,
+                            MEMTXATTRS_UNSPECIFIED,
+                            s->swaps[s->swap_head].pixels,
+                            DCP_LINEAR_SWAP_BYTES) != MEMTX_OK) {
+        dcp_iop_retry_swap(s, "scanout write failed");
+        return;
+    }
+    memcpy(packet, "495D", 4);
+    stl_le_p(packet + 4, 0x730);
+    stl_le_p(packet + 12, s->swaps[s->swap_head].id);
+    packet[12 + 4] = 1;       /* transfer surface to current display */
+    packet[12 + 0x72c] = 1;   /* optional descriptor is null; blob_count=0 */
+    if (dma_memory_write(as, resolved, packet, sizeof(packet),
+                         MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+        dcp_iop_retry_swap(s, "completion DMA write failed");
+        return;
+    }
+    s->swap_dma_retries = 0;
+    s->swap_callback_pending = true;
+    warn_report("apple-modern: D594 completing swap id=%u queue=%u",
+                s->swaps[s->swap_head].id, s->swap_count);
+    apple_rtkit_send_user_msg(APPLE_RTKIT(s), s->swaps[s->swap_head].ep,
+                              ((uint64_t)sizeof(packet) << 32) | UINT64_C(0x302));
 }
 
 /*
@@ -905,7 +1064,12 @@ static void dcp_iop_send_next_startup_cb(AppleModernDcpIop *s)
         const char *prop_key = s->active_cbs[s->cb_index].prop_key;
         uint32_t prop_val32 = s->active_cbs[s->cb_index].prop_val32;
         uint64_t prop_val64 = s->active_cbs[s->cb_index].prop_val64;
-        uint64_t raw_cb_dva = s->shmem_dva + 0x60000;
+        /* Match the waiting parent's context index: CMD2 -> CB0,
+         * OOBCMD6 -> OOBCB4. Each has its own 0x8000-byte window/latch. */
+        uint8_t cb_ctx = s->pending_rpc_ctx & ~2u;
+        uint64_t raw_cb_dva = s->shmem_dva +
+                             ((cb_ctx & 1) ? 0x40000 : 0x60000) +
+                             ((uint64_t)(cb_ctx >> 2) * 0x8000);
         uint64_t cb_dva = raw_cb_dva;
         const char *which = "none";
         uint8_t pkt_buf[0x1020] = { 0 };
@@ -944,10 +1108,11 @@ static void dcp_iop_send_next_startup_cb(AppleModernDcpIop *s)
         dma_memory_write(as, cb_dva, pkt_buf, total_len,
                          MEMTXATTRS_UNSPECIFIED);
         warn_report("apple-modern: dcp-iop v6-resumed sending CB #%u tag='%s' "
-                    "on %s via %s (ctx=0 off=0x0 len=0x%x)",
-                    s->cb_index, tag, s->nub_name, which, total_len);
+                    "on %s via %s (ctx=%u off=0x0 len=0x%x)",
+                    s->cb_index, tag, s->nub_name, which, cb_ctx, total_len);
         apple_rtkit_send_user_msg(APPLE_RTKIT(s), s->a401_ep,
-                                  ((uint64_t)total_len << 32) | UINT64_C(2));
+                                  ((uint64_t)total_len << 32) |
+                                  ((uint64_t)cb_ctx << 8) | UINT64_C(2));
         return;
     }
 
@@ -966,10 +1131,22 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
 
     if (msg_type == 0) {
         /* IOMFB_MESSAGE_TYPE_SET_SHMEM: DVA is in bits [63:16]. */
-        s->shmem_dva = (message >> 16) & ~UINT64_C(0xffff);
+        uint64_t shmem_dva = (message >> 16) & ~UINT64_C(0xffff);
+
+        dcp_iop_clear_swaps(s);
+        s->shmem_dva = 0;
         s->a401_pending = false;
         s->cb_index = 0;
         s->cb_count = 0;
+        /* A newly registered region starts powered off. Do not expose a
+         * stale state or claim INITIALIZED if its required DMA fails. */
+        if (!dcp_iop_write_power_state(s, shmem_dva, 0)) {
+            warn_report("apple-modern: dcp-iop SET_SHMEM power-state DMA "
+                        "failed at shmem=0x%" PRIx64 "; not initialized",
+                        shmem_dva);
+            return;
+        }
+        s->shmem_dva = shmem_dva;
         warn_report("apple-modern: dcp-iop v6-resumed SET_SHMEM on %s "
                     "(user %u, raw %u / 0x%x): msg=0x%" PRIx64
                     " shmem_dva=0x%" PRIx64
@@ -986,22 +1163,22 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
         uint16_t off = (uint16_t)((message >> 16) & 0xffff);
         uint8_t ctx = (uint8_t)((message >> 8) & 0xf);
         bool ack = (message & (UINT64_C(1) << 6)) != 0;
-        uint32_t chan_off = 0;
-
-        if (ctx == 4 || ctx == 6) {
-            chan_off = 0x08000;
-        } else if (ctx == 3) {
-            chan_off = 0x40000;
-        } else if (ctx == 7) {
-            chan_off = 0x48000;
-        }
+        uint32_t chan_off = ((ctx >> 2) * 0x8000) +
+                            ((ctx & 1) ? 0x20000 : 0);
 
         if (ack) {
             uint32_t cb_out = 0;
             const char *which = "none";
             uint64_t cb_dva = 0;
-            if (ctx == 0 && s->shmem_dva != 0) {
-                dcp_iop_select_dma_as(s, s->shmem_dva + 0x60000 + 12,
+            uint8_t expected_cb_ctx = s->pending_rpc_ctx & ~2u;
+            if (ctx == expected_cb_ctx && s->a401_pending &&
+                s->cb_index < s->cb_count &&
+                s->active_cbs[s->cb_index].out_len >= 4 &&
+                s->shmem_dva != 0) {
+                dcp_iop_select_dma_as(s, s->shmem_dva +
+                                      ((ctx & 1) ? 0x40000 : 0x60000) +
+                                      ((uint64_t)(ctx >> 2) * 0x8000) + 12 +
+                                      s->active_cbs[s->cb_index].in_len,
                                       &cb_out, sizeof(cb_out), &which,
                                       &cb_dva);
             }
@@ -1010,7 +1187,15 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                         "raw_msg=0x%" PRIx64,
                         s->messages, s->nub_name, ctx, off, len, cb_out,
                         message);
-            if (ctx == 0 && s->a401_pending) {
+            if (ctx == 3 && off == 0 && s->swap_callback_pending &&
+                s->swap_count && ep == s->swaps[s->swap_head].ep) {
+                s->swap_callback_pending = false;
+                g_clear_pointer(&s->swaps[s->swap_head].pixels, g_free);
+                s->swap_head = (s->swap_head + 1) % ARRAY_SIZE(s->swaps);
+                s->swap_count--;
+                dcp_iop_schedule_swap(s);
+            } else if (ctx == expected_cb_ctx && off == 0 && s->a401_pending &&
+                       ep == s->a401_ep) {
                 s->cb_index++;
                 dcp_iop_send_next_startup_cb(s);
             }
@@ -1027,6 +1212,9 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                                                      &pkt_dva);
             if (as) {
                 char tag_str[5];
+                DcpLinearSwap a408_swap = { 0 };
+                g_autofree uint8_t *a408_pixels = NULL;
+                bool a408_accepted = false;
                 uint8_t in_preview[32] = { 0 };
                 char hex_preview[65] = { 0 };
                 uint32_t preview_len = hdr.in_len < sizeof(in_preview) ?
@@ -1038,9 +1226,37 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                 }
                 tag_str[4] = '\0';
 
+                if (!strcmp(tag_str, "A484") &&
+                    (hdr.in_len != 16 || hdr.out_len != 8 ||
+                     len != sizeof(hdr) + 16 + 8 || off > 0x8000 - len)) {
+                    warn_report("apple-modern: refusing malformed A484 envelope "
+                                "ctx=%u off=0x%x len=0x%x in=0x%x out=0x%x",
+                                ctx, off, len, hdr.in_len, hdr.out_len);
+                    return;
+                }
+
+                if (!strcmp(tag_str, "A408") &&
+                    (hdr.in_len != DCP_LINEAR_SWAP_INPUT_SIZE ||
+                     hdr.out_len != 12 ||
+                     len != sizeof(hdr) + DCP_LINEAR_SWAP_INPUT_SIZE + 12 ||
+                     off > 0x8000 - len)) {
+                    /* The peer did not provide a complete bounded reply area.
+                     * Do not read beyond this message or fabricate acceptance. */
+                    warn_report("apple-modern: refusing malformed A408 envelope "
+                                "ctx=%u off=0x%x len=0x%x in=0x%x out=0x%x",
+                                ctx, off, len, hdr.in_len, hdr.out_len);
+                    return;
+                }
+
                 if (preview_len > 0) {
-                    dma_memory_read(as, pkt_dva + sizeof(hdr), in_preview,
-                                    preview_len, MEMTXATTRS_UNSPECIFIED);
+                    MemTxResult input_result =
+                        dma_memory_read(as, pkt_dva + sizeof(hdr), in_preview,
+                                        preview_len, MEMTXATTRS_UNSPECIFIED);
+                    if (!strcmp(tag_str, "A484") && input_result != MEMTX_OK) {
+                        warn_report("apple-modern: A484 input DMA failed; "
+                                    "no power transition or ACK");
+                        return;
+                    }
                     for (uint32_t i = 0; i < preview_len; i++) {
                         snprintf(&hex_preview[i * 2], 3, "%02x", in_preview[i]);
                     }
@@ -1061,9 +1277,25 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
 
                 if (hdr.in_len > sizeof(in_preview) && hdr.in_len <= 0x4000) {
                     uint8_t *full_in = g_malloc0(hdr.in_len);
-                    dma_memory_read(as, pkt_dva + sizeof(hdr), full_in,
-                                    hdr.in_len, MEMTXATTRS_UNSPECIFIED);
+                    MemTxResult input_result =
+                        dma_memory_read(as, pkt_dva + sizeof(hdr), full_in,
+                                        hdr.in_len, MEMTXATTRS_UNSPECIFIED);
+                    if (!strcmp(tag_str, "A408")) {
+                        const char *reason = "A408 payload DMA read failed";
+                        if (input_result == MEMTX_OK) {
+                            reason = dcp_iop_prepare_swap(s, full_in, hdr.in_len,
+                                                         &a408_swap,
+                                                         &a408_pixels);
+                        }
+                        a408_accepted = reason == NULL;
+                        if (reason) {
+                            warn_report("apple-modern: A408 cancelled: %s", reason);
+                        }
+                    }
                     for (uint32_t off_w = 0; off_w + 8 <= hdr.in_len; off_w += 8) {
+                        if (!strcmp(tag_str, "A408") || input_result != MEMTX_OK) {
+                            break; /* A408 is decoded above; never pointer-scanned. */
+                        }
                         uint64_t val = ldq_le_p(full_in + off_w);
                         if (val != 0 && val != UINT64_C(0xaaaaaaaaaaaaaaaa)) {
                             warn_report("apple-modern: dcp-iop v6-resumed RPC #%" PRIu64
@@ -1082,7 +1314,7 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                          * only reads and reports.
                          */
                         if ((val >> 36) == UINT64_C(0x10) &&
-                            (val & UINT64_C(0xfffffffff)) != 0 &&
+                            ((val & UINT64_C(0xfffffffff)) != 0) &&
                             s->disp0_dma_as) {
                             const uint32_t fb_bytes = 1024 * 768 * 4;
                             uint64_t surf_dva = val & UINT64_C(0xfffffffff);
@@ -1126,7 +1358,12 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                     uint64_t out_dva = pkt_dva + sizeof(hdr) + hdr.in_len;
                     uint8_t *zeros = g_malloc0(hdr.out_len);
                     /* Methods returning bool_ true on init/display queries */
-                    if (hdr.out_len >= 4 &&
+                    if (!strcmp(tag_str, "A408")) {
+                        /* The packed flag means cancellation, not success.
+                         * Zero status and flag accept; D594 retires only an
+                         * admitted frame after the actual scanout write. */
+                        zeros[0] = a408_accepted ? 0 : 1;
+                    } else if (hdr.out_len >= 4 &&
                         (!strcmp(tag_str, "A000") ||
                          !strcmp(tag_str, "A002") ||
                          !strcmp(tag_str, "A020") ||
@@ -1297,10 +1534,31 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                         zeros[0] = 1;
                         stl_le_p(zeros + 1, s->next_swap_id);
                         stl_le_p(zeros + 5, 0);
+                    } else if (!strcmp(tag_str, "A484")) {
+                        uint64_t requested_state = ldq_le_p(in_preview);
+
+                        /* Exact in16/out8 contract above. Only off/on (0/1)
+                         * are established for this model; this is not a claim
+                         * about the complete native u64 power-state enum. */
+                        if (requested_state > 1) {
+                            warn_report("apple-modern: refusing unsupported "
+                                        "A484 power state 0x%" PRIx64,
+                                        requested_state);
+                            g_free(zeros);
+                            return;
+                        }
+                        if (!dcp_iop_write_power_state(s, s->shmem_dva,
+                                                      requested_state)) {
+                            warn_report("apple-modern: A484 shared power-state "
+                                        "DMA failed; no success reply or ACK");
+                            g_free(zeros);
+                            return;
+                        }
+                        stl_le_p(zeros, requested_state);
+                        stl_le_p(zeros + 4, 0);
                     } else if ((!strcmp(tag_str, "A472") ||
                                 !strcmp(tag_str, "A473") ||
-                                !strcmp(tag_str, "A468") ||
-                                !strcmp(tag_str, "A484")) &&
+                                !strcmp(tag_str, "A468")) &&
                                hdr.out_len >= 8 && preview_len >= 4) {
                         /*
                          * setPowerState(ulong powerState, ..., OutPtr(uint) outState, ...)
@@ -1360,8 +1618,16 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                         /* display_height() -> uint */
                         stl_le_p(zeros, 768);
                     }
-                    dma_memory_write(as, out_dva, zeros, hdr.out_len,
-                                     MEMTXATTRS_UNSPECIFIED);
+                    MemTxResult output_result =
+                        dma_memory_write(as, out_dva, zeros, hdr.out_len,
+                                         MEMTXATTRS_UNSPECIFIED);
+                    if ((!strcmp(tag_str, "A408") ||
+                         !strcmp(tag_str, "A484")) && output_result != MEMTX_OK) {
+                        warn_report("apple-modern: %s reply DMA failed; "
+                                    "no ACK or completion queued", tag_str);
+                        g_free(zeros);
+                        return;
+                    }
                     warn_report("apple-modern: dcp-iop v6-resumed RPC #%" PRIu64
                                 " tag='%s' replied out_len=0x%x out_hex=%02x%02x%02x%02x%02x%02x%02x%02x",
                                 s->messages, tag_str, hdr.out_len,
@@ -1371,6 +1637,19 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                                 hdr.out_len > 6 ? zeros[6] : 0,
                                 hdr.out_len > 7 ? zeros[7] : 0);
                     g_free(zeros);
+                    if (a408_accepted) {
+                        unsigned tail = (s->swap_head + s->swap_count) %
+                                        ARRAY_SIZE(s->swaps);
+                        s->swaps[tail].id = a408_swap.id;
+                        s->swaps[tail].ep = ep;
+                        s->swaps[tail].pixels = g_steal_pointer(&a408_pixels);
+                        s->swap_count++;
+                        s->last_accepted_swap_id = a408_swap.id;
+                        warn_report("apple-modern: A408 accepted id=%u "
+                                    "iova=0x%" PRIx64 " linear BGRA "
+                                    "1024x768 stride=4096 queue=%u",
+                                    a408_swap.id, a408_swap.iova, s->swap_count);
+                    }
                 }
 
                 if (s->attach_cbs && !s->attach_sent &&
@@ -1454,6 +1733,7 @@ static void dcp_iop_handle_v6_resumed_rpc(AppleModernDcpIop *s, uint8_t ep,
                 uint64_t ack_msg = UINT64_C(2) | (UINT64_C(1) << 6) |
                                    ((uint64_t)ctx << 8);
                 apple_rtkit_send_user_msg(APPLE_RTKIT(s), ep, ack_msg);
+                dcp_iop_schedule_swap(s); /* The A408 reply/ACK precedes D594. */
                 return;
             }
             warn_report("apple-modern: dcp-iop v6-resumed RPC #%" PRIu64
@@ -1665,6 +1945,7 @@ DeviceState *apple_modern_dcp_iop_new(const AppleModernDcpIopPlan *plan,
                                                      APPLE_A7IOP_V6;
     dev = qdev_new(TYPE_APPLE_MODERN_DCP_IOP);
     s = APPLE_MODERN_DCP_IOP(dev);
+    s->swap_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, dcp_iop_complete_swap, s);
     s->prestarted = mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED ||
                     mode == APPLE_MODERN_DCP_IOP_MODE_V6_PRESTARTED_QUIESCED;
     s->dual_endpoints = mode == APPLE_MODERN_DCP_IOP_MODE_V6_RESUMED;
@@ -1758,6 +2039,9 @@ static void dcp_iop_reset_hold(Object *obj, ResetType type)
     s->expert_start = false;
     s->expert_control_value = s->expert_control_off;
     s->next_swap_id = 0;
+    dcp_iop_clear_swaps(s);
+    /* Do not DMA through a mapping invalidated by DART reset. The next
+     * SET_SHMEM initializes its new shared power word before INITIALIZED. */
     s->shmem_dva = 0;
     s->a401_pending = false;
     s->a401_ep = 0;
@@ -1795,12 +2079,23 @@ static void apple_modern_dcp_iop_class_init(ObjectClass *oc, const void *data)
     dc->user_creatable = false;
 }
 
+static void apple_modern_dcp_iop_finalize(Object *obj)
+{
+    AppleModernDcpIop *s = APPLE_MODERN_DCP_IOP(obj);
+    dcp_iop_clear_swaps(s);
+    if (s->swap_timer) {
+        timer_free(s->swap_timer);
+    }
+    g_free(s->attach_cbs);
+}
+
 static const TypeInfo apple_modern_dcp_iop_info = {
     .name = TYPE_APPLE_MODERN_DCP_IOP,
     .parent = TYPE_APPLE_RTKIT,
     .instance_size = sizeof(AppleModernDcpIop),
     .class_size = sizeof(AppleModernDcpIopClass),
     .class_init = apple_modern_dcp_iop_class_init,
+    .instance_finalize = apple_modern_dcp_iop_finalize,
 };
 
 static void apple_modern_dcp_iop_register_types(void)

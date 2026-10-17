@@ -416,7 +416,7 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
         cursor += size;
     }
     if (tree->output) {
-        size_t added = chosen ? 2 + tree->chosen_sepfw_absent + tree->chosen_gpu_iouat_zero :
+        size_t added = chosen ? (size_t)2 + tree->chosen_sepfw_absent + tree->chosen_gpu_iouat_zero :
                        map ? tree->normal_count : vram ? 1 : aic ? 1 : 0;
         added += override_nodes_at(tree, path);
         added += tree->dart_pending;
