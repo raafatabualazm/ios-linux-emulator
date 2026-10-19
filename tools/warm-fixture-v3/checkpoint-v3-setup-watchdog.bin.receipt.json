@@ -1,0 +1,62 @@
+{
+  "status": "built and read-back verified; NOT boot-qualified",
+  "variant": "setup-watchdog",
+  "domain": "com.apple.springboard",
+  "single_variable": "only com.apple.springboard preferences differ from checkpoint-v2",
+  "inputs": {
+    "image": {
+      "path": "/home/kali/Desktop/Inferno-and-Darwin-VM/modern-emulator/evidence/features-20261017/codex-resume-heavy-re/warm-fixture-v1/image.dmg",
+      "sha256": "97e99ce7a509279a3f09a86788d301e4c8cee33e09ef6d687e0a100e9579effd",
+      "size": 17179869184
+    },
+    "checkpoint_v2": {
+      "path": "/home/kali/Desktop/Inferno-and-Darwin-VM/modern-emulator/evidence/features-20261017/codex-resume-heavy-re/warm-fixture-v2/checkpoint.bin",
+      "sha256": "1c89ce23fd2d4424ef8eb8a69e40cddad3b6b89346a9e541a164fda50334341d",
+      "size": 267967360,
+      "records": 64789
+    },
+    "candidate_plist": {
+      "path": "/home/kali/Desktop/Inferno-and-Darwin-VM/modern-emulator/evidence/features-20261017/codex-resume-heavy-re/warm-fixture-v3/candidates/com.apple.springboard.plist",
+      "sha256": "5b6788f2853f6cc9a7ab513be43830b8859f95cce6889e4075367887f77acc91",
+      "bytes": 215
+    }
+  },
+  "changes": [
+    {
+      "what": "data page (preference plist)",
+      "op": "add",
+      "index": 4153,
+      "image_offset": "0x37bf29000",
+      "old_payload_sha256": "63a20a7489a9f36e6b22228435341ac28d0b3ae01d8fb243403017356cd6a028",
+      "new_payload_sha256": "00e290f9f395c79b0dddd5aa65903d4841d172f1c997d11286fddc5e1923887a",
+      "old_file_bytes": 144,
+      "new_file_bytes": 215,
+      "old_file_sha256": "fdf4ad5ea57830e0db4381f38f868a62e6de255df25084e9787202609705f188",
+      "new_file_sha256": "5b6788f2853f6cc9a7ab513be43830b8859f95cce6889e4075367887f77acc91"
+    },
+    {
+      "what": "FS-tree leaf (j_dstream size and total_bytes_written)",
+      "op": "replace",
+      "index": 64169,
+      "image_offset": "0x3f0cac000",
+      "size_fields": [
+        "0xb9b",
+        "0xbb3"
+      ],
+      "old_value": 144,
+      "new_value": 215,
+      "old_payload_sha256": "560a80c28e03e6d8479538c3bb9446bce681d5b54ae05d94b535e138f3e2d10a",
+      "new_payload_sha256": "7c7a38a37ed02f919faf63590a22b843fc163c6e560e9bea22806230980b6040",
+      "old_checksum": "4a7abe24bbcfae6b",
+      "new_checksum": "ae79bed456d0ae2d",
+      "bytes_changed": 8
+    }
+  ],
+  "records_untouched_verified": 64788,
+  "output": {
+    "path": "/home/kali/Desktop/Inferno-and-Darwin-VM/modern-emulator/evidence/features-20261017/codex-resume-heavy-re/warm-fixture-v3/checkpoint-v3-setup-watchdog.bin",
+    "sha256": "9386d16a8b8c4097f83112cc702590ca578891d8ebd4e762ae82bd1ce3e9c3d8",
+    "size": 267971496,
+    "records": 64790
+  }
+}

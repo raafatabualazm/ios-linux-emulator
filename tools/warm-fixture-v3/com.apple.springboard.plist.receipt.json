@@ -1,0 +1,16 @@
+{
+  "status": "candidate-only; not applied or boot-qualified",
+  "kind": "setup-watchdog",
+  "domain": "com.apple.springboard",
+  "original": {
+    "path": "/home/kali/Desktop/Inferno-and-Darwin-VM/modern-emulator/evidence/features-20261017/codex-resume-heavy-re/warm-fixture-v3/originals/com.apple.springboard.plist",
+    "sha256": "fdf4ad5ea57830e0db4381f38f868a62e6de255df25084e9787202609705f188"
+  },
+  "changes": {
+    "FBLaunchWatchdogExceptions": {
+      "com.apple.purplebuddy": 180.0
+    }
+  },
+  "output": "/home/kali/Desktop/Inferno-and-Darwin-VM/modern-emulator/evidence/features-20261017/codex-resume-heavy-re/warm-fixture-v3/candidates/com.apple.springboard.plist",
+  "output_sha256": "5b6788f2853f6cc9a7ab513be43830b8859f95cce6889e4075367887f77acc91"
+}

@@ -1,0 +1,16 @@
+{
+  "status": "candidate-only; not applied or boot-qualified",
+  "kind": "setup-completion",
+  "domain": "com.apple.purplebuddy",
+  "original": {
+    "path": "/home/kali/Desktop/Inferno-and-Darwin-VM/modern-emulator/evidence/features-20261017/codex-resume-heavy-re/warm-fixture-v3/originals/com.apple.purplebuddy.plist",
+    "sha256": "1967bf14b6ac307f7762180013c511463d32dd60147664eb9f9c9c17b183334a"
+  },
+  "changes": {
+    "SetupDone": true,
+    "SetupVersion": 11,
+    "SetupFinishedAllSteps": true
+  },
+  "output": "/home/kali/Desktop/Inferno-and-Darwin-VM/modern-emulator/evidence/features-20261017/codex-resume-heavy-re/warm-fixture-v3/candidates/com.apple.purplebuddy.plist",
+  "output_sha256": "23148b0d5d7caf1c4fffc8b14c9bc57f8e2ed7f8af45dec6845832ef78fa2ead"
+}
