@@ -18,6 +18,12 @@
 #include "internals.h"
 #include "cpu-features.h"
 #include "system/tcg.h"
+#include "qemu/log.h"
+#include "qemu/main-loop.h"
+#include "qemu/timer.h"
+#include "hw/irq.h"
+#include "cpregs.h"
+#include "arm-powerctl.h"
 #include "modern-sysregs.h"
 
 #include "modern-sysregs.inc.c"
@@ -26,6 +32,10 @@ QEMU_BUILD_BUG_ON(APPLE_MODERN_OPAQUE_COUNT > APPLE_MODERN_OPAQUE_MAX);
 
 bool arm_apple_modern_sysregs_validate(ARMCPU *cpu, Error **errp)
 {
+    if (cpu->apple_modern_fast_ipi && !cpu->apple_modern_sysregs) {
+        error_setg(errp, "apple-modern-fast-ipi requires apple-modern-sysregs");
+        return false;
+    }
     if (!cpu->apple_modern_sysregs) {
         return true;
     }
@@ -75,10 +85,162 @@ static const ARMCPRegInfo apple_modern_pmc_regs[] = {
       .resetfn = apple_modern_pmc_reset },
 };
 
+/*
+ * Apple fast IPI, opt-in (apple-modern-fast-ipi). The semantics are the ones
+ * the iOS 27 24A437 kernel relies on, read off its instruction sequences:
+ *  - IPI_RR_LOCAL_EL1 / IPI_RR_GLOBAL_EL1: bits [7:0] are the target Aff0;
+ *    GLOBAL carries the target Aff1 in [23:16], LOCAL targets the sender's
+ *    own Aff1. Bits [29:28] are the type: 0 immediate, 1 retract, 2 deferred.
+ *    3 ("nowake") is never written by this kernel and is delivered as
+ *    immediate.
+ *  - IPI_SR: bit 0 is the pending fast IPI; bit 1 is a second, independent
+ *    source this model never raises. Each is write-1-to-clear, and the kernel
+ *    acknowledges before it handles the interrupt.
+ *  - IPI_CR: written, never read; its low 16 bits are the countdown, in
+ *    timebase ticks, after which the sender's deferred request is delivered
+ *    unless it is retracted first.
+ * Delivery sets the target's IPI_SR bit 0 and raises its
+ * apple_modern_fast_ipi_irq, which the board ORs into that core's FIQ. The
+ * registers are ARM_CP_IO, so every access below runs with the BQL held.
+ */
+#define APPLE_MODERN_IPI_SR_PENDING BIT_ULL(0)
+#define APPLE_MODERN_IPI_SR_W1C (BIT_ULL(0) | BIT_ULL(1))
+#define APPLE_MODERN_IPI_RR_RETRACT 1
+#define APPLE_MODERN_IPI_RR_DEFERRED 2
+
+/* Slots in the generated opaque store; the same for every CPU. */
+static size_t apple_modern_ipi_sr_slot, apple_modern_ipi_cr_slot;
+
+static size_t apple_modern_opaque_slot(const char *name)
+{
+    for (size_t i = 0; i < APPLE_MODERN_OPAQUE_COUNT; i++) {
+        if (!strcmp(apple_modern_sysreg_names[i], name)) {
+            return i;
+        }
+    }
+    g_assert_not_reached();
+}
+
+static void apple_modern_ipi_raise(ARMCPU *target)
+{
+    assert(bql_locked());
+    target->env.modern_sysregs.opaque[apple_modern_ipi_sr_slot] |=
+        APPLE_MODERN_IPI_SR_PENDING;
+    qemu_set_irq(target->apple_modern_fast_ipi_irq, 1);
+}
+
+static void apple_modern_ipi_deferred_expired(void *opaque)
+{
+    apple_modern_ipi_raise(opaque);
+}
+
+static void apple_modern_ipi_rr_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                      uint64_t value)
+{
+    ARMCPU *cpu = env_archcpu(env);
+    /* opc2 0 is the LOCAL register, 1 the GLOBAL one. */
+    uint64_t aff1 = ri->opc2 ? extract64(value, 16, 8)
+                             : extract64(cpu->mp_affinity, ARM_AFF1_SHIFT, 8);
+    uint64_t id = (aff1 << ARM_AFF1_SHIFT) | extract64(value, 0, 8);
+    CPUState *cs = arm_get_cpu_by_id(id);
+    ARMCPU *target;
+    uint64_t ticks;
+
+    raw_write(env, ri, value);
+    if (!cs) {
+        qemu_log_mask(LOG_GUEST_ERROR, "%s: no CPU with affinity 0x%" PRIx64
+                      "\n", ri->name, id);
+        return;
+    }
+    target = ARM_CPU(cs);
+    switch (extract64(value, 28, 2)) {
+    case APPLE_MODERN_IPI_RR_RETRACT:
+        timer_del(target->apple_modern_ipi_deferred);
+        break;
+    case APPLE_MODERN_IPI_RR_DEFERRED:
+        ticks = env->modern_sysregs.opaque[apple_modern_ipi_cr_slot] & 0xffff;
+        timer_mod_anticipate(target->apple_modern_ipi_deferred,
+                             qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                             ticks * gt_cntfrq_period_ns(cpu));
+        break;
+    default:
+        timer_del(target->apple_modern_ipi_deferred);
+        apple_modern_ipi_raise(target);
+        break;
+    }
+}
+
+static uint64_t apple_modern_ipi_sr_read(CPUARMState *env,
+                                         const ARMCPRegInfo *ri)
+{
+    return raw_read(env, ri);
+}
+
+static void apple_modern_ipi_sr_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                      uint64_t value)
+{
+    uint64_t sr = raw_read(env, ri) & ~(value & APPLE_MODERN_IPI_SR_W1C);
+
+    raw_write(env, ri, sr);
+    if (!(sr & APPLE_MODERN_IPI_SR_PENDING)) {
+        qemu_set_irq(env_archcpu(env)->apple_modern_fast_ipi_irq, 0);
+    }
+}
+
+static void apple_modern_ipi_sr_reset(CPUARMState *env, const ARMCPRegInfo *ri)
+{
+    ARMCPU *cpu = env_archcpu(env);
+
+    raw_write(env, ri, 0);
+    timer_del(cpu->apple_modern_ipi_deferred);
+    qemu_set_irq(cpu->apple_modern_fast_ipi_irq, 0);
+}
+
+/* The generated table, with the fast-IPI registers given behaviour. */
+static void apple_modern_define_fast_ipi_sysregs(ARMCPU *cpu)
+{
+    apple_modern_ipi_sr_slot = apple_modern_opaque_slot("IPI_SR");
+    apple_modern_ipi_cr_slot = apple_modern_opaque_slot("IPI_CR");
+    cpu->apple_modern_ipi_deferred =
+        timer_new_ns(QEMU_CLOCK_VIRTUAL, apple_modern_ipi_deferred_expired, cpu);
+    for (size_t i = 0; i < ARRAY_SIZE(apple_modern_sysregs); i++) {
+        ARMCPRegInfo ri = apple_modern_sysregs[i];
+
+        if (!strcmp(ri.name, "IPI_SR")) {
+            ri.type |= ARM_CP_IO;
+            ri.readfn = apple_modern_ipi_sr_read;
+            ri.writefn = apple_modern_ipi_sr_write;
+            ri.resetfn = apple_modern_ipi_sr_reset;
+        } else if (!strcmp(ri.name, "IPI_RR_LOCAL_EL1") ||
+                   !strcmp(ri.name, "IPI_RR_GLOBAL_EL1")) {
+            ri.type |= ARM_CP_IO;
+            ri.writefn = apple_modern_ipi_rr_write;
+        }
+        define_one_arm_cp_reg(cpu, &ri);
+    }
+}
+
+bool arm_apple_modern_fast_ipi_pending(ARMCPU *cpu)
+{
+    return cpu->apple_modern_fast_ipi &&
+           (cpu->env.modern_sysregs.opaque[apple_modern_ipi_sr_slot] &
+            APPLE_MODERN_IPI_SR_PENDING);
+}
+
+void arm_apple_modern_fast_ipi_raise(ARMCPU *cpu)
+{
+    assert(cpu->apple_modern_fast_ipi);
+    apple_modern_ipi_raise(cpu);
+}
+
 void arm_register_apple_modern_sysregs(ARMCPU *cpu)
 {
     assert(cpu->apple_modern_sysregs);
-    define_arm_cp_regs(cpu, apple_modern_sysregs);
+    if (cpu->apple_modern_fast_ipi) {
+        apple_modern_define_fast_ipi_sysregs(cpu);
+    } else {
+        define_arm_cp_regs(cpu, apple_modern_sysregs);
+    }
     define_arm_cp_regs(cpu, apple_modern_pmc_regs);
 }
 

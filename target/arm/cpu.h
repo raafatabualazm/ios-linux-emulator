@@ -1077,6 +1077,16 @@ struct ArchCPU {
      * behaviour is identical either way; only QEMU-side output changes.
      */
     bool apple_modern_el0_trap_trace;
+    /*
+     * Apple fast IPI delivery, default off; requires apple_modern_sysregs.
+     * Off, IPI_RR_LOCAL/GLOBAL, IPI_SR and IPI_CR stay read-as-written stores
+     * (the single-CPU behaviour). On, an IPI_RR write sets IPI_SR bit 0 of
+     * the target core (found by MPIDR affinity) and raises that core's
+     * apple_modern_fast_ipi_irq, which the board wires to its FIQ.
+     */
+    bool apple_modern_fast_ipi;
+    qemu_irq apple_modern_fast_ipi_irq;
+    QEMUTimer *apple_modern_ipi_deferred;
     /* Stable alias metadata for the opt-in modern register interface. */
     GPtrArray *modern_vhe_snapshots;
     /* CPU has security extension */

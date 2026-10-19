@@ -49,6 +49,7 @@
 #include "hw/arm/apple-silicon/dart-t8110.h"
 #include "hw/misc/apple-silicon/a7iop/core.h"
 #include "hw/qdev-properties.h"
+#include "hw/or-irq.h"
 #include "hw/arm/apple-silicon/modern-boot-display.h"
 #include "hw/arm/apple-silicon/modern-disp0.h"
 #include "hw/arm/apple-silicon/modern-large-ramdisk.h"
@@ -85,6 +86,19 @@ enum ModernAsset {
     ASSET_COUNT,
 };
 
+/*
+ * Cores the served ADT describes (/cpus/cpu0..cpu5). -smp N creates the first
+ * N of them; N == 1 is the long-standing single-CPU board, unchanged.
+ */
+#define APPLE_MODERN_MAX_CPUS 6
+/*
+ * SPTM's per-core reset entry is 0x388 below the LC_UNIXTHREAD entry the boot
+ * core starts at (0xfffffff0270a0000 vs 0xfffffff0270a0388 in the pinned
+ * 24A437 SPTM). Its reset body matches MPIDR[15:0] against the per-core table
+ * and parks an unknown core at a WFE loop with x0 = 0xdead.
+ */
+#define APPLE_MODERN_SPTM_RESET_ENTRY_OFFSET 0x388
+
 struct AppleModernMachine {
     MachineState parent_obj;
     char *paths[ASSET_COUNT];
@@ -94,6 +108,14 @@ struct AppleModernMachine {
     AppleModernBootMetadata metadata;
     AppleModernBoardRegions board_regions;
     ARMCPU *cpu;
+    /*
+     * cpus[0] is cpu, the boot core. With -smp N > 1, cpus[1..N-1] are reset
+     * powered off and start at secondary_entry when the guest enables their
+     * core; vCPU i is ADT /cpus/cpu<i>, with that node's reg as its MPIDR.
+     */
+    ARMCPU *cpus[APPLE_MODERN_MAX_CPUS];
+    unsigned cpu_count;
+    hwaddr secondary_entry;
     /* Created by the machine core (mc->default_ram_id), not by the board. */
     MemoryRegion *ram;
     MemoryRegion tag_memory, tag_ram;
@@ -440,9 +462,11 @@ static bool adt_region(AppleModernMachine *s, const char *name,
  * the device tree. Bank C bounds are also mirrored into the AMCC aperture, as
  * in Darwin. Values come from the prepared ADT, not from hardware
  * observation; these are compatibility stores with no enforcement effect.
- * Returns false on a missing region or absent compatibility register.
+ * Returns false on a missing region or absent compatibility register. The
+ * registers are per core; the AMCC mirror is done once, for the boot core.
  */
-static bool apply_adt_cpu_registers(AppleModernMachine *s)
+static bool apply_adt_cpu_registers(AppleModernMachine *s, ARMCPU *cpu,
+                                    bool mirror_amcc)
 {
     static const struct {
         const char *lwr, *upr, *first_region, *last_region;
@@ -464,24 +488,102 @@ static bool apply_adt_cpu_registers(AppleModernMachine *s)
             !adt_region(s, windows[i].last_region, &ignored, &last)) {
             return false;
         }
-        if (s->has_amcc && !strcmp(windows[i].lwr, "ACC_CTRR_C_LWR_EL2")) {
+        if (mirror_amcc && s->has_amcc &&
+            !strcmp(windows[i].lwr, "ACC_CTRR_C_LWR_EL2")) {
             apple_modern_amcc_set_bounds(&s->amcc, APPLE_MODERN_AMCC_BANK_C,
                                          first, last);
         }
-        if (!arm_apple_modern_sysreg_set(s->cpu, windows[i].lwr, first) ||
-            !arm_apple_modern_sysreg_set(s->cpu, windows[i].upr, last)) {
+        if (!arm_apple_modern_sysreg_set(cpu, windows[i].lwr, first) ||
+            !arm_apple_modern_sysreg_set(cpu, windows[i].upr, last)) {
             error_report("apple-modern missing compatibility register %s",
                          windows[i].lwr);
             return false;
         }
     }
     /* Last 1/32nd of memory, moved forward by another 1/32nd (Darwin). */
-    if (!arm_apple_modern_sysreg_set(s->cpu, "TAG_OFFSET_EL2",
+    if (!arm_apple_modern_sysreg_set(cpu, "TAG_OFFSET_EL2",
             BIT_ULL(63) | (s->components.dram_base + ram - (2 * ram) / 32))) {
         error_report("apple-modern missing TAG_OFFSET_EL2");
         return false;
     }
     return true;
+}
+
+/*
+ * Per-core state a secondary needs before SPTM runs on it: the same register
+ * seeding and FP/SIMD enables the boot core gets in modern_reset().
+ */
+static bool modern_secondary_setup(AppleModernMachine *s, ARMCPU *cpu)
+{
+    CPUARMState *env = &cpu->env;
+
+    if (!apply_adt_cpu_registers(s, cpu, false)) {
+        return false;
+    }
+    env->cp15.cpacr_el1 |= 3U << 20;
+    env->cp15.cptr_el[2] &= ~(1U << 10);
+    env->cp15.cptr_el[2] |= 3U << 20;
+    arm_rebuild_hflags(env);
+    return true;
+}
+
+/* Machine reset leaves a secondary powered off (start-powered-off). */
+static void modern_secondary_reset(AppleModernMachine *s, ARMCPU *cpu)
+{
+    cpu_reset(CPU(cpu));
+    assert(arm_highest_el(&cpu->env) == 2);
+    if (!modern_secondary_setup(s, cpu)) {
+        exit(EXIT_FAILURE);
+    }
+}
+
+/*
+ * Runs on the secondary's own vCPU thread with the BQL held: a cold reset, as
+ * when PMGR powers the core, then SPTM's per-core reset entry.
+ */
+static void modern_cpu_on_work(CPUState *cs, run_on_cpu_data data)
+{
+    AppleModernMachine *s = data.host_ptr;
+    ARMCPU *cpu = ARM_CPU(cs);
+    bool ipi = arm_apple_modern_fast_ipi_pending(cpu);
+
+    cpu_reset(cs);
+    if (!modern_secondary_setup(s, cpu)) {
+        error_report("apple-modern: cannot seed CPU %d, left powered off",
+                     cs->cpu_index);
+        return;
+    }
+    if (ipi) {
+        arm_apple_modern_fast_ipi_raise(cpu);
+    }
+    cpu_set_pc(cs, s->secondary_entry);
+    cs->halted = 0;
+    assert(bql_locked());
+    cpu->power_state = PSCI_ON;
+}
+
+/*
+ * Power vCPU index on (the ADT cpu-id the PMGR core mask is indexed by). A
+ * core with no vCPU behind it (index >= -smp) is ignored, as a single-CPU
+ * board ignores every secondary; a core already on is left alone.
+ */
+static G_GNUC_UNUSED void modern_cpu_release(AppleModernMachine *s,
+                                             unsigned index)
+{
+    ARMCPU *cpu;
+
+    assert(bql_locked());
+    if (!index || index >= s->cpu_count) {
+        return;
+    }
+    cpu = s->cpus[index];
+    if (cpu->power_state != PSCI_OFF) {
+        return;
+    }
+    cpu->power_state = PSCI_ON_PENDING;
+    qemu_log_mask(LOG_UNIMP, "apple-modern: releasing CPU %u at 0x%" HWADDR_PRIx
+                  "\n", index, s->secondary_entry);
+    async_run_on_cpu(CPU(cpu), modern_cpu_on_work, RUN_ON_CPU_HOST_PTR(s));
 }
 
 static void modern_reset(void *opaque)
@@ -496,7 +598,7 @@ static void modern_reset(void *opaque)
     if (s->has_amcc) {
         apple_modern_amcc_reset(&s->amcc);
     }
-    if (!apply_adt_cpu_registers(s)) {
+    if (!apply_adt_cpu_registers(s, s->cpu, true)) {
         exit(EXIT_FAILURE);
     }
     env->pc = s->metadata.layout.sptm_entry_physical;
@@ -510,6 +612,9 @@ static void modern_reset(void *opaque)
     env->cp15.cptr_el[2] |= 3U << 20;
     cs->halted = s->prepare_only;
     arm_rebuild_hflags(env);
+    for (unsigned i = 1; i < s->cpu_count; i++) {
+        modern_secondary_reset(s, s->cpus[i]);
+    }
 }
 
 static bool uart_address(AppleModernBlob dtree, uint64_t *address,
@@ -3306,6 +3411,136 @@ static bool apply_image_patches(AppleModernMachine *s, Error **errp)
     return true;
 }
 
+/* MPIDR affinity of /cpus/cpu<index>: its reg, which the kernel targets. */
+static uint64_t modern_cpu_affinity(AppleModernMachine *s, unsigned index)
+{
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    g_autofree char *path = g_strdup_printf("/cpus/cpu%u", index);
+    AppleModernBlob reg;
+    Error *err = NULL;
+
+    if (!apple_modern_adt_property(dtree, path, "reg", &reg, &err)) {
+        error_report_err(err);
+        exit(EXIT_FAILURE);
+    }
+    if (reg.size != 4) {
+        error_report("apple-modern: %s reg is %zu bytes, not 4", path,
+                     reg.size);
+        exit(EXIT_FAILURE);
+    }
+    return ldl_le_p(reg.data);
+}
+
+/*
+ * vCPU index is ADT /cpus/cpu<index>. A single CPU is configured exactly as the
+ * board always has; with more, each core also takes its ADT affinity and fast
+ * IPIs, and the secondaries are created powered off.
+ */
+static ARMCPU *modern_create_cpu(AppleModernMachine *s, MachineState *machine,
+                                 unsigned index)
+{
+    ARMCPU *cpu = ARM_CPU(object_new(machine->cpu_type));
+    g_autofree char *name = index ? g_strdup_printf("cpu%u", index)
+                                  : g_strdup("cpu");
+
+    object_property_add_child(OBJECT(s), name, OBJECT(cpu));
+    object_unref(OBJECT(cpu));
+    object_property_set_bool(OBJECT(cpu), "has_el2", true, &error_fatal);
+    object_property_set_bool(OBJECT(cpu), "has_el3", false, &error_fatal);
+    object_property_set_bool(OBJECT(cpu), "pauth-noop", false, &error_fatal);
+    object_property_set_bool(OBJECT(cpu), "apple-modern-gxf", true, &error_fatal);
+    object_property_set_bool(OBJECT(cpu), "apple-modern-timers", true,
+                              &error_fatal);
+    object_property_set_bool(OBJECT(cpu), "apple-modern-guarded", true,
+                              &error_fatal);
+    object_property_set_bool(OBJECT(cpu), "apple-modern-sprr", true,
+                              &error_fatal);
+    object_property_set_bool(OBJECT(cpu), "apple-modern-apsts", true,
+                              &error_fatal);
+    if (s->pauth_compat) {
+        object_property_set_bool(OBJECT(cpu), "apple-modern-pauth-compat",
+                                 true, &error_fatal);
+        if (!index) {
+            warn_report("apple-modern: pointer authentication sign/authenticate "
+                        "are no-ops (opt-in pauth-compat; compatibility, not "
+                        "Apple fidelity)");
+        }
+    }
+    if (s->el0_trap_trace) {
+        object_property_set_bool(OBJECT(cpu),
+                                 "apple-modern-el0-trap-trace", true,
+                                 &error_fatal);
+        if (!index) {
+            warn_report("apple-modern: EL0 BRK traps are reported on the QEMU "
+                        "side (opt-in el0-trap-trace; observability only, "
+                        "guest behaviour is unchanged)");
+        }
+    }
+    object_property_set_bool(OBJECT(cpu), "apple-modern-sysregs", true,
+                              &error_fatal);
+    if (s->cpu_count > 1) {
+        object_property_set_uint(OBJECT(cpu), "mp-affinity",
+                                 modern_cpu_affinity(s, index), &error_fatal);
+        object_property_set_bool(OBJECT(cpu), "start-powered-off", index != 0,
+                                 &error_fatal);
+        object_property_set_bool(OBJECT(cpu), "apple-modern-fast-ipi", true,
+                                 &error_fatal);
+    }
+    object_property_set_uint(OBJECT(cpu), "cntfrq", s->timebase_frequency,
+                             &error_fatal);
+    object_property_set_link(OBJECT(cpu), "memory", OBJECT(get_system_memory()),
+                             &error_fatal);
+    if (s->mte) {
+        if (!index) {
+            memory_region_init(&s->tag_memory, OBJECT(s), "apple-modern.tags",
+                               UINT64_MAX / 32);
+            memory_region_init_ram(&s->tag_ram, NULL, "apple-modern.tag-ram",
+                                   machine->ram_size / 32, &error_fatal);
+            memory_region_add_subregion(&s->tag_memory,
+                                        s->components.dram_base / 32,
+                                        &s->tag_ram);
+        }
+        object_property_set_link(OBJECT(cpu), "tag-memory",
+                                 OBJECT(&s->tag_memory), &error_fatal);
+    }
+    /*
+     * As in Darwin-VM: limit SME streaming vector lengths to 128/256/512
+     * bits. With QEMU's max (2048-bit) SVL, XNU's per-thread ZA save area
+     * exceeds its zone element limit ("zone_create: element size too large:
+     * 74328") and the kernel panics during early zone setup.
+     */
+    cpu->sme_vq.supported = 0x0b;
+    qdev_realize(DEVICE(cpu), NULL, &error_fatal);
+    return cpu;
+}
+
+/*
+ * The EL2 virtual timer is the core's FIQ. With SMP the core's fast IPI is a
+ * second FIQ source, so the two are ORed; a single CPU keeps the direct wire.
+ */
+static void modern_wire_cpu_fiq(AppleModernMachine *s, unsigned index)
+{
+    DeviceState *cpu = DEVICE(s->cpus[index]);
+    g_autofree char *name = NULL;
+    Object *gate;
+
+    if (s->cpu_count == 1) {
+        qdev_connect_gpio_out(cpu, GTIMER_HYPVIRT,
+                              qdev_get_gpio_in(cpu, ARM_CPU_FIQ));
+        return;
+    }
+    name = g_strdup_printf("cpu%u-fiq", index);
+    gate = object_new(TYPE_OR_IRQ);
+    object_property_add_child(OBJECT(s), name, gate);
+    object_unref(gate);
+    object_property_set_int(gate, "num-lines", 2, &error_fatal);
+    qdev_realize(DEVICE(gate), NULL, &error_fatal);
+    qdev_connect_gpio_out(DEVICE(gate), 0, qdev_get_gpio_in(cpu, ARM_CPU_FIQ));
+    qdev_connect_gpio_out(cpu, GTIMER_HYPVIRT, qdev_get_gpio_in(DEVICE(gate), 0));
+    s->cpus[index]->apple_modern_fast_ipi_irq =
+        qdev_get_gpio_in(DEVICE(gate), 1);
+}
+
 static void modern_init(MachineState *machine)
 {
     AppleModernMachine *s = APPLE_MODERN_MACHINE(machine);
@@ -3318,10 +3553,12 @@ static void modern_init(MachineState *machine)
     size_t asset_budget = GiB;
     Error *error = NULL;
 
-    if (machine->smp.cpus != 1 || machine->kernel_filename ||
-        machine->dtb || machine->initrd_filename) {
-        error_report("apple-modern uses one CPU and explicit decoded machine "
-                     "assets; -kernel/-dtb/-initrd are not accepted");
+    if (machine->smp.cpus < 1 || machine->smp.cpus > APPLE_MODERN_MAX_CPUS ||
+        machine->smp.max_cpus != machine->smp.cpus ||
+        machine->kernel_filename || machine->dtb || machine->initrd_filename) {
+        error_report("apple-modern uses 1 to %d CPUs, all present at boot, and "
+                     "explicit decoded machine assets; -kernel/-dtb/-initrd are "
+                     "not accepted", APPLE_MODERN_MAX_CPUS);
         exit(EXIT_FAILURE);
     }
     if (s->large_ramdisk && !s->paths[ASSET_RAMDISK]) {
@@ -4117,62 +4354,27 @@ static void modern_init(MachineState *machine)
         error_report_err(error);
         exit(EXIT_FAILURE);
     }
-    s->cpu = ARM_CPU(object_new(machine->cpu_type));
-    object_property_add_child(OBJECT(s), "cpu", OBJECT(s->cpu));
-    object_unref(OBJECT(s->cpu));
-    object_property_set_bool(OBJECT(s->cpu), "has_el2", true, &error_fatal);
-    object_property_set_bool(OBJECT(s->cpu), "has_el3", false, &error_fatal);
-    object_property_set_bool(OBJECT(s->cpu), "pauth-noop", false, &error_fatal);
-    object_property_set_bool(OBJECT(s->cpu), "apple-modern-gxf", true, &error_fatal);
-    object_property_set_bool(OBJECT(s->cpu), "apple-modern-timers", true,
-                              &error_fatal);
-    object_property_set_bool(OBJECT(s->cpu), "apple-modern-guarded", true,
-                              &error_fatal);
-    object_property_set_bool(OBJECT(s->cpu), "apple-modern-sprr", true,
-                              &error_fatal);
-    object_property_set_bool(OBJECT(s->cpu), "apple-modern-apsts", true,
-                              &error_fatal);
-    if (s->pauth_compat) {
-        object_property_set_bool(OBJECT(s->cpu), "apple-modern-pauth-compat",
-                                 true, &error_fatal);
-        warn_report("apple-modern: pointer authentication sign/authenticate "
-                    "are no-ops (opt-in pauth-compat; compatibility, not "
-                    "Apple fidelity)");
+    s->cpu_count = machine->smp.cpus;
+    for (unsigned i = 0; i < s->cpu_count; i++) {
+        s->cpus[i] = modern_create_cpu(s, machine, i);
     }
-    if (s->el0_trap_trace) {
-        object_property_set_bool(OBJECT(s->cpu),
-                                 "apple-modern-el0-trap-trace", true,
-                                 &error_fatal);
-        warn_report("apple-modern: EL0 BRK traps are reported on the QEMU side "
-                    "(opt-in el0-trap-trace; observability only, guest "
-                    "behaviour is unchanged)");
+    s->cpu = s->cpus[0];
+    for (unsigned i = 0; i < s->cpu_count; i++) {
+        modern_wire_cpu_fiq(s, i);
     }
-    object_property_set_bool(OBJECT(s->cpu), "apple-modern-sysregs", true,
-                              &error_fatal);
-    object_property_set_uint(OBJECT(s->cpu), "cntfrq", s->timebase_frequency,
-                             &error_fatal);
-    object_property_set_link(OBJECT(s->cpu), "memory", OBJECT(get_system_memory()),
-                             &error_fatal);
-    if (s->mte) {
-        memory_region_init(&s->tag_memory, OBJECT(s), "apple-modern.tags",
-                           UINT64_MAX / 32);
-        memory_region_init_ram(&s->tag_ram, NULL, "apple-modern.tag-ram",
-                               machine->ram_size / 32, &error_fatal);
-        memory_region_add_subregion(&s->tag_memory, s->components.dram_base / 32,
-                                    &s->tag_ram);
-        object_property_set_link(OBJECT(s->cpu), "tag-memory",
-                                 OBJECT(&s->tag_memory), &error_fatal);
+    if (s->cpu_count > 1) {
+        s->secondary_entry = s->metadata.layout.sptm_entry_physical -
+                             APPLE_MODERN_SPTM_RESET_ENTRY_OFFSET;
+        warn_report("apple-modern: opt-in SMP, %u cores; secondaries start "
+                    "powered off at 0x%" HWADDR_PRIx ", fast IPIs are "
+                    "delivered, every AIC interrupt still goes to CPU0",
+                    s->cpu_count, s->secondary_entry);
+        if (!s->boot_command_line || !strstr(s->boot_command_line, "cpus=")) {
+            warn_report("apple-modern: boot-command-line has no cpus=%u; the "
+                        "kernel will also try to start the ADT cores that "
+                        "have no vCPU", s->cpu_count);
+        }
     }
-    /*
-     * As in Darwin-VM: limit SME streaming vector lengths to 128/256/512
-     * bits. With QEMU's max (2048-bit) SVL, XNU's per-thread ZA save area
-     * exceeds its zone element limit ("zone_create: element size too large:
-     * 74328") and the kernel panics during early zone setup.
-     */
-    s->cpu->sme_vq.supported = 0x0b;
-    qdev_realize(DEVICE(s->cpu), NULL, &error_fatal);
-    qdev_connect_gpio_out(DEVICE(s->cpu), GTIMER_HYPVIRT,
-                          qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_FIQ));
     if (s->aic) {
         sysbus_connect_irq(SYS_BUS_DEVICE(s->aic), 0,
                            qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_IRQ));
@@ -4660,7 +4862,7 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     MachineClass *mc = MACHINE_CLASS(oc);
     mc->desc = "Modern Apple boot experiment (optional boot framebuffer)";
     mc->init = modern_init;
-    mc->max_cpus = 1;
+    mc->max_cpus = APPLE_MODERN_MAX_CPUS;
     mc->default_ram_size = 8 * GiB;
     /*
      * Same name as the region the board used to create itself, so the
