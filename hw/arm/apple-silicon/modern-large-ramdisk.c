@@ -16,6 +16,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <glib.h>
 
 #include "hw/arm/apple-silicon/modern-large-ramdisk.h"
 
@@ -62,6 +63,100 @@ static uint64_t round_up(uint64_t value, uint64_t alignment)
 {
     /* Callers bound value well below UINT64_MAX - alignment. */
     return (value + alignment - 1) & ~(alignment - 1);
+}
+
+static uint64_t checkpoint_u64(const uint8_t *p)
+{
+    uint64_t value = 0;
+    for (unsigned i = 0; i < 8; i++) {
+        value |= (uint64_t)p[i] << (8 * i);
+    }
+    return value;
+}
+
+static bool checkpoint_hash(const uint8_t *data, uint64_t size,
+                            const uint8_t expected[32])
+{
+    GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
+    uint8_t actual[32];
+    gsize length = sizeof(actual);
+    while (size) {
+        gsize chunk = MIN(size, UINT64_C(8) << 20);
+        g_checksum_update(sum, data, chunk);
+        data += chunk;
+        size -= chunk;
+    }
+    g_checksum_get_digest(sum, actual, &length);
+    g_checksum_free(sum);
+    return length == sizeof(actual) && !memcmp(actual, expected, sizeof(actual));
+}
+
+bool apple_modern_large_ramdisk_checkpoint(AppleModernLargeRamdisk *map,
+                                          const char *path, unsigned *applied,
+                                          Error **errp)
+{
+    const uint64_t header = 56, record = 4136, page = 4096;
+    struct stat before, after;
+    uint8_t *bundle = MAP_FAILED;
+    uint64_t count, previous_end = 0;
+    int fd = -1;
+    bool ok = false;
+    if (applied) {
+        *applied = 0;
+    }
+    if (!map || !map->host || !path) {
+        return fail(errp, "missing mapped ramdisk/checkpoint", path ? path : "");
+    }
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0 || fstat(fd, &before) || !S_ISREG(before.st_mode) ||
+        before.st_size < 0 || (uint64_t)before.st_size < header ||
+        (uint64_t)before.st_size > (UINT64_C(2) << 30)) {
+        fail(errp, "invalid checkpoint file", path);
+        goto done;
+    }
+    bundle = mmap(NULL, before.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (bundle == MAP_FAILED) {
+        fail(errp, "cannot map checkpoint", path);
+        goto done;
+    }
+    count = checkpoint_u64(bundle + 48);
+    if (memcmp(bundle, "IMCOW001", 8) || checkpoint_u64(bundle + 8) != map->file_size ||
+        count > 524288 || header + count * record != (uint64_t)before.st_size ||
+        !checkpoint_hash(map->host, map->file_size, bundle + 16)) {
+        fail(errp, "checkpoint header/source hash mismatch", path);
+        goto done;
+    }
+    for (uint64_t i = 0; i < count; i++) {
+        const uint8_t *entry = bundle + header + i * record;
+        uint64_t offset = checkpoint_u64(entry);
+        if (offset % page || offset < previous_end || offset > map->file_size ||
+            page > map->file_size - offset ||
+            !checkpoint_hash(entry + 40, page, entry + 8)) {
+            fail(errp, "checkpoint page hash/range mismatch", path);
+            goto done;
+        }
+        previous_end = offset + page;
+    }
+    if (fstat(fd, &after) || !same_file(&before, &after)) {
+        fail(errp, "checkpoint changed during validation", path);
+        goto done;
+    }
+    for (uint64_t i = 0; i < count; i++) {
+        const uint8_t *entry = bundle + header + i * record;
+        memcpy(map->host + checkpoint_u64(entry), entry + 40, page);
+    }
+    if (applied) {
+        *applied = count;
+    }
+    ok = true;
+done:
+    if (bundle != MAP_FAILED) {
+        munmap(bundle, before.st_size);
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
+    return ok;
 }
 
 bool apple_modern_large_ramdisk_map(const char *path,
