@@ -316,7 +316,7 @@ typedef struct FixedWindow {
     unsigned nregs;         /* 0: every 4-byte slot of the window is a register */
     uint16_t regs[8];       /* else: register offsets inside the window (multiples of 4) */
 } FixedWindow;
-#define DPE_CHANNEL(n) {32, 0x2400 + 0x400 * (n), 0x310, 5, {0, 0x200, 0x300, 0x304, 0x308}}  /* 0x310 covers guest 64-bit/seqlock at +0x300/+0x308 (MEASURED GPA 0x30020a708) */
+#define DPE_CHANNEL(n) {32, 0x2400 + 0x400 * (n), 0x310, 6, {0, 0x200, 0x300, 0x304, 0x308, 0x30c}}  /* seqlock at +0x308 reads +0x308 and +0x30c (MEASURED REJECTED 0x30020a70c) */
 static const FixedWindow fixed_windows[] = {
     {4, 0x8, 0x20, 0, {0}},
     {34, 0x18200, 0x80, 0, {0}},

@@ -60,7 +60,7 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
  * and the vector-config array, windows 3..5 (tags 0x101..0x103). */
 #define PTD_BASE UINT64_C(0x3003c0000)
 #define FIXED_WINDOWS 49
-#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 5 + 2 + 47 + 7 + 1 + 2 + 1 + 2 + 2 + 20 + 2)
+#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 5 + 2 + 56 + 7 + 1 + 2 + 1 + 2 + 2 + 20 + 2)
 /* Five ADT cluster-control registers (reg_index 28): window 6, tag 0x104. */
 #define CLUSTER_BASE UINT64_C(0x300780000)
 #define CLUSTER_TAG 0x104
@@ -163,7 +163,7 @@ static bool expected_valid(unsigned group, uint64_t offset)
     if (group >= DPE_TAG) {
         unsigned n = group - DPE_TAG;
         return n == 7 ? (offset == 0 || offset == 0x100)
-                      : (offset == 0 || offset == 0x200 || offset == 0x300 || offset == 0x304 || offset == 0x308);
+                      : (offset == 0 || offset == 0x200 || offset == 0x300 || offset == 0x304 || offset == 0x308 || offset == 0x30c);
     }
     if (group > WAKE_TAG && group <= WAKE_TAG + 3) {
         return offset < PTD[group - WAKE_TAG - 1].size;
@@ -674,10 +674,10 @@ static void core_stock(AppleModernBlob tree)
     CHECK(apple_modern_pmgr_storage_core_read(&core, 9, 0, 4, &v) && v == 0);
     CHECK(apple_modern_pmgr_storage_core_read(&core, 9, 0x300, 4, &v) && v == 0);
     CHECK(!apple_modern_pmgr_storage_core_read(&core, 9, 0x100, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 9, 0x204, 4, &v));
-    CHECK(apple_modern_pmgr_storage_core_read(&core, 9, 0x304, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 9, 0x308, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 9, 0x310, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 9, 0x200, 8, &v));
+    CHECK(apple_modern_pmgr_storage_core_read(&core, 9, 0x304, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 9, 0x308, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 9, 0x30c, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 9, 0x310, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 9, 0x200, 8, &v));
     CHECK(apple_modern_pmgr_storage_core_read(&core, 16, 0, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 16, 0x100, 4, &v));
     CHECK(!apple_modern_pmgr_storage_core_read(&core, 16, 0x200, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 16, 4, 4, &v));
-    CHECK(apple_modern_pmgr_storage_core_read(&core, 18, 0x300, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 18, 0x304, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 18, 0x308, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 18, 0x310, 4, &v));
+    CHECK(apple_modern_pmgr_storage_core_read(&core, 18, 0x300, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 18, 0x304, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 18, 0x308, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 18, 0x30c, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 18, 0x310, 4, &v));
     /* PMC static-voter vote registers: ApplePMC::_enableStaticVoterInterface, for each
      * of the agents PMP (bit 0), CLPC (bit 1) and AP (bit 3) and each rail 0..3 of the
      * agent's mask, reads the rail's register, sets the agent's bit and writes it back
