@@ -357,11 +357,15 @@ static const FixedWindow fixed_windows[] = {
  * Append after the existing groups/windows to preserve their identities. */
 #define ACC_COUNTER_TAG_BASE 0x200
 static const FixedWindow acc_counter_windows[] = {
-    {5, 0x400, 0x40, 0, {0}}, {5, 0x500, 0x40, 0, {0}},
-    {5, 0x680, 0x1d0, 0, {0}}, {5, 0x10e8, 0x40, 0, {0}},
-    {5, 0x11e8, 0x40, 0, {0}},
-    {14, 0x400, 0x90, 0, {0}}, {14, 0x500, 0x90, 0, {0}},
-    {14, 0x680, 0x1d0, 0, {0}}, {14, 0x11e8, 0x90, 0, {0}},
+    /*
+     * E/P ACC CPM_PWRCTL are ADT reg[5]/reg[14] size 0x2000. ApplePMGR maps
+     * the whole bank (string E_ACC_CPM_PWRCTL); sparse +0x400/+0x500/… windows
+     * left +0x20 unmapped and the guest hung on ldr from that VA (MEASURED
+     * 2026-10-20 smp2 stall PC 0xfffffff0292ae8a0, PA 0x210e20020). Serve the
+     * full 0x2000 so every offset in the IOMemoryDescriptor responds.
+     */
+    {5, 0x0, 0x2000, 0, {0}},
+    {14, 0x0, 0x2000, 0, {0}},
     /* Slotsbc8/bd0: per-core counter pairs9000/9008 (table0x77b2038).
      * CPU0's pair is already inside the board's cpu-impl-reg RAM.
      * Slotsbd8/be0: cluster pair8000/8008; E is already inside cpm-impl
@@ -373,9 +377,7 @@ static const FixedWindow acc_counter_windows[] = {
     {20, 0x9000, 0x10, 0, {0}}, {16, 0x8000, 0x10, 0, {0}},
 };
 static const uint64_t acc_counter_banks[] = {
-    UINT64_C(0x210e20000), UINT64_C(0x210e20000), UINT64_C(0x210e20000),
-    UINT64_C(0x210e20000), UINT64_C(0x210e20000),
-    UINT64_C(0x211e20000), UINT64_C(0x211e20000), UINT64_C(0x211e20000),
+    UINT64_C(0x210e20000),
     UINT64_C(0x211e20000),
     UINT64_C(0x210150000), UINT64_C(0x210250000), UINT64_C(0x210350000),
     UINT64_C(0x211050000), UINT64_C(0x211150000), UINT64_C(0x211e40000),
