@@ -138,6 +138,8 @@ struct AppleModernMachine {
     bool img4_ignition_compat;
     bool trustcache_v2;
     bool md0_width_compat;
+    /* Back every ADT core's CPU register windows, not just the boot core's. */
+    bool all_cpu_register_windows;
     bool root_rw_compat;
     bool txm_sc_compat;
     bool iouc_sandbox_compat;
@@ -4263,10 +4265,20 @@ static void modern_init(MachineState *machine)
     if (!apple_modern_board_regions_build(s->components.dtree,
                                           s->components.dram_base,
                                           s->components.dram_size,
-                                          &exclusion, 1, &s->board_regions,
+                                          &exclusion, 1,
+                                          s->all_cpu_register_windows
+                                              ? APPLE_MODERN_BOARD_REGIONS_ALL_CORES
+                                              : APPLE_MODERN_BOARD_REGIONS_BOOT_CPU,
+                                          &s->board_regions,
                                           &error)) {
         error_report_err(error);
         exit(EXIT_FAILURE);
+    }
+    if (s->all_cpu_register_windows) {
+        warn_report("apple-modern: opt-in CPU register RAM for every ADT core: "
+                    "%zu windows, %" PRIu64 " bytes (zeroed compatibility "
+                    "storage, no hardware side effects)",
+                    s->board_regions.count, s->board_regions.total_size);
     }
     /*
      * mc->default_ram_id makes the machine core own the DRAM region: by
@@ -4658,6 +4670,7 @@ ASSET_PROPERTY(cryptex_trustcache, ASSET_CRYPTEX_TC)
 BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
 BOOL_PROPERTY(trustcache_v2, trustcache_v2)
 BOOL_PROPERTY(md0_width_compat, md0_width_compat)
+BOOL_PROPERTY(all_cpu_register_windows, all_cpu_register_windows)
 BOOL_PROPERTY(root_rw_compat, root_rw_compat)
 BOOL_PROPERTY(txm_sc_compat, txm_sc_compat)
 BOOL_PROPERTY(iouc_sandbox_compat, iouc_sandbox_compat)
@@ -5033,6 +5046,9 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "md0-width-compat",
                                    get_md0_width_compat,
                                    set_md0_width_compat);
+    object_class_property_add_bool(oc, "all-cpu-register-windows",
+                                   get_all_cpu_register_windows,
+                                   set_all_cpu_register_windows);
     object_class_property_add_bool(oc, "root-rw-compat",
                                    get_root_rw_compat,
                                    set_root_rw_compat);

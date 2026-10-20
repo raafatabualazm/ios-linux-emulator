@@ -85,7 +85,8 @@ static void rejected(const char *name, AppleModernBlob tree,
     Error *error = NULL;
     memset(&output, 0x5a, sizeof(output));
     assert(!apple_modern_board_regions_build(tree, dram_base, dram_size,
-                                             excluded, count, &output, &error));
+                                             excluded, count, APPLE_MODERN_BOARD_REGIONS_BOOT_CPU,
+                                             &output, &error));
     assert(error && !memcmp(&output, &zero, sizeof(output)));
     printf("REJECT %s: %s\n", name, error->message);
     error_free(error);
@@ -104,7 +105,8 @@ static void accepted(AppleModernBlob tree, const AppleModernAddressRange *exclud
     assert(before);
     memcpy(before, tree.data, tree.size);
     assert(apple_modern_board_regions_build(tree, UINT64_C(1) << 40,
-               UINT64_C(8) << 30, excluded, count, &output, &error));
+               UINT64_C(8) << 30, excluded, count, APPLE_MODERN_BOARD_REGIONS_BOOT_CPU,
+               &output, &error));
     assert(!error && output.count == 2 && output.total_size == 0x15020);
     assert(!strcmp(output.windows[0].name, "apple-modern.cpu-impl-reg"));
     assert(!strcmp(output.windows[1].name, "apple-modern.cpm-impl-reg"));
@@ -121,6 +123,43 @@ static void accepted(AppleModernBlob tree, const AppleModernAddressRange *exclud
                    (unsigned long long)output.windows[i].size);
         }
     }
+    checks++;
+}
+
+/*
+ * All-cores policy on the real tree: every /cpus/cpuN cpu-impl-reg, plus one
+ * window per distinct cpm-impl-reg (cpu0-3 share one, cpu4-5 the other).
+ */
+static void all_cores(AppleModernBlob tree)
+{
+    AppleModernBoardRegions output;
+    Error *error = NULL;
+    uint64_t expected_total = 0;
+
+    assert(apple_modern_board_regions_build(tree, UINT64_C(1) << 40,
+               UINT64_C(8) << 30, NULL, 0,
+               APPLE_MODERN_BOARD_REGIONS_ALL_CORES, &output, &error));
+    assert(!error);
+    assert(output.count == 8);
+    for (size_t i = 0; i < output.count; i++) {
+        expected_total += output.windows[i].size;
+        for (size_t j = 0; j < i; j++) {
+            /* Deduplicated: no window may repeat or overlap another. */
+            assert(!(output.windows[i].physical_address ==
+                     output.windows[j].physical_address &&
+                     output.windows[i].size == output.windows[j].size));
+            assert(!(output.windows[i].physical_address <
+                     output.windows[j].physical_address + output.windows[j].size &&
+                     output.windows[j].physical_address <
+                     output.windows[i].physical_address + output.windows[i].size));
+            assert(strcmp(output.windows[i].name, output.windows[j].name));
+        }
+        printf("ALLCORE %s 0x%llx 0x%llx\n", output.windows[i].name,
+               (unsigned long long)output.windows[i].physical_address,
+               (unsigned long long)output.windows[i].size);
+    }
+    assert(output.total_size == expected_total);
+    assert(output.total_size == 0x4e080);
     checks++;
 }
 
@@ -196,7 +235,7 @@ int main(int argc, char **argv)
     put64(f.bytes + f.cpu_value + 8, APPLE_MODERN_MAX_REGISTER_WINDOW);
     put64(f.bytes + f.cpm_value + 8, APPLE_MODERN_MAX_REGISTER_WINDOW);
     assert(apple_modern_board_regions_build(blob(&f), UINT64_C(1) << 40,
-               UINT64_C(8) << 30, NULL, 0, &output, &error));
+               UINT64_C(8) << 30, NULL, 0, APPLE_MODERN_BOARD_REGIONS_BOOT_CPU, &output, &error));
     assert(!error && output.count == 2 &&
            output.total_size == APPLE_MODERN_MAX_REGISTER_TOTAL);
     checks++;
@@ -204,7 +243,7 @@ int main(int argc, char **argv)
     {
         Fixture saved = f;
         assert(!apple_modern_board_regions_build(blob(&f), UINT64_C(1) << 40,
-                 UINT64_C(8) << 30, NULL, 0,
+                 UINT64_C(8) << 30, NULL, 0, APPLE_MODERN_BOARD_REGIONS_BOOT_CPU,
                  (AppleModernBoardRegions *)f.bytes, &error));
         assert(error && !memcmp(&f, &saved, sizeof(f)));
         error_free(error); error = NULL; checks++;
@@ -214,16 +253,21 @@ int main(int argc, char **argv)
         AppleModernBoardRegions saved = output;
         assert(!apple_modern_board_regions_build(blob(&f), UINT64_C(1) << 40,
                  UINT64_C(8) << 30, (AppleModernAddressRange *)&output, 1,
-                 &output, &error));
+                 APPLE_MODERN_BOARD_REGIONS_BOOT_CPU, &output, &error));
         assert(error && !memcmp(&output, &saved, sizeof(output)));
         error_free(error); error = NULL; checks++;
     }
     assert(!apple_modern_board_regions_build(blob(&f), UINT64_C(1) << 40,
-               UINT64_C(8) << 30, NULL, 0, NULL, &error));
-    assert(error); error_free(error); checks++;
+               UINT64_C(8) << 30, NULL, 0, APPLE_MODERN_BOARD_REGIONS_BOOT_CPU, NULL, &error));
+    assert(error); error_free(error); error = NULL; checks++;
+    assert(!apple_modern_board_regions_build(blob(&f), UINT64_C(1) << 40,
+               UINT64_C(8) << 30, NULL, 0, (AppleModernBoardRegionPolicy)7,
+               &output, &error));
+    assert(error); error_free(error); error = NULL; checks++;
     if (argc == 2) {
         AppleModernBlob actual = read_file(argv[1]);
         accepted(actual, NULL, 0, true);
+        all_cores(actual);
         free((void *)actual.data);
     }
     printf("PASS %u\n", checks);

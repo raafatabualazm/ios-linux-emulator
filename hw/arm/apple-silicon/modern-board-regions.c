@@ -69,6 +69,7 @@ bool apple_modern_board_regions_build(AppleModernBlob dtree,
                                      uint64_t dram_base, uint64_t dram_size,
                                      const AppleModernAddressRange *exclusions,
                                      size_t exclusion_count,
+                                     AppleModernBoardRegionPolicy policy,
                                      AppleModernBoardRegions *output,
                                      Error **errp)
 {
@@ -76,6 +77,7 @@ bool apple_modern_board_regions_build(AppleModernBlob dtree,
     static const char *const names[] = {"apple-modern.cpu-impl-reg",
                                        "apple-modern.cpm-impl-reg"};
     AppleModernBoardRegions plan = {0};
+    size_t cores;
 
     if (!output) {
         error_setg(errp, "missing modern board region output");
@@ -95,60 +97,98 @@ bool apple_modern_board_regions_build(AppleModernBlob dtree,
         error_setg(errp, "invalid modern DRAM or exclusion list");
         return false;
     }
+    if (policy != APPLE_MODERN_BOARD_REGIONS_BOOT_CPU &&
+        policy != APPLE_MODERN_BOARD_REGIONS_ALL_CORES) {
+        error_setg(errp, "unknown modern CPU register window policy");
+        return false;
+    }
     for (size_t i = 0; i < exclusion_count; i++) {
         if (!valid_range(exclusions[i].physical_address, exclusions[i].size)) {
             error_setg(errp, "invalid modern board exclusion span");
             return false;
         }
     }
-    for (size_t i = 0; i < APPLE_MODERN_CPU_REGISTER_WINDOWS; i++) {
-        AppleModernBlob property;
-        AppleModernBoardRegion *window = &plan.windows[i];
+    cores = policy == APPLE_MODERN_BOARD_REGIONS_ALL_CORES
+                ? APPLE_MODERN_BOARD_REGION_MAX_CORES : 1;
+    for (size_t core = 0; core < cores; core++) {
+        char path[32];
 
-        if (!apple_modern_adt_property(dtree, "/cpus/cpu0", properties[i],
-                                       &property, errp)) {
-            return false;
-        }
-        if (property.size != 16) {
-            error_setg(errp, "modern %s must contain exactly one 16-byte tuple",
-                       properties[i]);
-            return false;
-        }
-        window->physical_address = get64(property.data);
-        window->size = get64(property.data + 8);
-        if (!window->physical_address ||
-            !valid_range(window->physical_address, window->size) ||
-            window->size > APPLE_MODERN_MAX_REGISTER_WINDOW ||
-            window->size > APPLE_MODERN_MAX_REGISTER_TOTAL - plan.total_size) {
-            error_setg(errp, "modern %s exceeds register-RAM bounds",
-                       properties[i]);
-            return false;
-        }
-        if (range_overlap(window->physical_address, window->size,
-                          dram_base, dram_size)) {
-            error_setg(errp, "modern %s overlaps DRAM", properties[i]);
-            return false;
-        }
-        for (size_t j = 0; j < exclusion_count; j++) {
-            if (range_overlap(window->physical_address, window->size,
-                              exclusions[j].physical_address,
-                              exclusions[j].size)) {
-                error_setg(errp, "modern %s overlaps another board mapping",
+        snprintf(path, sizeof(path), "/cpus/cpu%zu", core);
+        for (size_t i = 0; i < 2; i++) {
+            AppleModernBlob property;
+            AppleModernBoardRegion *window;
+            uint64_t base, size;
+            bool duplicate = false;
+
+            if (!apple_modern_adt_property(dtree, path, properties[i],
+                                           &property, errp)) {
+                return false;
+            }
+            if (property.size != 16) {
+                error_setg(errp, "modern %s must contain exactly one 16-byte "
+                           "tuple", properties[i]);
+                return false;
+            }
+            base = get64(property.data);
+            size = get64(property.data + 8);
+            /*
+             * Cores share a cluster's cpm-impl-reg, so the same span is named
+             * several times. Back it once; a partial overlap is still a fault
+             * in the tree and is refused below.
+             */
+            for (size_t j = 0; j < plan.count; j++) {
+                if (plan.windows[j].physical_address == base &&
+                    plan.windows[j].size == size) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                continue;
+            }
+            if (plan.count >= APPLE_MODERN_CPU_REGISTER_WINDOWS) {
+                error_setg(errp, "modern CPU register windows exceed the "
+                           "%d-window budget", APPLE_MODERN_CPU_REGISTER_WINDOWS);
+                return false;
+            }
+            window = &plan.windows[plan.count];
+            window->physical_address = base;
+            window->size = size;
+            if (!base || !valid_range(base, size) ||
+                size > APPLE_MODERN_MAX_REGISTER_WINDOW ||
+                size > APPLE_MODERN_MAX_REGISTER_TOTAL - plan.total_size) {
+                error_setg(errp, "modern %s exceeds register-RAM bounds",
                            properties[i]);
                 return false;
             }
-        }
-        for (size_t j = 0; j < i; j++) {
-            if (range_overlap(window->physical_address, window->size,
-                              plan.windows[j].physical_address,
-                              plan.windows[j].size)) {
-                error_setg(errp, "modern CPU register windows overlap");
+            if (range_overlap(base, size, dram_base, dram_size)) {
+                error_setg(errp, "modern %s overlaps DRAM", properties[i]);
                 return false;
             }
+            for (size_t j = 0; j < exclusion_count; j++) {
+                if (range_overlap(base, size, exclusions[j].physical_address,
+                                  exclusions[j].size)) {
+                    error_setg(errp, "modern %s overlaps another board mapping",
+                               properties[i]);
+                    return false;
+                }
+            }
+            for (size_t j = 0; j < plan.count; j++) {
+                if (range_overlap(base, size, plan.windows[j].physical_address,
+                                  plan.windows[j].size)) {
+                    error_setg(errp, "modern CPU register windows overlap");
+                    return false;
+                }
+            }
+            if (cores == 1) {
+                memcpy(window->name, names[i], strlen(names[i]) + 1);
+            } else {
+                snprintf(window->name, sizeof(window->name),
+                         "apple-modern.cpu%zu-%s", core, properties[i]);
+            }
+            plan.total_size += size;
+            plan.count++;
         }
-        memcpy(window->name, names[i], strlen(names[i]) + 1);
-        plan.total_size += window->size;
-        plan.count++;
     }
     *output = plan;
     return true;

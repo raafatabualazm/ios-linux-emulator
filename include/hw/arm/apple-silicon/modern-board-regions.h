@@ -4,7 +4,14 @@
 
 #include "hw/arm/apple-silicon/modern-boot-metadata.h"
 
-#define APPLE_MODERN_CPU_REGISTER_WINDOWS 2
+/*
+ * Boot-CPU policy uses 2 windows. Serving every ADT core needs 8 on d47ap:
+ * six distinct cpu-impl-reg plus the two shared cpm-impl-reg (cpu0-3 name one,
+ * cpu4-5 the other). 16 leaves headroom for a wider tree.
+ */
+#define APPLE_MODERN_CPU_REGISTER_WINDOWS 16
+/* ADT cores considered under the all-cores policy. */
+#define APPLE_MODERN_BOARD_REGION_MAX_CORES 6
 /* The full declared apple-modern profile appends at most 68 spans; the PMGR storage
  * option alone adds 19 more windows, so the budget is 128. */
 #define APPLE_MODERN_MAX_BOARD_EXCLUSIONS 128
@@ -29,8 +36,26 @@ typedef struct AppleModernBoardRegions {
 } AppleModernBoardRegions;
 
 /*
- * Describe Darwin-VM's zeroed-RAM compatibility windows for cpu0's absolute
- * cpu-impl-reg and cpm-impl-reg properties. Each supported property must be
+ * Which cores' register windows to back.
+ *
+ * BOOT_CPU is the long-standing behaviour and the default: cpu0's
+ * cpu-impl-reg then cpm-impl-reg, two windows with their original names, so a
+ * single-CPU board sees exactly the memory map it always has.
+ *
+ * ALL_CORES additionally backs every other /cpus/cpuN window the tree names,
+ * deduplicated, because several cores share one cpm-impl-reg. A secondary
+ * core faults on an unbacked window (unassigned access raises an external
+ * abort here, it does not read as zero), and the P-cluster cpm window is also
+ * where the PMGR driver's own register ladder reaches.
+ */
+typedef enum AppleModernBoardRegionPolicy {
+    APPLE_MODERN_BOARD_REGIONS_BOOT_CPU = 0,
+    APPLE_MODERN_BOARD_REGIONS_ALL_CORES,
+} AppleModernBoardRegionPolicy;
+
+/*
+ * Describe Darwin-VM's zeroed-RAM compatibility windows for the selected
+ * cores' absolute cpu-impl-reg and cpm-impl-reg properties. Each supported property must be
  * exactly one little-endian (base, size) tuple. Additional tuples are rejected
  * rather than silently ignored. This is register storage, not an implementation
  * of hardware side effects, locks or protection. Never modifies the ADT.
@@ -46,6 +71,7 @@ bool apple_modern_board_regions_build(AppleModernBlob dtree,
                                      uint64_t dram_base, uint64_t dram_size,
                                      const AppleModernAddressRange *exclusions,
                                      size_t exclusion_count,
+                                     AppleModernBoardRegionPolicy policy,
                                      AppleModernBoardRegions *output,
                                      Error **errp);
 
