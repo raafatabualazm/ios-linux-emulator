@@ -193,8 +193,13 @@ bool apple_modern_board_regions_build(AppleModernBlob dtree,
             if (cores == 1) {
                 memcpy(window->name, names[i], strlen(names[i]) + 1);
             } else {
-                snprintf(window->name, sizeof(window->name),
-                         "apple-modern.cpu%zu-%s", core, properties[i]);
+                int len = snprintf(window->name, sizeof(window->name),
+                                   "apple-modern.cpu%zu-%s", core,
+                                   properties[i]);
+                if (len < 0 || (size_t)len >= sizeof(window->name)) {
+                    error_setg(errp, "modern CPU register window name too long");
+                    return false;
+                }
             }
             plan.total_size += size;
             plan.count++;
