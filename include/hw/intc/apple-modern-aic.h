@@ -14,6 +14,8 @@
 
 #define APPLE_MODERN_AIC_MAX_IRQS 4096
 #define APPLE_MODERN_AIC_MAX_WORDS (APPLE_MODERN_AIC_MAX_IRQS / 32)
+/* Output lines: one per vCPU the board configures (/cpus/cpu0..cpu5 on d47ap). */
+#define APPLE_MODERN_AIC_MAX_CPUS 6
 /* Defaults for the ADT-named rev-offset and aicglbcfg-offset properties. */
 #define APPLE_MODERN_AIC_VERSION_OFFSET 0x0000
 /*
@@ -53,8 +55,17 @@
  *    and returned verbatim and never interpreted, because the driver's
  *    read-modify-write preserves [31:8] and so needs to read back what it
  *    wrote. Delay groups (AIC2_DELAY_GROUPS) are not modelled: delivery is
- *    immediate. This model has one CPU, so every interrupt is delivered to
- *    CPU0 whatever target is recorded.
+ *    immediate.
+ *  - routing (declared, from the same layout): with one configured CPU every
+ *    interrupt is delivered to CPU0 whatever target is recorded, which is
+ *    the long-standing single-CPU behaviour. With more, bits [3:0] select the
+ *    output line: target 0 is CPU0 (so a stock boot, which writes no
+ *    IRQ_CFG, is unchanged), a target with a vCPU raises only that vCPU's
+ *    line, and a target past the configured CPUs stays pending for nobody.
+ *    The event register acknowledges an interrupt targeted at the CPU that
+ *    reads it; a read with no CPU context (monitor, debugger) acknowledges
+ *    nothing. Masks, latches and the enable bit stay single: they are per
+ *    die on AIC2/AIC3, not per CPU.
  */
 #define APPLE_MODERN_AIC_IRQ_CFG_TARGET_MASK 0x0000000fu
 #define APPLE_MODERN_AIC_IRQ_CFG_DELAY_MASK 0x000000e0u
@@ -86,6 +97,8 @@ typedef struct AppleModernAICGeometry {
      * every IRQ_CFG store is accepted and recorded; see the layout above.
      */
     bool record_irq_config;
+    /* vCPUs with an output line, 1..APPLE_MODERN_AIC_MAX_CPUS; 0 means 1. */
+    uint32_t num_cpus;
 } AppleModernAICGeometry;
 
 typedef struct AppleModernAICCore {
@@ -101,6 +114,13 @@ typedef struct AppleModernAICCore {
     /* Recorded IRQ_CFG words; all zero unless record_irq_config is set. */
     uint32_t irq_config[APPLE_MODERN_AIC_MAX_IRQS];
     bool enabled;
+    /*
+     * Who is reading the event register, set by the caller before a read.
+     * Only consulted with more than one CPU; reader_valid false means the
+     * read has no CPU behind it and must not acknowledge anything.
+     */
+    uint32_t reader;
+    bool reader_valid;
 } AppleModernAICCore;
 
 /* A failed initialization or unsupported write leaves state unchanged. */
@@ -111,8 +131,10 @@ bool apple_modern_aic_core_init(AppleModernAICCore *s,
 void apple_modern_aic_core_reset(AppleModernAICCore *s);
 bool apple_modern_aic_core_set_level(AppleModernAICCore *s, uint32_t irq,
                                     bool level);
-bool apple_modern_aic_core_output(const AppleModernAICCore *s);
-uint32_t apple_modern_aic_core_ack(AppleModernAICCore *s);
+bool apple_modern_aic_core_output(const AppleModernAICCore *s, uint32_t cpu);
+uint32_t apple_modern_aic_core_ack(AppleModernAICCore *s, uint32_t cpu);
+/* Lowest pending interrupt whose target has no configured CPU, or -1. */
+int apple_modern_aic_core_orphan(const AppleModernAICCore *s);
 /* Recorded IRQ_CFG word for an interrupt below max_irqs, else zero. */
 uint32_t apple_modern_aic_core_irq_config(const AppleModernAICCore *s,
                                           uint32_t irq);
@@ -131,7 +153,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(AppleModernAICState, APPLE_MODERN_AIC)
 struct AppleModernAICState {
     SysBusDevice parent_obj;
     MemoryRegion mmio;
-    qemu_irq irq;
+    qemu_irq irqs[APPLE_MODERN_AIC_MAX_CPUS];
     AppleModernAICGeometry geometry;
     AppleModernAICCore core;
     /*
@@ -140,7 +162,7 @@ struct AppleModernAICState {
      * guest's acknowledge path can be observed without unbounded output.
      */
     bool trace;
-    bool asserted;
+    bool asserted[APPLE_MODERN_AIC_MAX_CPUS];
     uint32_t traced;
     /* Separate bound for IRQ_CFG stores, logged whenever trace=on. */
     uint32_t config_traced;

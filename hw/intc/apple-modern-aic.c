@@ -13,7 +13,8 @@
  * https://github.com/AsahiLinux/m1n1/blob/main/src/aic.c
  * https://github.com/AsahiLinux/m1n1/blob/main/src/aic_regs.h
  *
- * One CPU, one die, level inputs ORed with independent software latches.
+ * One die, level inputs ORed with independent software latches; one output
+ * per configured vCPU, routed by the IRQ_CFG target (see the header).
  * Event reads select the lowest active IRQ and automatically mask it.
  * IRQ_CFG accepts only zero (the declared default CPU0 route) unless the
  * opt-in record_irq_config geometry flag is set. With it, every IRQ_CFG word
@@ -33,6 +34,7 @@
 #include "hw/intc/apple-modern-aic.h"
 #ifndef APPLE_MODERN_AIC_STANDALONE
 #include "migration/vmstate.h"
+#include "hw/core/cpu.h"
 #endif
 
 static bool aic_ranges_overlap(uint64_t a, uint64_t a_size,
@@ -55,6 +57,10 @@ bool apple_modern_aic_core_init(AppleModernAICCore *s,
     }
     if (geometry->revision != 2 && geometry->revision != 3) {
         problem = "only declared AIC2/AIC3 compatibility revisions are supported";
+        goto invalid;
+    }
+    if (geometry->num_cpus > APPLE_MODERN_AIC_MAX_CPUS) {
+        problem = "at most 6 output lines (one per vCPU) are supported";
         goto invalid;
     }
     if (!geometry->num_irqs || geometry->num_irqs > geometry->max_irqs ||
@@ -170,29 +176,55 @@ bool apple_modern_aic_core_set_level(AppleModernAICCore *s, uint32_t irq,
     return true;
 }
 
-static int pending_irq(const AppleModernAICCore *s)
+static uint32_t num_cpus(const AppleModernAICCore *s)
 {
+    return s->geometry.num_cpus ? s->geometry.num_cpus : 1;
+}
+
+/*
+ * Lowest pending interrupt for one output line. With a single CPU every
+ * pending interrupt is CPU0's whatever target was recorded; with more, the
+ * recorded IRQ_CFG target selects the line. A negative cpu asks for the
+ * lowest pending interrupt whose target has no line at all.
+ */
+static int pending_irq(const AppleModernAICCore *s, int cpu)
+{
+    uint32_t cpus = num_cpus(s);
+
     if (!s->enabled) {
         return -1;
     }
     for (unsigned word = 0; word < s->geometry.num_irqs / 32; word++) {
         uint32_t pending = (s->hardware[word] | s->software[word]) &
                            ~s->masked[word];
-        if (pending) {
-            return word * 32 + __builtin_ctz(pending);
+        while (pending) {
+            unsigned irq = word * 32 + __builtin_ctz(pending);
+            uint32_t target = s->irq_config[irq] &
+                              APPLE_MODERN_AIC_IRQ_CFG_TARGET_MASK;
+
+            if (cpus <= 1 ? cpu == 0
+                          : (cpu < 0 ? target >= cpus : target == (uint32_t)cpu)) {
+                return irq;
+            }
+            pending &= pending - 1;
         }
     }
     return -1;
 }
 
-bool apple_modern_aic_core_output(const AppleModernAICCore *s)
+bool apple_modern_aic_core_output(const AppleModernAICCore *s, uint32_t cpu)
 {
-    return pending_irq(s) >= 0;
+    return pending_irq(s, cpu) >= 0;
 }
 
-uint32_t apple_modern_aic_core_ack(AppleModernAICCore *s)
+int apple_modern_aic_core_orphan(const AppleModernAICCore *s)
 {
-    int irq = pending_irq(s);
+    return num_cpus(s) > 1 ? pending_irq(s, -1) : -1;
+}
+
+uint32_t apple_modern_aic_core_ack(AppleModernAICCore *s, uint32_t cpu)
+{
+    int irq = pending_irq(s, cpu);
 
     if (irq < 0) {
         return 0;
@@ -250,7 +282,13 @@ bool apple_modern_aic_core_read(AppleModernAICCore *s, uint64_t offset,
     } else if (offset == s->geometry.config_offset) {
         *value = s->enabled;
     } else if (offset == s->geometry.event_offset) {
-        *value = apple_modern_aic_core_ack(s);
+        if (num_cpus(s) <= 1) {
+            *value = apple_modern_aic_core_ack(s, 0);
+        } else if (!s->reader_valid) {
+            *value = 0; /* no CPU behind this read: nothing acknowledged */
+        } else {
+            *value = apple_modern_aic_core_ack(s, s->reader);
+        }
     } else if (offset >= s->geometry.irq_config_offset &&
                offset - s->geometry.irq_config_offset <
                (uint64_t)s->geometry.max_irqs * 4) {
@@ -335,11 +373,24 @@ bool apple_modern_aic_core_write(AppleModernAICCore *s, uint64_t offset,
 
 #define APPLE_MODERN_AIC_TRACE_LIMIT 200
 
+/* True while any vCPU output line is asserted (tracked only under trace). */
+static bool apple_modern_aic_any_asserted(const AppleModernAICState *s)
+{
+    uint32_t cpus = s->geometry.num_cpus ? s->geometry.num_cpus : 1;
+
+    for (uint32_t cpu = 0; cpu < cpus && cpu < APPLE_MODERN_AIC_MAX_CPUS; cpu++) {
+        if (s->asserted[cpu]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void apple_modern_aic_trace(AppleModernAICState *s, const char *what,
                                    uint64_t offset, unsigned size,
                                    uint64_t value)
 {
-    if (!s->trace || !s->asserted ||
+    if (!s->trace || !apple_modern_aic_any_asserted(s) ||
         s->traced >= APPLE_MODERN_AIC_TRACE_LIMIT) {
         return;
     }
@@ -371,17 +422,29 @@ static void apple_modern_aic_trace_config(AppleModernAICState *s,
 
 static void apple_modern_aic_update(AppleModernAICState *s)
 {
-    bool level = apple_modern_aic_core_output(&s->core);
+    uint32_t cpus = s->geometry.num_cpus ? s->geometry.num_cpus : 1;
+    int orphan = apple_modern_aic_core_orphan(&s->core);
 
-    if (s->trace && level != s->asserted) {
-        s->asserted = level;
-        if (s->traced < APPLE_MODERN_AIC_TRACE_LIMIT) {
-            s->traced++;
-            qemu_log_mask(LOG_UNIMP, "apple-modern-aic: output %s\n",
-                          level ? "ASSERTED" : "deasserted");
+    for (uint32_t cpu = 0; cpu < cpus; cpu++) {
+        bool level = apple_modern_aic_core_output(&s->core, cpu);
+
+        if (s->trace && level != s->asserted[cpu]) {
+            s->asserted[cpu] = level;
+            if (s->traced < APPLE_MODERN_AIC_TRACE_LIMIT) {
+                s->traced++;
+                qemu_log_mask(LOG_UNIMP, "apple-modern-aic: output %u %s\n",
+                              cpu, level ? "ASSERTED" : "deasserted");
+            }
         }
+        qemu_set_irq(s->irqs[cpu], level);
     }
-    qemu_set_irq(s->irq, level);
+    if (orphan >= 0 && s->traced < APPLE_MODERN_AIC_TRACE_LIMIT) {
+        s->traced++;
+        qemu_log_mask(LOG_GUEST_ERROR, "apple-modern-aic: IRQ %d targets CPU %u, "
+                      "which has no vCPU; it stays pending\n", orphan,
+                      s->core.irq_config[orphan] &
+                          APPLE_MODERN_AIC_IRQ_CFG_TARGET_MASK);
+    }
 }
 
 static MemTxResult apple_modern_aic_read(void *opaque, hwaddr offset,
@@ -391,6 +454,9 @@ static MemTxResult apple_modern_aic_read(void *opaque, hwaddr offset,
     AppleModernAICState *s = opaque;
     uint32_t result;
 
+    /* The event register acknowledges for the CPU that reads it. */
+    s->core.reader_valid = current_cpu != NULL;
+    s->core.reader = current_cpu ? current_cpu->cpu_index : 0;
     if (!apple_modern_aic_core_read(&s->core, offset, size, &result)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "apple-modern-aic: unsupported read at 0x%" HWADDR_PRIx
@@ -479,7 +545,9 @@ static void apple_modern_aic_init(Object *obj)
 {
     AppleModernAICState *s = APPLE_MODERN_AIC(obj);
 
-    sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq);
+    for (unsigned cpu = 0; cpu < APPLE_MODERN_AIC_MAX_CPUS; cpu++) {
+        sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irqs[cpu]);
+    }
 }
 
 static const Property apple_modern_aic_properties[] = {
@@ -504,6 +572,7 @@ static const Property apple_modern_aic_properties[] = {
     DEFINE_PROP_BOOL("trace", AppleModernAICState, trace, false),
     DEFINE_PROP_BOOL("record-irq-config", AppleModernAICState,
                      geometry.record_irq_config, false),
+    DEFINE_PROP_UINT32("num-cpus", AppleModernAICState, geometry.num_cpus, 1),
     DEFINE_PROP_UINT32("mmio-size", AppleModernAICState, geometry.mmio_size, 0),
 };
 

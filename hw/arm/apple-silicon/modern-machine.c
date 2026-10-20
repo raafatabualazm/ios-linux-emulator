@@ -2528,16 +2528,20 @@ static bool map_aic(AppleModernMachine *s, Error **errp)
         qdev_prop_set_bit(s->aic, "trace", s->aic_trace);
         qdev_prop_set_bit(s->aic, "record-irq-config",
                           s->aic_record_irq_config);
+        /* One output line per vCPU; the CPUs themselves are created later. */
+        qdev_prop_set_uint32(s->aic, "num-cpus", MACHINE(s)->smp.cpus);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(s->aic), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(s->aic), 0, base);
         s->aic_num_irqs = num_irqs;
         warn_report("apple-modern: AIC%u enabled, %u IRQs, config at 0x%x "
                     "(opt-in modern-aic)", revision, num_irqs, extint);
         if (s->aic_record_irq_config) {
-            warn_report("apple-modern: AIC records IRQ_CFG words and delivers "
-                        "every interrupt to CPU0 whatever target is written "
-                        "(opt-in aic-record-irq-config; delay groups are not "
-                        "modelled)");
+            warn_report("apple-modern: AIC records IRQ_CFG words; with %u "
+                        "CPU%s a recorded target selects the output line, "
+                        "target 0 being CPU0 (opt-in aic-record-irq-config; "
+                        "delay groups are not modelled)",
+                        MACHINE(s)->smp.cpus,
+                        MACHINE(s)->smp.cpus == 1 ? " every interrupt goes to CPU0;" : "s");
         }
         return true;
     }
@@ -4444,7 +4448,8 @@ static void modern_init(MachineState *machine)
                              APPLE_MODERN_SPTM_RESET_ENTRY_OFFSET;
         warn_report("apple-modern: opt-in SMP, %u cores; secondaries start "
                     "powered off at 0x%" HWADDR_PRIx ", fast IPIs are "
-                    "delivered, every AIC interrupt still goes to CPU0",
+                    "delivered, AIC interrupts follow their recorded IRQ_CFG "
+                    "target (CPU0 unless the guest records another)",
                     s->cpu_count, s->secondary_entry);
         if (!s->boot_command_line || !strstr(s->boot_command_line, "cpus=")) {
             warn_report("apple-modern: boot-command-line has no cpus=%u; the "
@@ -4453,8 +4458,10 @@ static void modern_init(MachineState *machine)
         }
     }
     if (s->aic) {
-        sysbus_connect_irq(SYS_BUS_DEVICE(s->aic), 0,
-                           qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_IRQ));
+        for (unsigned i = 0; i < s->cpu_count; i++) {
+            sysbus_connect_irq(SYS_BUS_DEVICE(s->aic), i,
+                               qdev_get_gpio_in(DEVICE(s->cpus[i]), ARM_CPU_IRQ));
+        }
     }
     /*
      * With the opt-in controller the UART drives its own ADT interrupt line

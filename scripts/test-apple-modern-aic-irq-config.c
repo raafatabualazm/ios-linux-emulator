@@ -36,15 +36,22 @@ static AppleModernAICGeometry board_geometry(bool record)
     };
 }
 
-static AppleModernAICCore *make(bool record)
+static AppleModernAICCore *make_cpus(bool record, uint32_t cpus)
 {
     AppleModernAICCore *core = calloc(1, sizeof(*core));
     AppleModernAICGeometry geometry = board_geometry(record);
     const char *reason = NULL;
 
+    geometry.num_cpus = cpus;
     CHECK(core);
     CHECK(apple_modern_aic_core_init(core, &geometry, &reason));
+    core->reader_valid = true;
     return core;
+}
+
+static AppleModernAICCore *make(bool record)
+{
+    return make_cpus(record, 1);
 }
 
 static uint32_t cfg_offset(uint32_t irq)
@@ -134,7 +141,7 @@ static void test_recording(void)
     CHECK(!memcmp(before->software, core->software, sizeof(core->software)));
     CHECK(!memcmp(before->masked, core->masked, sizeof(core->masked)));
     CHECK(before->enabled == core->enabled && !core->enabled);
-    CHECK(!apple_modern_aic_core_output(core));
+    CHECK(!apple_modern_aic_core_output(core, 0));
     /* Decoded fields follow the analogy layout, per interrupt. */
     for (uint32_t irq = 0; irq < 4096; irq++) {
         uint32_t word = apple_modern_aic_core_irq_config(core, irq);
@@ -195,15 +202,15 @@ static void test_delivery_stays_on_cpu0(void)
 
         CHECK(wr(core, cfg_offset(irq), routes[i].cfg));
         CHECK(wr(core, 0x14, 1));                          /* enable */
-        CHECK(!apple_modern_aic_core_output(core));
+        CHECK(!apple_modern_aic_core_output(core, 0));
         /* MASK_CLEAR = SW_SET + 3 banks of 512 bytes. */
         CHECK(wr(core, 0x14000 + 0x600 + word, bit));      /* unmask */
-        CHECK(!apple_modern_aic_core_output(core));
+        CHECK(!apple_modern_aic_core_output(core, 0));
         CHECK(wr(core, 0x14000 + word, bit));              /* SW_SET */
-        CHECK(apple_modern_aic_core_output(core));         /* delivered */
+        CHECK(apple_modern_aic_core_output(core, 0));         /* delivered */
         CHECK(rd(core, APPLE_MODERN_AIC_EVENT_OFFSET) ==
               (APPLE_MODERN_AIC_EVENT_IRQ | irq));
-        CHECK(!apple_modern_aic_core_output(core));        /* auto-masked */
+        CHECK(!apple_modern_aic_core_output(core, 0));        /* auto-masked */
         CHECK(rd(core, cfg_offset(irq)) == routes[i].cfg); /* still recorded */
         CHECK(wr(core, 0x14000 + 0x200 + word, bit));      /* SW_CLEAR */
     }
@@ -211,7 +218,7 @@ static void test_delivery_stays_on_cpu0(void)
     CHECK(wr(core, cfg_offset(300), 0x6));
     CHECK(wr(core, 0x14000 + 0x600 + 300 / 32 * 4, UINT32_C(1) << (300 & 31)));
     CHECK(apple_modern_aic_core_set_level(core, 300, true));
-    CHECK(apple_modern_aic_core_output(core));
+    CHECK(apple_modern_aic_core_output(core, 0));
     CHECK(rd(core, APPLE_MODERN_AIC_EVENT_OFFSET) ==
           (APPLE_MODERN_AIC_EVENT_IRQ | 300));
     free(core);
@@ -290,6 +297,83 @@ static void test_geometry_flag_is_copied(void)
     free(off);
 }
 
+/* Six vCPUs: a recorded target selects the line; CPU0 keeps target 0. */
+static void test_routing_with_six_cpus(void)
+{
+    AppleModernAICCore *core = make_cpus(true, 6);
+    uint32_t word, bit;
+
+    CHECK(wr(core, 0x14, 1));                                  /* enable */
+    /* Target 0 (a stock boot records nothing): CPU0 only. */
+    word = 42 / 32 * 4; bit = UINT32_C(1) << (42 & 31);
+    CHECK(wr(core, 0x14000 + 0x600 + word, bit));              /* unmask */
+    CHECK(wr(core, 0x14000 + word, bit));                      /* SW_SET */
+    CHECK(apple_modern_aic_core_output(core, 0));
+    for (uint32_t cpu = 1; cpu < 6; cpu++) {
+        CHECK(!apple_modern_aic_core_output(core, cpu));
+    }
+    CHECK(apple_modern_aic_core_orphan(core) < 0);
+    /* Read by CPU3: not its interrupt, nothing acknowledged or masked. */
+    core->reader = 3;
+    CHECK(rd(core, APPLE_MODERN_AIC_EVENT_OFFSET) == 0);
+    CHECK(apple_modern_aic_core_output(core, 0));
+    /* A read with no CPU behind it acknowledges nothing either. */
+    core->reader_valid = false;
+    CHECK(rd(core, APPLE_MODERN_AIC_EVENT_OFFSET) == 0);
+    CHECK(apple_modern_aic_core_output(core, 0));
+    core->reader_valid = true;
+    core->reader = 0;
+    CHECK(rd(core, APPLE_MODERN_AIC_EVENT_OFFSET) ==
+          (APPLE_MODERN_AIC_EVENT_IRQ | 42));
+    CHECK(!apple_modern_aic_core_output(core, 0));             /* auto-masked */
+    CHECK(wr(core, 0x14000 + 0x200 + word, bit));              /* SW_CLEAR */
+    /* Target 3 with delay bits set: CPU3 only, acknowledged by CPU3. */
+    word = 1092 / 32 * 4; bit = UINT32_C(1) << (1092 & 31);
+    CHECK(wr(core, cfg_offset(1092), 0xa3));
+    CHECK(wr(core, 0x14000 + 0x600 + word, bit));
+    CHECK(wr(core, 0x14000 + word, bit));
+    CHECK(!apple_modern_aic_core_output(core, 0));
+    CHECK(apple_modern_aic_core_output(core, 3));
+    core->reader = 3;
+    CHECK(rd(core, APPLE_MODERN_AIC_EVENT_OFFSET) ==
+          (APPLE_MODERN_AIC_EVENT_IRQ | 1092));
+    CHECK(!apple_modern_aic_core_output(core, 3));
+    CHECK(wr(core, 0x14000 + 0x200 + word, bit));
+    /* Target 15 has no vCPU: pending for nobody, reported as an orphan. */
+    word = 4095 / 32 * 4; bit = UINT32_C(1) << (4095 & 31);
+    CHECK(wr(core, cfg_offset(4095), 0xffffff0f));
+    CHECK(wr(core, 0x14000 + 0x600 + word, bit));
+    CHECK(wr(core, 0x14000 + word, bit));
+    for (uint32_t cpu = 0; cpu < 6; cpu++) {
+        CHECK(!apple_modern_aic_core_output(core, cpu));
+    }
+    CHECK(apple_modern_aic_core_orphan(core) == 4095);
+    core->reader = 0;
+    CHECK(rd(core, APPLE_MODERN_AIC_EVENT_OFFSET) == 0);
+    CHECK(wr(core, 0x14000 + 0x200 + word, bit));
+    CHECK(apple_modern_aic_core_orphan(core) < 0);
+    /* A hardware input routes the same way: target 2 raises CPU2 only. */
+    CHECK(wr(core, cfg_offset(300), 0x2));
+    CHECK(wr(core, 0x14000 + 0x600 + 300 / 32 * 4, UINT32_C(1) << (300 & 31)));
+    CHECK(apple_modern_aic_core_set_level(core, 300, true));
+    CHECK(!apple_modern_aic_core_output(core, 0) &&
+          apple_modern_aic_core_output(core, 2));
+    core->reader = 2;
+    CHECK(rd(core, APPLE_MODERN_AIC_EVENT_OFFSET) ==
+          (APPLE_MODERN_AIC_EVENT_IRQ | 300));
+    /* Lines beyond the maximum are refused at init. */
+    {
+        AppleModernAICCore *bad = calloc(1, sizeof(*bad));
+        AppleModernAICGeometry geometry = board_geometry(true);
+        const char *reason = NULL;
+
+        geometry.num_cpus = APPLE_MODERN_AIC_MAX_CPUS + 1;
+        CHECK(bad && !apple_modern_aic_core_init(bad, &geometry, &reason) && reason);
+        free(bad);
+    }
+    free(core);
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -297,6 +381,7 @@ int main(void)
     test_recording();
     test_xnu_read_modify_write();
     test_delivery_stays_on_cpu0();
+    test_routing_with_six_cpus();
     test_reset();
     test_rejections_with_recording_on();
     test_geometry_flag_is_copied();

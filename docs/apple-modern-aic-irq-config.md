@@ -27,9 +27,12 @@ initialization and the board refuses it without `modern-aic`.
   names the delay field and never writes it on AIC2/AIC3.
 * **Declared.** Bit 4 and bits `[31:8]` have no public meaning; they are stored
   and returned verbatim because the driver's read-modify-write needs to read
-  back what it wrote. Delay groups are not modelled (delivery is immediate) and
-  the board has one CPU, so every interrupt is delivered to CPU0 whatever
-  target is recorded. Reset clearing the words is declared, not measured.
+  back what it wrote. Delay groups are not modelled (delivery is immediate).
+  With one configured CPU every interrupt is delivered to CPU0 whatever target
+  is recorded; with more, bits `[3:0]` select the vCPU's output line, target 0
+  being CPU0, and a target past the configured CPUs stays pending for nobody.
+  The event register acknowledges for the CPU that reads it. Reset clearing
+  the words is declared, not measured.
 
 ## Qualified scope
 

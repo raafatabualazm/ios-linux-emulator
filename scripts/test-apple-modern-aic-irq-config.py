@@ -39,9 +39,12 @@ MUTANTS = [
      "*value = s->irq_config[(offset - s->geometry.irq_config_offset) / 4];",
      "*value = 0;"),
     ("delivery-follows-target",
-     "return pending_irq(s) >= 0;",
-     "return pending_irq(s) >= 0 &&\n"
-     "           !(s->irq_config[pending_irq(s)] & 0xf);"),
+     "return pending_irq(s, cpu) >= 0;",
+     "return pending_irq(s, cpu) >= 0 &&\n"
+     "           !(s->irq_config[pending_irq(s, cpu)] & 0xf);"),
+    ("routing-ignores-target",
+     "                          : (cpu < 0 ? target >= cpus : target == (uint32_t)cpu)) {",
+     "                          : (cpu < 0 ? target >= cpus : cpu == 0)) {"),
     ("accessor-unbounded",
      "return irq < s->geometry.max_irqs ? s->irq_config[irq] : 0;",
      "return s->irq_config[irq & 4095];"),
