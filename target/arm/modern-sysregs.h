@@ -24,6 +24,9 @@ void arm_register_apple_modern_sysreg_aliases(struct ArchCPU *cpu);
 /* Board-supplied value for a store, by register name; false if absent. */
 bool arm_apple_modern_sysreg_set(struct ArchCPU *cpu, const char *name,
                                  uint64_t value);
+unsigned arm_apple_modern_sysreg_copy_prefix(struct ArchCPU *dst,
+                                             const struct ArchCPU *src,
+                                             const char *prefix);
 /*
  * Fast IPI state, for a board that cold-resets a core when it powers it on:
  * a request sent while the core was still off survives that reset.

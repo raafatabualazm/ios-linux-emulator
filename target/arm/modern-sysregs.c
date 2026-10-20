@@ -270,3 +270,38 @@ bool arm_apple_modern_sysreg_set(ARMCPU *cpu, const char *name, uint64_t value)
     }
     return false;
 }
+
+/*
+ * Copy every opaque compatibility register whose name starts with prefix from
+ * src to dst. Used for cluster-scoped ACC_* CTRR/CTXR state the boot core has
+ * already programmed and locked, which a secondary's SPTM reset path reads
+ * back (ctrr_ctxr_check_region). Returns the number of registers copied.
+ */
+unsigned arm_apple_modern_sysreg_copy_prefix(ARMCPU *dst, const ARMCPU *src,
+                                             const char *prefix)
+{
+    unsigned n = 0;
+    size_t len = strlen(prefix);
+
+    if (!dst->apple_modern_sysregs || !src->apple_modern_sysregs) {
+        return 0;
+    }
+    for (size_t i = 0; i < APPLE_MODERN_OPAQUE_COUNT; i++) {
+        if (!strncmp(apple_modern_sysreg_names[i], prefix, len)) {
+            uint64_t v = src->env.modern_sysregs.opaque[i];
+            const char *nm = apple_modern_sysreg_names[i];
+
+            /*
+             * CTRR/CTXR bounds are page-granular: SPTM programs UPR as
+             * end|0xfff on the boot core, but its secondary check compares
+             * the read-back against the stashed end & ~0xfff.
+             */
+            if (strstr(nm, "_LWR_") || strstr(nm, "_UPR_")) {
+                v &= ~UINT64_C(0xfff);
+            }
+            dst->env.modern_sysregs.opaque[i] = v;
+            n++;
+        }
+    }
+    return n;
+}

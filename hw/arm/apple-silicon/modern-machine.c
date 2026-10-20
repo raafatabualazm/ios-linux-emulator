@@ -557,6 +557,20 @@ static void modern_cpu_on_work(CPUState *cs, run_on_cpu_data data)
                      cs->cpu_index);
         return;
     }
+    /*
+     * ACC_* CTRR/CTXR registers are cluster-scoped; iBoot/SPTM on the boot
+     * core have programmed and locked them (CTRR-C CTL 0x8000000000000001)
+     * by the time XNU starts a secondary, whose SPTM reset path panics in
+     * ctrr_ctxr_check_region if they read back 0. Mirror the boot core's.
+     */
+    arm_apple_modern_sysreg_copy_prefix(cpu, s->cpu, "ACC_");
+    /*
+     * SPTM's secondary check (24A437 0xfffffff0270b458c) also requires the
+     * per-core CTRR A/B CTL (s3_4_c15_c2_5 / c2_2) == 0x8000000000000001,
+     * as locked on the boot core; mirror the CTRR/CTXR banks too.
+     */
+    arm_apple_modern_sysreg_copy_prefix(cpu, s->cpu, "CTRR_");
+    arm_apple_modern_sysreg_copy_prefix(cpu, s->cpu, "CTXR_");
     if (ipi) {
         arm_apple_modern_fast_ipi_raise(cpu);
     }
