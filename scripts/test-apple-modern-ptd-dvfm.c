@@ -244,11 +244,14 @@ static void dvfm_core(void)
     CHECK(apple_modern_cpu_dvfm_core_read(&core, 0, 0x48, 8, &v) && v == 0xa5a5a5a50badf00dULL);
     /* Windows are independent. */
     CHECK(apple_modern_cpu_dvfm_core_read(&core, 1, 0x48, 8, &v) && !v);
-    /* The control pages share no storage with the state tables and do not
-     * accept the state-table offset (0x48 is not an attested register). */
+    /* The control pages share no storage with the state tables. Since
+     * db8272c they accept every aligned access as zero-reset storage (the
+     * complex bring-up RMWs +0x190/+0x198 there), so an unwritten word reads
+     * zero rather than being rejected. */
     v = 0x66;
-    CHECK(!apple_modern_cpu_dvfm_core_read(&core, 2, 0x48, 8, &v));
-    CHECK(!apple_modern_cpu_dvfm_core_read(&core, 3, 0x48, 8, &v) && v == 0x66);
+    CHECK(apple_modern_cpu_dvfm_core_read(&core, 2, 0x48, 8, &v) && !v);
+    v = 0x66;
+    CHECK(apple_modern_cpu_dvfm_core_read(&core, 3, 0x48, 8, &v) && !v);
     before = core;
     v = 7;
     v = 0x77;
@@ -276,89 +279,66 @@ static void dvfm_core(void)
     CHECK(!core.reads && !core.writes && !core.words[0][9]);
 }
 
-/* The DVFM control-page registers the BootKC reader loops over (descriptor
- * tables at linked 0xfffffff0081a9490 for the E cluster and 0xfffffff0081a94b0
- * for the P cluster): 64-bit registers holding nine packed 5-bit fields. Only
- * these 64-bit reads are accepted; the page is otherwise faulting, read-only
- * and zero. The first loop is the negative oracle: a model that accepted the
- * whole page (the previous behaviour) fails the "rejected" checks. */
+/* Control pages (windows 2 = E_ACC_CPM_DVFM, 3 = P_ACC0_CPM_DVFM). Since
+ * db8272c they are plain zero-reset storage: every aligned 4- and 8-byte read
+ * and write is accepted and kept, because complex bring-up read-modify-writes
+ * +0x190/+0x198 there as well as reading the attested descriptors. No DVFS
+ * behaviour is modelled. The first access to each 8-byte word is recorded
+ * (touched) so a run shows which words the guest really used. What stays
+ * rejected is contract-independent: other access sizes and misalignment. */
 static void dvfm_control_page(void)
 {
-    static AppleModernDVFMCore core, before;
-    static const uint64_t e_regs[] = {0xa8, 0xd0, 0x178};
-    static const uint64_t p_regs[] = {0xa8, 0xb0, 0xd0, 0xd8, 0x178};
-    uint64_t v = 0x55, accepted[2] = {0, 0};
+    static AppleModernDVFMCore core;
+    uint64_t v = 0x55;
     apple_modern_cpu_dvfm_core_reset(&core);
     for (unsigned w = 2; w < 4; w++) {
-        const uint64_t *regs = w == 2 ? e_regs : p_regs;
-        unsigned count = w == 2 ? 3 : 5;
-        for (uint64_t off = 0; off < APPLE_MODERN_DVFM_SPAN; off += 4) {
-            bool listed = false;
-            for (unsigned r = 0; r < count; r++) {
-                listed = listed || regs[r] == off;
-            }
-            if (listed) {
-                accepted[w - 2]++;
-                CHECK(!apple_modern_cpu_dvfm_core_touched(&core, w, off));
-                CHECK(apple_modern_cpu_dvfm_core_read(&core, w, off, 8, &v) && !v);
-                CHECK(apple_modern_cpu_dvfm_core_touched(&core, w, off));
-            } else {
-                /* Unlisted offsets fault for 8- and 4-byte reads and for writes. */
-                v = 0x55;
-                CHECK(!apple_modern_cpu_dvfm_core_read(&core, w, off, 4, &v) && v == 0x55);
-                CHECK(!apple_modern_cpu_dvfm_core_write(&core, w, off, 4, 1));
-                if (!(off & 7)) {
-                    CHECK(!apple_modern_cpu_dvfm_core_read(&core, w, off, 8, &v) && v == 0x55);
-                    CHECK(!apple_modern_cpu_dvfm_core_write(&core, w, off, 8, 1));
-                    CHECK(!apple_modern_cpu_dvfm_core_touched(&core, w, off));
-                }
-            }
-        }
-    }
-    CHECK(accepted[0] == 3 && accepted[1] == 5);
-    /* All listed registers require 64-bit accesses; descriptor registers are
-     * read-only, while the accounting-enable register also accepts writes. */
-    before = core;
-    for (unsigned w = 2; w < 4; w++) {
-        const uint64_t *regs = w == 2 ? e_regs : p_regs;
-        unsigned count = w == 2 ? 3 : 5;
-        for (unsigned r = 0; r < count; r++) {
+        for (uint64_t off = 0; off < APPLE_MODERN_DVFM_SPAN; off += 8) {
+            CHECK(!apple_modern_cpu_dvfm_core_touched(&core, w, off));
             v = 0x55;
-            CHECK(!apple_modern_cpu_dvfm_core_read(&core, w, regs[r], 4, &v) && v == 0x55);
-            CHECK(!apple_modern_cpu_dvfm_core_read(&core, w, regs[r] + 4, 4, &v) && v == 0x55);
-            if (regs[r] != 0x178) {
-                CHECK(!apple_modern_cpu_dvfm_core_write(&core, w, regs[r], 8, 0x1f));
-            }
-            CHECK(!apple_modern_cpu_dvfm_core_write(&core, w, regs[r], 4, 0x1f));
-            CHECK(!apple_modern_cpu_dvfm_core_write(&core, w, regs[r] + 4, 4, 0x1f));
-            CHECK(apple_modern_cpu_dvfm_core_read(&core, w, regs[r], 8, &v) && !v);
+            CHECK(apple_modern_cpu_dvfm_core_read(&core, w, off, 8, &v) && !v);
+            CHECK(apple_modern_cpu_dvfm_core_touched(&core, w, off));
+            v = 0x55;
+            CHECK(apple_modern_cpu_dvfm_core_read(&core, w, off + 4, 4, &v) && !v);
         }
     }
-    CHECK(core.reads == before.reads + 8 && core.writes == before.writes &&
-          !memcmp(core.words, before.words, sizeof(core.words)) &&
-          !memcmp(core.touched, before.touched, sizeof(core.touched)));
-    /* Recovered accounting-enable RMW: exact top-bit pattern, no counting. */
+    /* Writes are kept, at both widths, and the two windows are independent. */
+    CHECK(apple_modern_cpu_dvfm_core_write(&core, 2, 0x190, 8, UINT64_C(0x1122334455667788)));
+    CHECK(apple_modern_cpu_dvfm_core_read(&core, 2, 0x190, 8, &v) && v == UINT64_C(0x1122334455667788));
+    CHECK(apple_modern_cpu_dvfm_core_read(&core, 3, 0x190, 8, &v) && !v);
+    CHECK(apple_modern_cpu_dvfm_core_write(&core, 2, 0x194, 4, 0xa5a5a5a5));
+    CHECK(apple_modern_cpu_dvfm_core_read(&core, 2, 0x190, 8, &v) && v == UINT64_C(0xa5a5a5a555667788));
+    CHECK(apple_modern_cpu_dvfm_core_read(&core, 2, 0x194, 4, &v) && v == 0xa5a5a5a5);
     for (unsigned w = 2; w < 4; w++) {
-        CHECK(apple_modern_cpu_dvfm_core_read(&core, w, 0x178, 8, &v) && !v);
-        CHECK(apple_modern_cpu_dvfm_core_write(&core, w, 0x178, 8,
-                                             UINT64_C(0xa800000000000000)));
-        CHECK(apple_modern_cpu_dvfm_core_read(&core, w, 0x178, 8, &v) &&
-              v == UINT64_C(0xa800000000000000));
+        CHECK(apple_modern_cpu_dvfm_core_write(&core, w, 0x178, 8, UINT64_C(0xa800000000000000)));
+        CHECK(apple_modern_cpu_dvfm_core_read(&core, w, 0x178, 8, &v) && v == UINT64_C(0xa800000000000000));
         CHECK(apple_modern_cpu_dvfm_core_write(&core, w, 0x178, 8, 0));
         CHECK(apple_modern_cpu_dvfm_core_read(&core, w, 0x178, 8, &v) && !v);
     }
-    /* Registers are specific to the cluster: P's +0xb0/+0xd8 do not exist in E. */
-    CHECK(!apple_modern_cpu_dvfm_core_read(&core, 2, 0xb0, 8, &v));
-    CHECK(!apple_modern_cpu_dvfm_core_read(&core, 2, 0xd8, 8, &v));
-    CHECK(apple_modern_cpu_dvfm_core_read(&core, 3, 0xb0, 8, &v) && !v);
-    CHECK(apple_modern_cpu_dvfm_core_read(&core, 3, 0xd8, 8, &v) && !v);
-    /* The state-table windows of the same clusters remain unrestricted storage. */
+    /* Other sizes and misaligned accesses still fault, and leave the value alone. */
+    for (unsigned w = 2; w < 4; w++) {
+        for (unsigned size = 0; size <= 16; size++) {
+            if (size == 4 || size == 8) {
+                continue;
+            }
+            v = 0x55;
+            CHECK(!apple_modern_cpu_dvfm_core_read(&core, w, 0, size, &v) && v == 0x55);
+            CHECK(!apple_modern_cpu_dvfm_core_write(&core, w, 0, size, 1));
+        }
+        v = 0x55;
+        CHECK(!apple_modern_cpu_dvfm_core_read(&core, w, 2, 4, &v) && v == 0x55);
+        CHECK(!apple_modern_cpu_dvfm_core_read(&core, w, 4, 8, &v) && v == 0x55);
+        CHECK(!apple_modern_cpu_dvfm_core_write(&core, w, 2, 4, 1));
+        CHECK(!apple_modern_cpu_dvfm_core_write(&core, w, 4, 8, 1));
+        CHECK(!apple_modern_cpu_dvfm_core_read(&core, w, APPLE_MODERN_DVFM_SPAN, 8, &v));
+    }
+    /* The state-table windows of the same clusters are unaffected. */
     CHECK(apple_modern_cpu_dvfm_core_write(&core, 0, 0xb0, 8, 0x1f));
     CHECK(apple_modern_cpu_dvfm_core_read(&core, 0, 0xb0, 8, &v) && v == 0x1f);
     CHECK(apple_modern_cpu_dvfm_core_read(&core, 3, 0xb0, 8, &v) && !v);
     apple_modern_cpu_dvfm_core_reset(&core);
-    CHECK(!apple_modern_cpu_dvfm_core_touched(&core, 2, 0xa8) &&
-          !apple_modern_cpu_dvfm_core_touched(&core, 3, 0xd8));
+    CHECK(!apple_modern_cpu_dvfm_core_touched(&core, 2, 0x190) &&
+          !apple_modern_cpu_dvfm_core_touched(&core, 3, 0x178));
+    CHECK(apple_modern_cpu_dvfm_core_read(&core, 2, 0x190, 8, &v) && !v);
 }
 
 static void dvfm_touched(void)
@@ -376,12 +356,12 @@ static void dvfm_touched(void)
           !apple_modern_cpu_dvfm_core_touched(&core, 2, 0xb0));
     CHECK(!apple_modern_cpu_dvfm_core_touched(&core, 3, 0xa8) &&
           !apple_modern_cpu_dvfm_core_touched(&core, 0, 0xa8));
-    /* A 4-byte write to a state-table window touches its containing word; the
-     * last word of the page works. A control-page write is rejected and marks nothing. */
+    /* A 4-byte write touches its containing word in state-table and (since
+     * db8272c) control-page windows alike; the last word of the page works. */
     CHECK(apple_modern_cpu_dvfm_core_write(&core, 0, 0xd4, 4, 7));
     CHECK(apple_modern_cpu_dvfm_core_touched(&core, 0, 0xd0));
-    CHECK(!apple_modern_cpu_dvfm_core_write(&core, 3, 0xd4, 4, 7));
-    CHECK(!apple_modern_cpu_dvfm_core_touched(&core, 3, 0xd0));
+    CHECK(apple_modern_cpu_dvfm_core_write(&core, 3, 0xd4, 4, 7));
+    CHECK(apple_modern_cpu_dvfm_core_touched(&core, 3, 0xd0));
     CHECK(apple_modern_cpu_dvfm_core_write(&core, 1, APPLE_MODERN_DVFM_SPAN - 8, 8, 7));
     CHECK(apple_modern_cpu_dvfm_core_touched(&core, 1, APPLE_MODERN_DVFM_SPAN - 1));
     CHECK(!apple_modern_cpu_dvfm_core_touched(&core, 1, APPLE_MODERN_DVFM_SPAN - 16));

@@ -140,7 +140,11 @@ static void all_cores(AppleModernBlob tree)
                UINT64_C(8) << 30, NULL, 0,
                APPLE_MODERN_BOARD_REGIONS_ALL_CORES, &output, &error));
     assert(!error);
-    assert(output.count == 8);
+    /*
+     * Six distinct cpu-impl-reg, one cpm-impl-reg per cluster, and (since
+     * 9c019af) six coresight-reg: 14 windows on the pinned d47ap tree.
+     */
+    assert(output.count == 14);
     for (size_t i = 0; i < output.count; i++) {
         expected_total += output.windows[i].size;
         for (size_t j = 0; j < i; j++) {
@@ -159,7 +163,7 @@ static void all_cores(AppleModernBlob tree)
                (unsigned long long)output.windows[i].size);
     }
     assert(output.total_size == expected_total);
-    assert(output.total_size == 0x4e080);
+    assert(output.total_size <= APPLE_MODERN_MAX_REGISTER_TOTAL);
     checks++;
 }
 

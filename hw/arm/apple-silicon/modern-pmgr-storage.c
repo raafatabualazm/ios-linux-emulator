@@ -421,8 +421,14 @@ static bool place(AppleModernPMGRStoragePlan *plan, uint64_t address, uint32_t s
     }
     for (size_t k = 0; k < exclusion_count; k++) {
         if (overlaps(address, size, exclusions[k].physical_address, exclusions[k].size)) {
-            error_setg(errp, "PMGR storage window %u overlaps another device", tag);
-            return false;
+            /*
+             * Another device already owns this span (the display probe's
+             * logging apertures on the V19 profile, for instance), so it
+             * serves the guest's accesses; leave the window to it rather
+             * than refusing the whole plan. Counted so the banner shows it.
+             */
+            plan->omitted++;
+            return true;
         }
     }
     for (unsigned k = 0; k < plan->count; k++) {

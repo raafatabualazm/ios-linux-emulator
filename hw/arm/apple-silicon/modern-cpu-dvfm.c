@@ -151,6 +151,7 @@ void apple_modern_cpu_dvfm_core_reset(AppleModernDVFMCore *core)
 
 static bool valid_access(unsigned window, uint64_t offset, unsigned size, bool write)
 {
+    (void)write; /* reads and writes share one acceptance rule now */
     if (window >= APPLE_MODERN_DVFM_WINDOWS || (size != 4 && size != 8) ||
         (offset & (size - 1)) || offset >= APPLE_MODERN_DVFM_SPAN) {
         return false;

@@ -2255,10 +2255,11 @@ static bool map_pmgr_storage(AppleModernMachine *s, uint64_t uart,
     }
     s->pmgr_storage_plan = plan;
     warn_report("apple-modern: opt-in PMGR perf-counter register storage (%u windows, "
-                "%u 32-bit registers derived from the ADT perf-groups/perf-counters); "
+                "%u 32-bit registers derived from the ADT perf-groups/perf-counters, "
+                "%u windows left to an existing owner); "
                 "declared zero-reset storage, NOT calibration data and no counting "
                 "behaviour (a boot-progress diagnostic profile)",
-                plan.count, plan.registers);
+                plan.count, plan.registers, plan.omitted);
     return true;
 }
 

@@ -12,9 +12,10 @@
 #define APPLE_MODERN_CPU_REGISTER_WINDOWS 16
 /* ADT cores considered under the all-cores policy. */
 #define APPLE_MODERN_BOARD_REGION_MAX_CORES 6
-/* The full declared apple-modern profile appends at most 68 spans; the PMGR storage
- * option alone adds 19 more windows, so the budget is 128. */
-#define APPLE_MODERN_MAX_BOARD_EXCLUSIONS 128
+/* The full declared apple-modern profile appends at most 68 spans. PMGR
+ * storage on this tree places about 46 more (counter table plus fixed
+ * windows; owners such as disp0 reg[5] omit some). 256 covers that stack. */
+#define APPLE_MODERN_MAX_BOARD_EXCLUSIONS 256
 #define APPLE_MODERN_MAX_REGISTER_WINDOW (UINT64_C(1) << 20)
 #define APPLE_MODERN_MAX_REGISTER_TOTAL (UINT64_C(2) << 20)
 
