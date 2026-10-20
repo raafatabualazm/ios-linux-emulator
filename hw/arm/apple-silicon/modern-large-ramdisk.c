@@ -151,6 +151,103 @@ bool apple_modern_large_ramdisk_map(const char *path,
     return true;
 }
 
+/* FNV-1a-64 over a byte range: a stale-image guard, not a security digest. */
+static uint64_t large_ramdisk_fnv1a64(const uint8_t *data, size_t len)
+{
+    uint64_t h = UINT64_C(0xcbf29ce484222325);
+    for (size_t i = 0; i < len; i++) {
+        h ^= data[i];
+        h *= UINT64_C(0x100000001b3);
+    }
+    return h;
+}
+
+bool apple_modern_large_ramdisk_splice(AppleModernLargeRamdisk *map,
+                                       const char *spec, Error **errp)
+{
+    char *dup, *off_tok, *path_tok, *hash_tok, *end;
+    unsigned long long offset, declared;
+    uint8_t *blob = NULL;
+    size_t blob_len = 0;
+    bool ok = false;
+    struct stat st;
+    FILE *file;
+
+    if (!map || !map->host || !spec) {
+        error_setg(errp, "ramdisk-splice needs a mapped large ramdisk");
+        return false;
+    }
+    dup = strdup(spec);
+    off_tok = dup;
+    path_tok = strchr(dup, ':');
+    if (!path_tok) {
+        error_setg(errp, "ramdisk-splice: expected <offset>:<path>:<fnv1a64>");
+        goto out;
+    }
+    *path_tok++ = '\0';
+    hash_tok = strrchr(path_tok, ':');
+    if (!hash_tok) {
+        error_setg(errp, "ramdisk-splice: expected <offset>:<path>:<fnv1a64>");
+        goto out;
+    }
+    *hash_tok++ = '\0';
+
+    errno = 0;
+    offset = strtoull(off_tok, &end, 0);
+    if (errno || *end) {
+        error_setg(errp, "ramdisk-splice: bad offset '%s'", off_tok);
+        goto out;
+    }
+    errno = 0;
+    declared = strtoull(hash_tok, &end, 0);
+    if (errno || *end) {
+        error_setg(errp, "ramdisk-splice: bad fnv1a64 '%s'", hash_tok);
+        goto out;
+    }
+
+    file = fopen(path_tok, "rb");
+    if (!file) {
+        error_setg(errp, "ramdisk-splice: cannot open blob %s: %s", path_tok,
+                   strerror(errno));
+        goto out;
+    }
+    if (fstat(fileno(file), &st) != 0 || st.st_size <= 0) {
+        error_setg(errp, "ramdisk-splice: cannot size blob %s", path_tok);
+        fclose(file);
+        goto out;
+    }
+    blob_len = (size_t)st.st_size;
+    blob = malloc(blob_len);
+    if (!blob || fread(blob, 1, blob_len, file) != blob_len) {
+        error_setg(errp, "ramdisk-splice: cannot read blob %s", path_tok);
+        fclose(file);
+        goto out;
+    }
+    fclose(file);
+
+    if (offset > map->file_size || blob_len > map->file_size - offset) {
+        error_setg(errp, "ramdisk-splice: 0x%llx+%zu is outside the %" PRIu64
+                   "-byte ramdisk", offset, blob_len, map->file_size);
+        goto out;
+    }
+    /* Idempotent: a region already equal to the blob needs no write. */
+    if (!memcmp(map->host + offset, blob, blob_len)) {
+        ok = true;
+        goto out;
+    }
+    if (large_ramdisk_fnv1a64(map->host + offset, blob_len) != declared) {
+        error_setg(errp, "ramdisk-splice: bytes at 0x%llx do not match the "
+                   "declared original digest 0x%llx", offset, declared);
+        goto out;
+    }
+    memcpy(map->host + offset, blob, blob_len);
+    ok = true;
+out:
+    free(blob);
+    free(dup);
+    return ok;
+}
+
 void apple_modern_large_ramdisk_unmap(AppleModernLargeRamdisk *map)
 {
     if (!map) {

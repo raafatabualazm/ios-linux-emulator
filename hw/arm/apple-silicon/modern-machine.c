@@ -92,6 +92,7 @@ struct AppleModernMachine {
     AppleModernLargeRamdisk large_ramdisk_file;
     /* Optional list of declared in-memory edits to the large ramdisk. */
     char *ramdisk_patches;
+    char *ramdisk_splice;
     MemoryRegion large_ramdisk_mr;
     MemoryRegion cpu_register_ram[APPLE_MODERN_CPU_REGISTER_WINDOWS];
     MemoryRegion aic_ram, sep_ram;
@@ -2803,6 +2804,10 @@ static void modern_init(MachineState *machine)
         error_report("apple-modern: ramdisk-patches needs large-ramdisk=on");
         exit(EXIT_FAILURE);
     }
+    if (s->ramdisk_splice && !s->large_ramdisk) {
+        error_report("apple-modern: ramdisk-splice needs large-ramdisk=on");
+        exit(EXIT_FAILURE);
+    }
     if (s->large_ramdisk) {
         if (!apple_modern_large_ramdisk_map(s->paths[ASSET_RAMDISK],
                                             &s->large_ramdisk_file, &error)) {
@@ -2822,6 +2827,18 @@ static void modern_init(MachineState *machine)
                         "declared in-memory edit(s) from %s to the private "
                         "ramdisk mapping (the image file is unchanged)",
                         applied, s->ramdisk_patches);
+        }
+        if (s->ramdisk_splice) {
+            if (!apple_modern_large_ramdisk_splice(&s->large_ramdisk_file,
+                                                   s->ramdisk_splice,
+                                                   &error)) {
+                error_report_err(error);
+                exit(EXIT_FAILURE);
+            }
+            warn_report("apple-modern: opt-in ramdisk-splice replaced one "
+                        "declared same-size region from %s in the private "
+                        "ramdisk mapping (the image file is unchanged)",
+                        s->ramdisk_splice);
         }
         s->components.ramdisk = (AppleModernBlob){
             s->large_ramdisk_file.host, s->large_ramdisk_file.file_size };
@@ -3604,6 +3621,21 @@ static void set_ramdisk_patches(Object *obj, const char *value, Error **errp)
     }
 }
 
+static char *get_ramdisk_splice(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->ramdisk_splice);
+}
+
+static void set_ramdisk_splice(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->ramdisk_splice);
+        s->ramdisk_splice = value && value[0] && strcmp(value, "off") ?
+                            g_strdup(value) : NULL;
+    }
+}
+
 static char *get_dcp_attach_cbs(Object *obj, Error **errp)
 {
     return g_strdup(APPLE_MODERN_MACHINE(obj)->dcp_attach_cbs);
@@ -4009,6 +4041,15 @@ static void modern_class_init(ObjectClass *oc, const void *data)
         "path of a list of declared same-size edits ('<offset> <old-hex> "
         "<new-hex>' per line, all verified first) applied to the private "
         "large-ramdisk mapping; the image file is never written");
+    object_class_property_add_str(oc, "ramdisk-splice", get_ramdisk_splice,
+                                  set_ramdisk_splice);
+    object_class_property_set_description(oc, "ramdisk-splice",
+        "'<offset>:<blob>:<fnv1a64>' declared same-size replacement of one "
+        "whole region of the private large-ramdisk mapping, for edits past the "
+        "ramdisk-patches 512-byte line ceiling (e.g. the ~2.4MB launch-service "
+        "cache, which launchd reads instead of the on-disk LaunchDaemon "
+        "plists); the original region's digest is verified first and the image "
+        "file is never written");
     object_class_property_add_str(oc, "dcp-attach-cbs", get_dcp_attach_cbs,
                                   set_dcp_attach_cbs);
     object_class_property_set_description(oc, "dcp-attach-cbs",
