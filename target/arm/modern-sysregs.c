@@ -196,8 +196,80 @@ static void apple_modern_ipi_sr_reset(CPUARMState *env, const ARMCPRegInfo *ri)
     qemu_set_irq(cpu->apple_modern_fast_ipi_irq, 0);
 }
 
+/*
+ * Opt-in access trace (apple-modern-sysreg-trace): registers whose name starts
+ * with one of the listed prefixes get logging accessors over the unchanged
+ * opaque storage. Reads and writes are logged with the vCPU index and the
+ * exception level, capped per CPU so a polling loop cannot flood the log.
+ */
+#define APPLE_MODERN_SYSREG_TRACE_LIMIT 4000
+
+static bool apple_modern_sysreg_traced_name(const ARMCPU *cpu, const char *name)
+{
+    const char *list = cpu->apple_modern_sysreg_trace;
+
+    while (list && *list) {
+        const char *end = strchr(list, ',');
+        size_t len = end ? (size_t)(end - list) : strlen(list);
+
+        if (len && !strncmp(name, list, len)) {
+            return true;
+        }
+        if (!end) {
+            break;
+        }
+        list = end + 1;
+    }
+    return false;
+}
+
+static void apple_modern_sysreg_trace_log(CPUARMState *env,
+                                          const ARMCPRegInfo *ri,
+                                          const char *what, uint64_t value)
+{
+    ARMCPU *cpu = env_archcpu(env);
+
+    if (cpu->apple_modern_sysreg_traced >= APPLE_MODERN_SYSREG_TRACE_LIMIT) {
+        return;
+    }
+    cpu->apple_modern_sysreg_traced++;
+    qemu_log_mask(LOG_UNIMP, "apple-modern sysreg trace: cpu%d el%d %s %s "
+                  "0x%016" PRIx64 "%s\n", env_cpu(env)->cpu_index,
+                  arm_current_el(env), what, ri->name, value,
+                  cpu->apple_modern_sysreg_traced ==
+                  APPLE_MODERN_SYSREG_TRACE_LIMIT ? " (limit)" : "");
+}
+
+static uint64_t apple_modern_sysreg_trace_read(CPUARMState *env,
+                                               const ARMCPRegInfo *ri)
+{
+    uint64_t value = raw_read(env, ri);
+
+    apple_modern_sysreg_trace_log(env, ri, "rd", value);
+    return value;
+}
+
+static void apple_modern_sysreg_trace_write(CPUARMState *env,
+                                            const ARMCPRegInfo *ri,
+                                            uint64_t value)
+{
+    apple_modern_sysreg_trace_log(env, ri, "wr", value);
+    raw_write(env, ri, value);
+}
+
+/* Attach the trace accessors to a plain store whose name is listed. */
+static void apple_modern_sysreg_attach_trace(const ARMCPU *cpu, ARMCPRegInfo *ri)
+{
+    if (ri->readfn || ri->writefn || (ri->type & ARM_CP_CONST) ||
+        !apple_modern_sysreg_traced_name(cpu, ri->name)) {
+        return;
+    }
+    ri->readfn = apple_modern_sysreg_trace_read;
+    ri->writefn = apple_modern_sysreg_trace_write;
+}
+
 /* The generated table, with the fast-IPI registers given behaviour. */
-static void apple_modern_define_fast_ipi_sysregs(ARMCPU *cpu)
+static void apple_modern_define_fast_ipi_sysregs(ARMCPU *cpu, bool trace)
 {
     apple_modern_ipi_sr_slot = apple_modern_opaque_slot("IPI_SR");
     apple_modern_ipi_cr_slot = apple_modern_opaque_slot("IPI_CR");
@@ -215,6 +287,8 @@ static void apple_modern_define_fast_ipi_sysregs(ARMCPU *cpu)
                    !strcmp(ri.name, "IPI_RR_GLOBAL_EL1")) {
             ri.type |= ARM_CP_IO;
             ri.writefn = apple_modern_ipi_rr_write;
+        } else if (trace) {
+            apple_modern_sysreg_attach_trace(cpu, &ri);
         }
         define_one_arm_cp_reg(cpu, &ri);
     }
@@ -235,9 +309,19 @@ void arm_apple_modern_fast_ipi_raise(ARMCPU *cpu)
 
 void arm_register_apple_modern_sysregs(ARMCPU *cpu)
 {
+    bool trace = cpu->apple_modern_sysreg_trace &&
+                 *cpu->apple_modern_sysreg_trace;
+
     assert(cpu->apple_modern_sysregs);
     if (cpu->apple_modern_fast_ipi) {
-        apple_modern_define_fast_ipi_sysregs(cpu);
+        apple_modern_define_fast_ipi_sysregs(cpu, trace);
+    } else if (trace) {
+        for (size_t i = 0; i < ARRAY_SIZE(apple_modern_sysregs); i++) {
+            ARMCPRegInfo ri = apple_modern_sysregs[i];
+
+            apple_modern_sysreg_attach_trace(cpu, &ri);
+            define_one_arm_cp_reg(cpu, &ri);
+        }
     } else {
         define_arm_cp_regs(cpu, apple_modern_sysregs);
     }

@@ -1087,6 +1087,15 @@ struct ArchCPU {
     bool apple_modern_fast_ipi;
     qemu_irq apple_modern_fast_ipi_irq;
     QEMUTimer *apple_modern_ipi_deferred;
+    /*
+     * Opt-in diagnostic, default NULL: comma-separated name prefixes of
+     * opaque modern registers whose guest accesses are logged (LOG_UNIMP)
+     * with the vCPU index, exception level and value. Unset, the table is
+     * defined exactly as before; set, matching registers gain logging
+     * accessors over the same storage, capped per CPU.
+     */
+    char *apple_modern_sysreg_trace;
+    uint32_t apple_modern_sysreg_traced;
     /* Stable alias metadata for the opt-in modern register interface. */
     GPtrArray *modern_vhe_snapshots;
     /* CPU has security extension */

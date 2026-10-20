@@ -189,6 +189,7 @@ struct AppleModernMachine {
     /* Declared profile for the iBoot-computed /arm-io/pmgr voltage-states*. */
     char *pmgr_voltage_states;
     bool modern_pmp_ptd;
+    bool modern_pmp_ptd_responder;
     AppleModernPTDPlan pmp_ptd_plan;
     bool modern_cpu_dvfm;
     AppleModernDVFMPlan cpu_dvfm_plan;
@@ -200,6 +201,7 @@ struct AppleModernMachine {
     char *disp0_probe;
     /* w14-compatsweep: '+'-separated ADT compatible-restore group list. */
     char *adt_compat_restore;
+    char *sysreg_trace;
     bool modern_smc;
     bool modern_smc_buttons;
     AppleModernSMCPlan smc_plan;
@@ -1724,6 +1726,7 @@ static bool map_pmp_ptd(AppleModernMachine *s, uint64_t uart,
     DeviceState *dev = apple_modern_pmp_ptd_new();
     dev->id = g_strdup("pmp-ptd");
     object_property_add_child(OBJECT(s), "pmp-ptd", OBJECT(dev));
+    qdev_prop_set_bit(dev, "command-responder", s->modern_pmp_ptd_responder);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     for (unsigned i = 0; i < APPLE_MODERN_PTD_VIEWS; i++) {
         sysbus_mmio_map(SYS_BUS_DEVICE(dev), i, plan.addresses[i]);
@@ -3528,6 +3531,16 @@ static ARMCPU *modern_create_cpu(AppleModernMachine *s, MachineState *machine,
                               &error_fatal);
     object_property_set_bool(OBJECT(cpu), "apple-modern-apsts", true,
                               &error_fatal);
+    if (s->sysreg_trace && *s->sysreg_trace) {
+        object_property_set_str(OBJECT(cpu), "apple-modern-sysreg-trace",
+                                s->sysreg_trace, &error_fatal);
+        if (!index) {
+            warn_report("apple-modern: opt-in sysreg trace for name prefixes "
+                        "'%s' (diagnostic logging on every vCPU; register "
+                        "storage and guest behaviour unchanged)",
+                        s->sysreg_trace);
+        }
+    }
     if (s->pauth_compat) {
         object_property_set_bool(OBJECT(cpu), "apple-modern-pauth-compat",
                                  true, &error_fatal);
@@ -4779,6 +4792,20 @@ BOOL_PROPERTY(adt_dart_ids, adt_dart_ids)
 BOOL_PROPERTY(large_ramdisk, large_ramdisk)
 BOOL_PROPERTY(pmgr_ungate, pmgr_ungate)
 BOOL_PROPERTY(modern_pmp_ptd, modern_pmp_ptd)
+BOOL_PROPERTY(modern_pmp_ptd_responder, modern_pmp_ptd_responder)
+static char *get_sysreg_trace(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->sysreg_trace);
+}
+static void set_sysreg_trace(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+
+    if (check_mutable(s, errp)) {
+        g_free(s->sysreg_trace);
+        s->sysreg_trace = g_strdup(value);
+    }
+}
 BOOL_PROPERTY(modern_cpu_dvfm, modern_cpu_dvfm)
 BOOL_PROPERTY(modern_pmgr_storage, modern_pmgr_storage)
 BOOL_PROPERTY(modern_mcc_dsid, modern_mcc_dsid)
@@ -4977,6 +5004,19 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "ramdisk", get_ramdisk, set_ramdisk);
     object_class_property_add_bool(oc, "modern-pmp-ptd", get_modern_pmp_ptd,
                                    set_modern_pmp_ptd);
+    object_class_property_add_bool(oc, "modern-pmp-ptd-responder",
+                                   get_modern_pmp_ptd_responder,
+                                   set_modern_pmp_ptd_responder);
+    object_class_property_set_description(oc, "modern-pmp-ptd-responder",
+        "with modern-pmp-ptd, acknowledge PMP command commits by publishing "
+        "their sequence to Dashboard[448] (receipt only; no PMP firmware, "
+        "quota or power behaviour)");
+    object_class_property_add_str(oc, "sysreg-trace", get_sysreg_trace,
+                                  set_sysreg_trace);
+    object_class_property_set_description(oc, "sysreg-trace",
+        "diagnostic: comma-separated name prefixes of opaque modern registers "
+        "(for example ACC_,CTRR_,CTXR_) whose accesses are logged under -d "
+        "unimp with vCPU index and EL; default off");
     object_class_property_add_bool(oc, "modern-cpu-dvfm", get_modern_cpu_dvfm,
                                    set_modern_cpu_dvfm);
     object_class_property_add_bool(oc, "modern-pmgr-storage",
