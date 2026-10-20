@@ -59,8 +59,21 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
 /* PMS_PTS_PTD (reg_index 34, 0x3003c0000): interrupt enable-set / enable-clear banks
  * and the vector-config array, windows 3..5 (tags 0x101..0x103). */
 #define PTD_BASE UINT64_C(0x3003c0000)
+/*
+ * fixed_windows[] in modern-pmgr-storage.c, in table order: MISC +0x8 (8 regs),
+ * the three PTD interrupt banks (32 + 32 + 256), CLUSTER_CTL (5), nine DPE
+ * channels of 6 registers plus the ch7 window of 5, the PMC vote/DVFM/DVMR
+ * windows (7 + 1 + 2 + 1), and the full PWRGATE and TVM banks (4096 each).
+ */
 #define FIXED_WINDOWS 21
-#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 5 + 2 + 59 + 7 + 1 + 2 + 1 + 2 + 2 + 20 + 2)
+#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 5 + 9 * 6 + 5 + 7 + 1 + 2 + 1 + 4096 + 4096)
+/*
+ * Served alongside on every tree: the ten AXI2AF block pairs (+0x104/+0x108),
+ * the two full ACC CPM_PWRCTL banks (reg[5]/reg[14], 0x2000 each) and the six
+ * 0x10-byte per-core / P-cluster CPM counter windows (+0x9000 / +0x8000).
+ */
+#define EXTRA_WINDOWS (10 + 2 + 6)
+#define EXTRA_REGISTERS (10 * 2 + 2 * (0x2000 / 4) + 6 * 4)
 /* Five ADT cluster-control registers (reg_index 28): window 6, tag 0x104. */
 #define CLUSTER_BASE UINT64_C(0x300780000)
 #define CLUSTER_TAG 0x104
@@ -118,9 +131,6 @@ static bool expected_valid(unsigned group, uint64_t offset)
     if (group == CLUSTER_TAG) {
         return offset < 20;
     }
-    if (group == CLUSTER_TAG + 1 || group == CLUSTER_TAG + 2) {
-        return offset == 0;
-    }
     if (group == PMC_TAG) {
         return offset < 0x10 || offset == 0x20 || offset == 0x24 || offset == 0x28;
     }
@@ -134,7 +144,7 @@ static bool expected_valid(unsigned group, uint64_t offset)
         return offset == 0;
     }
     if (group == PWRGATE_TAG) {
-        return offset == 0 || offset == 0x44;
+        return offset < 0x4000; /* the whole bank is served (MEASURED +0x60) */
     }
     if (group == TVM_TAG) {
         return offset < 0x4000;
@@ -171,7 +181,7 @@ static void plan_exact(AppleModernBlob tree)
     Error *error = NULL;
     unsigned counted = 0;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &plan, &error));
-    CHECK(plan.count == 8 + FIXED_WINDOWS && plan.registers == 1787 + 428 + FIXED_REGISTERS);
+    CHECK(plan.count == 8 + FIXED_WINDOWS + EXTRA_WINDOWS && plan.registers == 1787 + FIXED_REGISTERS + EXTRA_REGISTERS);
     CHECK(plan.windows[0].group == 6 && plan.windows[0].address == G6_BASE &&
           plan.windows[0].size == G6_END);
     CHECK(plan.windows[1].group == 7 && plan.windows[1].address == G7_BASE &&
@@ -237,13 +247,34 @@ static void plan_exclusions(AppleModernBlob tree)
         AppleModernAddressRange hit[4] = {{a, 1}, {a + n - 1, 1}, {a - 8, 16}, {a - 1, n + 2}};
         AppleModernAddressRange near[2] = {{a - 8, 8}, {a + n, 8}};
         for (unsigned i = 0; i < 4; i++) {
+            /*
+             * An exclusion on a window hands that span to the device that owns
+             * it: the window is omitted and counted, every other window stands
+             * (0c747cd; before it the whole plan was refused).
+             */
+            unsigned dropped = 0, dropped_regs = 0;
+            for (unsigned k = 0; k < plan.count; k++) {
+                const AppleModernPMGRStorageWindow *o = &plan.windows[k];
+                if (o->address < hit[i].physical_address + hit[i].size &&
+                    hit[i].physical_address < o->address + o->size) {
+                    dropped++;
+                    for (unsigned m = 0; m < APPLE_MODERN_PMGR_STORAGE_MASKS; m++) {
+                        dropped_regs += __builtin_popcountll(o->valid[m]);
+                    }
+                }
+            }
+            CHECK(dropped >= 1);
             junk = plan;
-            CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, &hit[i], 1, &junk, &error));
-            clear_error(&error);
-            CHECK(!junk.count && !junk.registers && !junk.windows[0].address);
+            CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, &hit[i], 1, &junk, &error));
+            CHECK(junk.omitted == dropped && junk.count == plan.count - dropped &&
+                  junk.registers == plan.registers - dropped_regs);
+            for (unsigned k = 0; k < junk.count; k++) {
+                CHECK(!(junk.windows[k].address < hit[i].physical_address + hit[i].size &&
+                        hit[i].physical_address < junk.windows[k].address + junk.windows[k].size));
+            }
         }
         CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, near, 2, &junk, &error));
-        CHECK(junk.count == plan.count && junk.registers == plan.registers);
+        CHECK(junk.count == plan.count && junk.registers == plan.registers && !junk.omitted);
         /* DRAM placed on the window rejects it. */
         CHECK(!apple_modern_pmgr_storage_plan_build(tree, a, n, NULL, 0, &junk, &error));
         clear_error(&error);
@@ -297,18 +328,18 @@ static void plan_tamper(AppleModernBlob tree)
     /* Group flags change placement order, not the later enable-register set. */
     g6[8] = 0;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    CHECK(junk.count == 8 + FIXED_WINDOWS && junk.registers == 1787 + 428 + FIXED_REGISTERS &&
+    CHECK(junk.count == 8 + FIXED_WINDOWS + EXTRA_WINDOWS && junk.registers == 1787 + FIXED_REGISTERS + EXTRA_REGISTERS &&
           junk.windows[0].group == 7 && junk.windows[1].group == WAKE_TAG);
     /* Neither initially programmed: fixed windows precede all eight groups. */
     g7[8] = 0;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    CHECK(junk.count == 8 + FIXED_WINDOWS && junk.registers == 1787 + 428 + FIXED_REGISTERS &&
+    CHECK(junk.count == 8 + FIXED_WINDOWS + EXTRA_WINDOWS && junk.registers == 1787 + FIXED_REGISTERS + EXTRA_REGISTERS &&
           junk.windows[0].group == WAKE_TAG);
     g6[8] = 2; g7[8] = 2;
     /* Flag bit 0 alone defers a group to the appended enable groups. */
     g7[8] = 1;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    CHECK(junk.count == 8 + FIXED_WINDOWS && junk.windows[0].group == 6 &&
+    CHECK(junk.count == 8 + FIXED_WINDOWS + EXTRA_WINDOWS && junk.windows[0].group == 6 &&
           junk.windows[1].group == WAKE_TAG);
     g7[8] = 2;
 
@@ -415,23 +446,23 @@ static void plan_tamper(AppleModernBlob tree)
     CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
     clear_error(&error);
     memcpy(reg + 28 * 16, saved, 16);
-    /* PwrGate +0xcd0 needs reg[22] to hold at least 0xcd4 bytes (+0x40 alone needs only 0x44). */
+    /* The whole PWRGATE bank is served: reg[22] must hold 0x4000 bytes (MEASURED +0x60 hang). */
     CHECK(reg_size >= 23 * 16);
     memcpy(saved, reg + 22 * 16, 16);
     memset(reg + 22 * 16 + 8, 0, 8);
-    reg[22 * 16 + 8] = 0xd4; reg[22 * 16 + 9] = 0x0c;
+    reg[22 * 16 + 8] = 0x00; reg[22 * 16 + 9] = 0x40;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    reg[22 * 16 + 8] = 0xd3;
+    reg[22 * 16 + 8] = 0xff; reg[22 * 16 + 9] = 0x3f;
     CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
     clear_error(&error);
     memcpy(reg + 22 * 16, saved, 16);
-    /* TVM index 0xb needs +0x7e0; index 2 (CLLT) needs +0xfe0 → reg[25] size >= 0xfe4. */
+    /* Complex bring-up dispatches by TVM index across the bank (MEASURED), so reg[25] must span 0x4000 bytes. */
     CHECK(reg_size >= 26 * 16);
     memcpy(saved, reg + 25 * 16, 16);
     memset(reg + 25 * 16 + 8, 0, 8);
-    reg[25 * 16 + 8] = 0xe4; reg[25 * 16 + 9] = 0x0f;  /* 0xfe4 */
+    reg[25 * 16 + 8] = 0x00; reg[25 * 16 + 9] = 0x40;  /* 0x4000: the whole TVM bank is served */
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    reg[25 * 16 + 8] = 0xe3; reg[25 * 16 + 9] = 0x0f;  /* 0xfe3 — one byte short of index-2 status */
+    reg[25 * 16 + 8] = 0xff; reg[25 * 16 + 9] = 0x3f;  /* 0x3fff: one byte short of the bank */
     CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
     clear_error(&error);
     memcpy(reg + 25 * 16, saved, 16);
@@ -719,8 +750,8 @@ static void core_stock(AppleModernBlob tree)
         CHECK(apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x24, 4, &v) && v == 3);   /* neighbour kept */
         CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC2_WINDOW, 4, 4, &v));
         CHECK(!apple_modern_pmgr_storage_core_read(&core, PMC2_WINDOW, 0, 8, &v));
-        /* A neighbouring window is separate storage. */
-        CHECK(apple_modern_pmgr_storage_core_read(&core, 18, 0x300, 4, &v));
+        /* A neighbouring window (DPE channel 9, its +0x300 register) is separate storage. */
+        CHECK(apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW - 1, 0x300, 4, &v));
         CHECK(apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0, 4, &v) && v == 0xb);
         CHECK(apple_modern_pmgr_storage_core_read(&core, PMC_WINDOW, 0x24, 4, &v) && v == 3);
     }
