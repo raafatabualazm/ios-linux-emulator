@@ -79,5 +79,17 @@ void apple_modern_pmgr_core_write(AppleModernPMGRCore *core,
 #define TYPE_APPLE_MODERN_PMGR "apple-modern-pmgr"
 OBJECT_DECLARE_SIMPLE_TYPE(AppleModernPMGRState, APPLE_MODERN_PMGR)
 DeviceState *apple_modern_pmgr_new(const AppleModernPMGRPlan *plan);
+/*
+ * Default-off observability: log every power-cell access with the domain's
+ * ADT device name (ECPU_0, PCPU_1, ...). Call before realize. Names are read
+ * from the same /arm-io/pmgr "devices" table the plan was built from; the ADT
+ * is not modified and no cell behaviour changes.
+ *
+ * This is how the guest's own core-enable write is identified: /cpus/cpuN
+ * carries function-enable_core = [phandle, 'Core', 1 << cpu-id] pointing at
+ * /arm-io/pmgr, and the six cores appear in that table as the non-virtual
+ * domains ECPU_0..ECPU_3 and PCPU_0..PCPU_1.
+ */
+void apple_modern_pmgr_set_trace(DeviceState *dev, AppleModernBlob dtree);
 #endif
 #endif

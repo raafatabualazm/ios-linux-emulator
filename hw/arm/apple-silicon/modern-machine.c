@@ -140,6 +140,8 @@ struct AppleModernMachine {
     bool md0_width_compat;
     /* Back every ADT core's CPU register windows, not just the boot core's. */
     bool all_cpu_register_windows;
+    /* Log every PMGR power-cell access with its ADT domain name. */
+    bool pmgr_trace;
     bool root_rw_compat;
     bool txm_sc_compat;
     bool iouc_sandbox_compat;
@@ -1363,6 +1365,12 @@ static bool map_pmgr(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
                     s->pmgr_boot_on);
     }
     DeviceState *dev = apple_modern_pmgr_new(&plan);
+    if (s->pmgr_trace) {
+        apple_modern_pmgr_set_trace(dev, dtree);
+        warn_report("apple-modern: PMGR access trace on; every power-cell read "
+                    "and write is logged with its ADT domain name (opt-in "
+                    "pmgr-trace; observability only, cell behaviour unchanged)");
+    }
     dev->id = g_strdup("modern-pmgr");
     object_property_add_child(OBJECT(s), "pmgr", OBJECT(dev));
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
@@ -4671,6 +4679,7 @@ BOOL_PROPERTY(img4_ignition_compat, img4_ignition_compat)
 BOOL_PROPERTY(trustcache_v2, trustcache_v2)
 BOOL_PROPERTY(md0_width_compat, md0_width_compat)
 BOOL_PROPERTY(all_cpu_register_windows, all_cpu_register_windows)
+BOOL_PROPERTY(pmgr_trace, pmgr_trace)
 BOOL_PROPERTY(root_rw_compat, root_rw_compat)
 BOOL_PROPERTY(txm_sc_compat, txm_sc_compat)
 BOOL_PROPERTY(iouc_sandbox_compat, iouc_sandbox_compat)
@@ -5049,6 +5058,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "all-cpu-register-windows",
                                    get_all_cpu_register_windows,
                                    set_all_cpu_register_windows);
+    object_class_property_add_bool(oc, "pmgr-trace", get_pmgr_trace,
+                                   set_pmgr_trace);
     object_class_property_add_bool(oc, "root-rw-compat",
                                    get_root_rw_compat,
                                    set_root_rw_compat);

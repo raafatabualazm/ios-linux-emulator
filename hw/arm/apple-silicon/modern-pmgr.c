@@ -446,6 +446,7 @@ typedef struct AppleModernPMGRPort {
     AppleModernPMGRState *state;
     unsigned window;
     uint32_t offset;
+    unsigned cell;
 } AppleModernPMGRPort;
 
 struct AppleModernPMGRState {
@@ -454,20 +455,77 @@ struct AppleModernPMGRState {
     MemoryRegion windows[APPLE_MODERN_PMGR_MAX_WINDOWS];
     MemoryRegion cells[APPLE_MODERN_PMGR_MAX_CELLS];
     AppleModernPMGRPort ports[APPLE_MODERN_PMGR_MAX_CELLS];
+    /* Default-off trace: ADT device name per cell, "" when unnamed. */
+    bool trace;
+    char names[APPLE_MODERN_PMGR_MAX_CELLS][17];
 };
+
+static const char *pmgr_cell_name(const AppleModernPMGRState *s, unsigned cell)
+{
+    if (cell >= s->core.plan.cell_count || !s->names[cell][0]) {
+        return "?";
+    }
+    return s->names[cell];
+}
+
+void apple_modern_pmgr_set_trace(DeviceState *dev, AppleModernBlob dtree)
+{
+    AppleModernPMGRState *s = APPLE_MODERN_PMGR(dev);
+    AppleModernBlob devices;
+    Error *local = NULL;
+
+    s->trace = true;
+    if (!apple_modern_adt_property(dtree, "/arm-io/pmgr", "devices", &devices,
+                                   &local)) {
+        /* Tracing without names is still useful; the plan already validated. */
+        error_free(local);
+        return;
+    }
+    for (size_t i = 0; i + 48 <= devices.size; i += 48) {
+        const uint8_t *record = devices.data + i;
+        uint16_t id = get_le(record + 26, 2);
+
+        for (unsigned c = 0; c < s->core.plan.cell_count; c++) {
+            if (s->core.plan.cells[c].id != id) {
+                continue;
+            }
+            memcpy(s->names[c], record + 32, 16);
+            s->names[c][16] = 0;
+        }
+    }
+}
 
 static uint64_t pmgr_read(void *opaque, hwaddr offset, unsigned size)
 {
     AppleModernPMGRPort *port = opaque;
-    return apple_modern_pmgr_core_read(&port->state->core, port->window,
-                                      port->offset + offset);
+    uint32_t value = apple_modern_pmgr_core_read(&port->state->core,
+                                                 port->window,
+                                                 port->offset + offset);
+    if (port->state->trace) {
+        qemu_log_mask(LOG_UNIMP, "PMGR read  %-16s win%u +0x%05" PRIx32
+                      " +%u -> 0x%08" PRIx32 "\n",
+                      pmgr_cell_name(port->state, port->cell), port->window,
+                      port->offset, (unsigned)offset, value);
+    }
+    return value;
 }
 
 static void pmgr_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
 {
     AppleModernPMGRPort *port = opaque;
+
     apple_modern_pmgr_core_write(&port->state->core, port->window,
                                  port->offset + offset, value);
+    if (port->state->trace) {
+        uint32_t after = apple_modern_pmgr_core_read(&port->state->core,
+                                                     port->window,
+                                                     port->offset + offset);
+        qemu_log_mask(LOG_UNIMP, "PMGR write %-16s win%u +0x%05" PRIx32
+                      " +%u value 0x%08" PRIx32 " target %u -> actual %u\n",
+                      pmgr_cell_name(port->state, port->cell), port->window,
+                      port->offset, (unsigned)offset, (uint32_t)value,
+                      (unsigned)(value & 15), (unsigned)((after >> 4) & 15));
+    }
 }
 
 static const MemoryRegionOps pmgr_ops = {
@@ -505,7 +563,7 @@ static void pmgr_realize(DeviceState *dev, Error **errp)
         const AppleModernPMGRCell *cell = &s->core.plan.cells[i];
         char name[32];
         snprintf(name, sizeof(name), "apple-modern.pmgr-cell-%x", cell->id);
-        s->ports[i] = (AppleModernPMGRPort){s, cell->window, cell->offset};
+        s->ports[i] = (AppleModernPMGRPort){s, cell->window, cell->offset, i};
         memory_region_init_io(&s->cells[i], OBJECT(dev), &pmgr_ops,
                               &s->ports[i], name, 8);
         memory_region_add_subregion(&s->windows[cell->window], cell->offset,
