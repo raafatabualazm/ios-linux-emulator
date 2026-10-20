@@ -1368,3 +1368,131 @@ bool apple_modern_kc_rootvp_auth_skip_compat(uint8_t *bootkc, size_t len,
     return true;
 }
 
+/*
+ * vekd-unenc-data-compat: NOP the apfs kext's "unencrypted data volume is not
+ * allowed" guard (see header).  VA 0xfffffff00a9cfc70 in com.apple.filesystems.apfs
+ * __TEXT_EXEC: tbnz w8, #0, <panic>  ->  nop.
+ */
+#define VEKD_FN_VA UINT64_C(0xfffffff00a9cfc70)
+#define VEKD_OLD   0x370000a8u /* tbnz w8, #0, 0xa9cfc84 */
+#define VEKD_NEW   0xd503201fu /* nop                    */
+
+bool apple_modern_kc_vekd_unenc_data_compat(uint8_t *bootkc, size_t len,
+                                            AppleModernVekdPatch *out,
+                                            Error **errp)
+{
+    uint64_t apfs, texec_va, texec_vmsize, texec_off, texec_size, off;
+
+    if (!bootkc) {
+        error_setg(errp, "vekd-unenc-data-compat: no kernel cache");
+        return false;
+    }
+    if (!find_fileset_entry(bootkc, len, "com.apple.filesystems.apfs", &apfs)) {
+        error_setg(errp, "vekd-unenc-data-compat: com.apple.filesystems.apfs "
+                   "fileset entry not found");
+        return false;
+    }
+    if (!find_segment_and_section_va(bootkc, len, apfs, "__TEXT_EXEC", NULL,
+                                     &texec_va, &texec_vmsize,
+                                     &texec_off, &texec_size)) {
+        error_setg(errp, "vekd-unenc-data-compat: apfs __TEXT_EXEC not found");
+        return false;
+    }
+    if (texec_off > len || texec_size > len - texec_off ||
+        (texec_off & 3) != 0 || texec_size < 32) {
+        error_setg(errp, "vekd-unenc-data-compat: apfs __TEXT_EXEC outside "
+                   "image or unaligned");
+        return false;
+    }
+    if (VEKD_FN_VA < texec_va ||
+        VEKD_FN_VA - texec_va > texec_size - 4) {
+        error_setg(errp, "vekd-unenc-data-compat: VA 0x%" PRIx64
+                   " outside apfs __TEXT_EXEC", VEKD_FN_VA);
+        return false;
+    }
+    off = texec_off + (VEKD_FN_VA - texec_va);
+    if (ldl_le_p(bootkc + off) != VEKD_OLD) {
+        error_setg(errp, "vekd-unenc-data-compat: unexpected instruction "
+                   "0x%08x at the unencrypted-data tbnz (expected 0x%08x); "
+                   "refusing to patch", ldl_le_p(bootkc + off), VEKD_OLD);
+        return false;
+    }
+
+    if (out) {
+        out->anchor = off;
+        out->insn_before = VEKD_OLD;
+        out->insn_after = VEKD_NEW;
+    }
+    stl_le_p(bootkc + off, VEKD_NEW);
+    return true;
+}
+
+/*
+ * keystore-persona-stub-compat: force AppleSEPKeyStore persona-UUID mapping to
+ * succeed (see header).  Two insns in com.apple.driver.AppleSEPKeyStore __TEXT_EXEC
+ * at VA 0xfffffff0095f3ef0/.._ef4.
+ */
+#define KSTUB_FN_VA  UINT64_C(0xfffffff0095f3ef0)
+#define KSTUB_OLD0   0x52980455u /* mov  w21, #0xc022          */
+#define KSTUB_NEW0   0x52800015u /* mov  w21, #0               */
+#define KSTUB_OLD1   0x72bc00f5u /* movk w21, #0xe007, lsl #16 */
+#define KSTUB_NEW1   0xd503201fu /* nop                        */
+
+bool apple_modern_kc_keystore_persona_stub_compat(uint8_t *bootkc, size_t len,
+                                                  AppleModernKeystoreStubPatch *out,
+                                                  Error **errp)
+{
+    uint64_t ks, texec_va, texec_vmsize, texec_off, texec_size, off;
+
+    if (!bootkc) {
+        error_setg(errp, "keystore-persona-stub-compat: no kernel cache");
+        return false;
+    }
+    if (!find_fileset_entry(bootkc, len, "com.apple.driver.AppleSEPKeyStore",
+                            &ks)) {
+        error_setg(errp, "keystore-persona-stub-compat: AppleSEPKeyStore "
+                   "fileset entry not found");
+        return false;
+    }
+    if (!find_segment_and_section_va(bootkc, len, ks, "__TEXT_EXEC", NULL,
+                                     &texec_va, &texec_vmsize,
+                                     &texec_off, &texec_size)) {
+        error_setg(errp, "keystore-persona-stub-compat: AppleSEPKeyStore "
+                   "__TEXT_EXEC not found");
+        return false;
+    }
+    if (texec_off > len || texec_size > len - texec_off ||
+        (texec_off & 3) != 0 || texec_size < 32) {
+        error_setg(errp, "keystore-persona-stub-compat: AppleSEPKeyStore "
+                   "__TEXT_EXEC outside image or unaligned");
+        return false;
+    }
+    if (KSTUB_FN_VA < texec_va ||
+        KSTUB_FN_VA - texec_va > texec_size - 8) {
+        error_setg(errp, "keystore-persona-stub-compat: VA 0x%" PRIx64
+                   " outside AppleSEPKeyStore __TEXT_EXEC", KSTUB_FN_VA);
+        return false;
+    }
+    off = texec_off + (KSTUB_FN_VA - texec_va);
+    if (ldl_le_p(bootkc + off) != KSTUB_OLD0 ||
+        ldl_le_p(bootkc + off + 4) != KSTUB_OLD1) {
+        error_setg(errp, "keystore-persona-stub-compat: unexpected instructions "
+                   "0x%08x/0x%08x at the AppleSEPKeyStore fail path (expected "
+                   "0x%08x/0x%08x); refusing to patch",
+                   ldl_le_p(bootkc + off), ldl_le_p(bootkc + off + 4),
+                   KSTUB_OLD0, KSTUB_OLD1);
+        return false;
+    }
+
+    if (out) {
+        out->anchor = off;
+        out->insn_before0 = KSTUB_OLD0;
+        out->insn_after0 = KSTUB_NEW0;
+        out->insn_before1 = KSTUB_OLD1;
+        out->insn_after1 = KSTUB_NEW1;
+    }
+    stl_le_p(bootkc + off, KSTUB_NEW0);
+    stl_le_p(bootkc + off + 4, KSTUB_NEW1);
+    return true;
+}
+

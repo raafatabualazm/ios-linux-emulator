@@ -31,6 +31,7 @@
 #include "qemu/log.h"
 #include "private.h"
 #include "trace.h"
+#include "hw/core/cpu.h"
 
 /*
  * Block-relative offsets. The mailbox region is mapped at wrapper + 0x8100,
@@ -160,6 +161,28 @@ static uint64_t apple_a7iop_v6_mailbox_reg_read(void *opaque, hwaddr addr,
 
     s->diagnostic_mmio_reads++;
     trace_apple_a7iop_mailbox_read(s->role, 6, addr, size);
+    /*
+     * Name the kext driving the GFX RTKit mailbox. The wrapper region sees
+     * exactly ONE access a boot (CPU_CTRL +0x44, from AppleASCWrapV6 at linked
+     * 0xfffffff00856edec); the real HELLO/EPMAP/rollcall traffic rides these
+     * mailbox subregions instead. The open question is who sends the EPMAP
+     * reply that DECLINES the firmware's own channels (raw 0x21 gfx_msgs and
+     * 0x23 gfx_iop_msgs) with an empty bitmap, leaving only crashlog 0x20
+     * started. a7iop builds target-agnostic, so use CPUClass::get_pc rather
+     * than CPUARMState. GFX only: SMC and DCP together do ~10k accesses.
+     */
+    /*
+     * NB the mailbox roles are "GFX-ap" and "GFX-iop" (the wrapper's is plain
+     * "GFX"), so this must be a prefix match -- an exact strcmp never fires.
+     */
+    if (s->role != NULL && strncmp(s->role, "GFX", 3) == 0 &&
+        current_cpu != NULL) {
+        CPUClass *cc = CPU_GET_CLASS(current_cpu);
+
+        qemu_log_mask(LOG_UNIMP, "GFX-MBOX[%s] read +0x%05" PRIx64 " size %u "
+                      "[guest pc 0x%016" PRIx64 "]\n", s->role, (uint64_t)addr, size,
+                      cc->get_pc ? (uint64_t)cc->get_pc(current_cpu) : 0);
+    }
     switch (addr) {
     case REG_A2I_CTRL:
         return apple_a7iop_mailbox_get_iop_ctrl(s);

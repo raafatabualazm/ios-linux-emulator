@@ -23,6 +23,7 @@
 #include "hw/misc/apple-silicon/a7iop/core.h"
 #include "private.h"
 #include "trace.h"
+#include "hw/core/cpu.h"
 
 #define REG_UNKNOWN_40 (0x40)
 #define REG_CPU_CTRL (0x44)
@@ -70,6 +71,31 @@ static uint64_t apple_a7iop_v6_reg_read(void *opaque, hwaddr addr,
 
     s->diagnostic_mmio_reads++;
     trace_apple_a7iop_wrapper_read(s->role, 6, addr, size);
+    /*
+     * Diagnostic: log the GUEST PC/LR of whoever touches the GFX wrapper.
+     * Measured on apple-modern: the gfx-asc RTKit handshake completes
+     * (HELLO/HELLO_ACK/EPMAP/rollcall) but the AP answers the EPMAP block-1
+     * offer of the firmware's own channels (raw 0x21 gfx_msgs, 0x23
+     * gfx_iop_msgs) with an EMPTY bitmap and starts only crashlog 0x20, so no
+     * client ever claims them and AGXAcceleratorG17P's probe bails silently.
+     * The same trick applied to the GPU register aperture identified its
+     * reader as com.apple.AGXG17P in a single run; here it should name which
+     * kext actually drives the handshake. GFX only, to keep SMC/DCP (which
+     * together do ~10k accesses a boot) out of the log.
+     */
+    if (s->role != NULL && strcmp(s->role, "GFX") == 0 &&
+        current_cpu != NULL) {
+        /*
+         * a7iop builds target-agnostic (libsystem.a), so CPUARMState is not
+         * reachable here; CPUClass::get_pc is the portable accessor.
+         */
+        CPUClass *cc = CPU_GET_CLASS(current_cpu);
+        uint64_t pc = cc->get_pc ? (uint64_t)cc->get_pc(current_cpu) : 0;
+
+        qemu_log_mask(LOG_UNIMP, "GFX-WRAP read +0x%05" PRIx64 " size %u "
+                      "[guest pc 0x%016" PRIx64 "]\n",
+                      (uint64_t)addr, size, pc);
+    }
     switch (addr) {
     case REG_UNKNOWN_40:
         /*

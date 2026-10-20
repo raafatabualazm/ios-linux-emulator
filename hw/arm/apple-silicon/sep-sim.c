@@ -698,6 +698,31 @@ static void apple_sep_sim_handle_bootstrap_msg(AppleSEPSimState *s,
         apple_sep_sim_send_message(s, EP_BOOTSTRAP, msg->tag,
                                    BOOTSTRAP_OP_OPCODE_16_RESPONSE, 0, randval);
         break;
+    /*
+     * iOS 27 (24A437 / t8140) AppleSEPBooter issues these bootstrap steps in
+     * source order before BOOT_IMG4: BootTmmManifest(36) -> BootPatch(37) ->
+     * BootTz0(5) -> LoadSEPART(7) -> BootImg4(6) -> (CONTROL NOTIFY_ALIVE).
+     * Without an ACK for 36/37/7 the AP hangs on the Booter wait and never
+     * reaches IMG4, so NOTIFY_ALIVE is never emitted -> seputil data-protection
+     * boot-task times out after 60s ("Timeout trying to connect to the SEP",
+     * exit 60). ACK with the attested request+100 pattern (5->105, 6->106,
+     * 7->107). Grok RE 2026-10-16.
+     */
+    case BOOTSTRAP_OP_BOOT_TMM_MANIFEST:
+        qemu_log_mask(LOG_GUEST_ERROR, "EP_BOOTSTRAP: BOOT_TMM_MANIFEST\n");
+        apple_sep_sim_send_message(s, EP_BOOTSTRAP, msg->tag,
+                                   BOOTSTRAP_OP_BOOT_TMM_MANIFEST + 100, 0, 0);
+        break;
+    case BOOTSTRAP_OP_BOOT_PATCH:
+        qemu_log_mask(LOG_GUEST_ERROR, "EP_BOOTSTRAP: BOOT_PATCH\n");
+        apple_sep_sim_send_message(s, EP_BOOTSTRAP, msg->tag,
+                                   BOOTSTRAP_OP_BOOT_PATCH + 100, 0, 0);
+        break;
+    case BOOTSTRAP_OP_LOAD_SEP_ART:
+        qemu_log_mask(LOG_GUEST_ERROR, "EP_BOOTSTRAP: LOAD_SEP_ART\n");
+        apple_sep_sim_send_message(s, EP_BOOTSTRAP, msg->tag,
+                                   BOOTSTRAP_OP_ART_ACCEPTED, 0, 0);
+        break;
     default:
         apple_sep_sim_note_unsupported(s, msg->ep, msg->op);
         qemu_log_mask(LOG_GUEST_ERROR, "EP_BOOTSTRAP: Unknown opcode %d\n",
