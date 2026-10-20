@@ -199,7 +199,14 @@ static bool mark(Group *groups, unsigned group_count, AppleModernBlob reg,
  *     channel it does a read-modify-write setting bit 0 at t + 0x200, then at t, then
  *     at t + 0x300; the middle one is skipped for exactly one iteration, the eighth
  *     (its countdown register x23 reaches 0 only there), so channel 7 lists only
- *     +0x200 and +0x300. Plain RMW, no wait: 29 registers in all.
+ *     +0x200 and +0x300. Plain RMW, no wait.
+ *     The slot-0x5a0 routine (0xfffffff0092aac90) also samples an 8-byte counter at
+ *     channel + 0x308 (two 32-bit loads, a seqlock). On the -smp 6 guest that load
+ *     was PA 0x30020a708 and took a synchronous external abort (ESR_EL2 0x96000010)
+ *     because the window ended at +0x304, four bytes short of the counter; the
+ *     handler returned to the same instruction. Zero storage makes the seqlock
+ *     return 0. Channel 7's window starts at the channel's +0x200, so its counter
+ *     is +0x108 there. 10 channels, 2 words each, on top of the 29 RMW registers.
  *  17: the PMC static-voter vote registers, in /arm-io/pmgr reg[43] (child 0xf2000000,
  *     physical 0x302000000, 16 MiB; RegMap selector 0x81, which the 43 pairs of initRegMap
  *     as decoded do not list), at offset 0x8ac000: ApplePMC register group
@@ -316,7 +323,7 @@ typedef struct FixedWindow {
     unsigned nregs;         /* 0: every 4-byte slot of the window is a register */
     uint16_t regs[8];       /* else: register offsets inside the window (multiples of 4) */
 } FixedWindow;
-#define DPE_CHANNEL(n) {32, 0x2400 + 0x400 * (n), 0x304, 3, {0, 0x200, 0x300}}
+#define DPE_CHANNEL(n) {32, 0x2400 + 0x400 * (n), 0x310, 5, {0, 0x200, 0x300, 0x308, 0x30c}}
 static const FixedWindow fixed_windows[] = {
     {4, 0x8, 0x20, 0, {0}},
     {34, 0x18200, 0x80, 0, {0}},
@@ -331,7 +338,7 @@ static const FixedWindow fixed_windows[] = {
     {22, 0x40, 0x4, 0, {0}},
     DPE_CHANNEL(0), DPE_CHANNEL(1), DPE_CHANNEL(2), DPE_CHANNEL(3), DPE_CHANNEL(4),
     DPE_CHANNEL(5), DPE_CHANNEL(6),
-    {32, 0x4200, 0x104, 2, {0, 0x100}},     /* channel 7 has no +0x0 register */
+    {32, 0x4200, 0x110, 4, {0, 0x100, 0x108, 0x10c}}, /* channel 7: no +0x0; counter at +0x308 */
     DPE_CHANNEL(8), DPE_CHANNEL(9),
     {43, 0x8ac000, 0x2c, 7, {0, 4, 8, 0xc, 0x20, 0x24, 0x28}},  /* PMC votes 0..3, bwr, dynamic, boost */
     {43, 0x860000, 0x4, 0, {0}},            /* PMC +0x60000 (kRegGroupPMCDVFM + 0x60000) */
@@ -374,6 +381,42 @@ static const uint64_t acc_counter_banks[] = {
 _Static_assert(ARRAY_ENTRIES(acc_counter_banks) == ARRAY_ENTRIES(acc_counter_windows),
                "ACC register windows require matched bank addresses");
 
+/* E_ACC_CPM_PWRCTL and P_ACC0_CPM_PWRCTL command at +0x20.
+ * AppleT8140PMGR 0xfffffff0098490fc reads the 64-bit word (vtable +0xdf8),
+ * clears bit 23, ORs bit 23 back when its argument is zero, writes it
+ * (vtable +0xe08), and unless argument bit 0 is set polls bit 7. It does
+ * that for cluster 0, then cluster 1, with packed offset 0xe20020. On the
+ * -smp 6 guest the first load was PA 0x210e20020 (record name
+ * E_ACC_CPM_PWRCTL, phys 0x210e20000, size 0x2000) and took ESR_EL2
+ * 0x96000010. Cluster 1 is the same word at 0x211e20020. Zero storage
+ * leaves bit 7 clear, so the poll returns. This is not a clock or a voltage. */
+#define PWRCTL_CMD_TAG_BASE 0x220
+static const FixedWindow pwrctl_cmd_windows[] = {
+    {5, 0x20, 0x8, 0, {0}},
+    {14, 0x20, 0x8, 0, {0}},
+};
+static const uint64_t pwrctl_cmd_banks[] = {
+    UINT64_C(0x210e20000), UINT64_C(0x211e20000),
+};
+_Static_assert(ARRAY_ENTRIES(pwrctl_cmd_banks) == ARRAY_ENTRIES(pwrctl_cmd_windows),
+               "PWRCTL command windows require matched bank addresses");
+
+/* PMGR_SOC_TVM control/status pairs other than index 0xb.
+ * AppleT8140PMGR 0xfffffff009849284 reads the 32-bit control, clears bit 0,
+ * ORs the caller's bit, writes it back, and when the poll is armed reads
+ * control+0x3e0 until bit 1 is clear. Cases: w1==1 at +0x0, w1==6 at +0x800,
+ * w1==2 at +0xc00, w1==9 at +0x1000. Index 0xb (+0x400) is already a window.
+ * The -smp 6 guest aborted +0x0 (PA 0x300760000) and then +0x1000
+ * (PA 0x300761000), both selector 0x67, ESR_EL2 0x96000010. Zero storage
+ * leaves status bit 1 clear. */
+#define TVM_IDX_TAG_BASE 0x222
+static const FixedWindow tvm_idx_windows[] = {
+    {25, 0x0, 0x3e4, 2, {0, 0x3e0}},
+    {25, 0x800, 0x3e4, 2, {0, 0x3e0}},
+    {25, 0xc00, 0x3e4, 2, {0, 0x3e0}},
+    {25, 0x1000, 0x3e4, 2, {0, 0x3e0}},
+};
+
 /* Block bases of the T8140 PS-write hook table (see item 23-32 above), in table order. The window
  * of block b is the register pair at b + 0x104 and b + 0x108; each must lie inside the /arm-io
  * bus ranges. Their tags continue the fixed windows' (FIXED_TAG_BASE + count + index). */
@@ -404,8 +447,15 @@ static bool place(AppleModernPMGRStoragePlan *plan, uint64_t address, uint32_t s
     }
     for (size_t k = 0; k < exclusion_count; k++) {
         if (overlaps(address, size, exclusions[k].physical_address, exclusions[k].size)) {
-            error_setg(errp, "PMGR storage window %u overlaps another device", tag);
-            return false;
+            /*
+             * This span is already owned (board RAM, a logging aperture, or
+             * another device). Dropping the window keeps every other register.
+             * A hit used to reject the whole plan, so disp0 reg[5]
+             * (0x302800000+0xbc000) aborted storage before the cluster
+             * registers at 0x300780000 were mapped.
+             */
+            plan->omitted++;
+            return true;
         }
     }
     for (unsigned k = 0; k < plan->count; k++) {
@@ -664,6 +714,43 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
         }
         if (!place(&plan, base + f->offset, f->size, ACC_COUNTER_TAG_BASE + i,
                    valid, dram_base, dram_size, exclusions, exclusion_count, errp)) {
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < ARRAY_ENTRIES(pwrctl_cmd_windows); i++) {
+        const FixedWindow *f = &pwrctl_cmd_windows[i];
+        uint64_t base, valid[APPLE_MODERN_PMGR_STORAGE_MASKS] = {0};
+        uint64_t size = le64(reg.data + 16 * f->reg_index + 8);
+        uint64_t expected = pwrctl_cmd_banks[i];
+        if (size < f->offset + f->size ||
+            !translate(ranges, le64(reg.data + 16 * f->reg_index), size, &base) ||
+            base != expected) {
+            error_setg(errp, "PWRCTL command range is outside matched PWRCTL");
+            return false;
+        }
+        for (unsigned word = 0; word < f->size / 4; word++) {
+            valid[word / 64] |= UINT64_C(1) << (word % 64);
+        }
+        if (!place(&plan, base + f->offset, f->size, PWRCTL_CMD_TAG_BASE + i,
+                   valid, dram_base, dram_size, exclusions, exclusion_count, errp)) {
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < ARRAY_ENTRIES(tvm_idx_windows); i++) {
+        const FixedWindow *f = &tvm_idx_windows[i];
+        uint64_t base, valid[APPLE_MODERN_PMGR_STORAGE_MASKS] = {0};
+        uint64_t size = le64(reg.data + 16 * f->reg_index + 8);
+        if (f->nregs != 2 || size < f->offset + f->size ||
+            !translate(ranges, le64(reg.data + 16 * f->reg_index), size, &base) ||
+            base != UINT64_C(0x300760000)) {
+            error_setg(errp, "TVM control window is outside PMGR_SOC_TVM");
+            return false;
+        }
+        for (unsigned r = 0; r < f->nregs; r++) {
+            valid[f->regs[r] / 4 / 64] |= UINT64_C(1) << ((f->regs[r] / 4) % 64);
+        }
+        if (!place(&plan, base + f->offset, f->size, TVM_IDX_TAG_BASE + i, valid,
+                   dram_base, dram_size, exclusions, exclusion_count, errp)) {
             return false;
         }
     }

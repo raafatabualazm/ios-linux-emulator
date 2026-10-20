@@ -1093,7 +1093,9 @@ static bool pmgr_exclusions(AppleModernMachine *s, uint64_t uart,
             return false;
         }
     }
-    /* Every append is bounded; the full declared profile uses at most 68 spans. */
+    /* Every append is bounded by APPLE_MODERN_MAX_BOARD_EXCLUSIONS. The
+     * declared profile was sized at 68 spans; PMGR storage adds its placed
+     * windows on top, which is why the budget is 256. */
     for (unsigned i = 0; i < APPLE_MODERN_MCC_DCS_COUNT; i++) {
         if (s->mcc_dramcfg_plan.addresses[i] &&
             !append_pmgr_exclusion(exclusions, &count,
@@ -2222,10 +2224,11 @@ static bool map_pmgr_storage(AppleModernMachine *s, uint64_t uart,
     }
     s->pmgr_storage_plan = plan;
     warn_report("apple-modern: opt-in PMGR perf-counter register storage (%u windows, "
-                "%u 32-bit registers derived from the ADT perf-groups/perf-counters); "
+                "%u 32-bit registers derived from the ADT perf-groups/perf-counters, "
+                "%u windows left to an existing owner); "
                 "declared zero-reset storage, NOT calibration data and no counting "
                 "behaviour (a boot-progress diagnostic profile)",
-                plan.count, plan.registers);
+                plan.count, plan.registers, plan.omitted);
     return true;
 }
 

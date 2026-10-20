@@ -82,6 +82,7 @@ typedef struct AppleModernPMGRStorageWindow {
 typedef struct AppleModernPMGRStoragePlan {
     AppleModernPMGRStorageWindow windows[APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS];
     uint32_t count, registers;
+    uint32_t omitted; /* windows skipped because an exclusion already owns them */
 } AppleModernPMGRStoragePlan;
 
 typedef struct AppleModernPMGRStorageCore {
@@ -94,10 +95,12 @@ typedef struct AppleModernPMGRStorageCore {
 } AppleModernPMGRStorageCore;
 
 /*
- * Derive the plan from the served ADT (never modified). Every window must lie
- * inside its /arm-io/pmgr reg window, outside DRAM and the exclusions, and not
- * overlap another window. Output must be disjoint from the inputs; any error
- * clears it. At least one programmed group is required.
+ * Derive the plan from the served ADT (never modified). Every placed window
+ * lies inside its /arm-io/pmgr reg window, outside DRAM, and clear of the
+ * other placed windows. A window that overlaps an exclusion is omitted
+ * (plan->omitted) because that owner already serves the span; it does not
+ * reject the rest of the plan. Output must be disjoint from the inputs; any
+ * error clears it. At least one programmed group is required.
  */
 bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
     uint64_t dram_base, uint64_t dram_size,
