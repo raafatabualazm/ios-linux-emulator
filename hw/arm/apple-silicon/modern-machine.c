@@ -1332,10 +1332,29 @@ static bool map_disp0(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
     return true;
 }
 
-/* ADT cpu-id N, the numbering the PMGR core mask uses, is vCPU index N. */
+/*
+ * The PMGR core mask is numbered by ADT cpu-id. vCPU n is /cpus/cpu<n>, whose
+ * cpu-id need not be n (the -smp 2 tree gives cpu1 cpu4's P-core identity,
+ * cpu-id 4), so release the vCPU whose node carries that cpu-id. Fall back to
+ * index == cpu-id when no node matches.
+ */
 static void modern_pmgr_core_enable(void *opaque, unsigned core)
 {
-    modern_cpu_release(opaque, core);
+    AppleModernMachine *s = opaque;
+    AppleModernBlob dtree = {s->metadata.dtree, s->metadata.dtree_size};
+
+    for (unsigned n = 0; n < s->cpu_count; n++) {
+        char path[32];
+        AppleModernBlob id;
+
+        snprintf(path, sizeof(path), "/cpus/cpu%u", n);
+        if (apple_modern_adt_property(dtree, path, "cpu-id", &id, NULL) &&
+            id.size == 4 && ldl_le_p(id.data) == core) {
+            modern_cpu_release(s, n);
+            return;
+        }
+    }
+    modern_cpu_release(s, core);
 }
 
 static bool map_pmgr(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
