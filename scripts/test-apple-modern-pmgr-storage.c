@@ -60,7 +60,7 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
  * and the vector-config array, windows 3..5 (tags 0x101..0x103). */
 #define PTD_BASE UINT64_C(0x3003c0000)
 #define FIXED_WINDOWS 49
-#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 5 + 2 + 29 + 7 + 1 + 2 + 1 + 2 + 2 + 20 + 2)
+#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 5 + 2 + 47 + 7 + 1 + 2 + 1 + 2 + 2 + 20 + 2)
 /* Five ADT cluster-control registers (reg_index 28): window 6, tag 0x104. */
 #define CLUSTER_BASE UINT64_C(0x300780000)
 #define CLUSTER_TAG 0x104
@@ -104,7 +104,7 @@ static const uint64_t ACG_BASE[10] = {
     UINT64_C(0x380000000), UINT64_C(0x284000000), UINT64_C(0x288000000), UINT64_C(0x481000000),
     UINT64_C(0x28c000000), UINT64_C(0x396000000)};
 static uint64_t dpe_start(unsigned n) { return n == 7 ? 0x4200 : 0x2400 + 0x400 * n; }
-static uint32_t dpe_size(unsigned n) { return n == 7 ? 0x104 : 0x304; }
+static uint32_t dpe_size(unsigned n) { return n == 7 ? 0x104 : 0x310; }
 static const struct { uint64_t offset; uint32_t size; } PTD[3] = {
     {0x18200, 0x80}, {0x18300, 0x80}, {0x18400, 0x400}};
 #define G6_COUNTERS 6
@@ -163,7 +163,7 @@ static bool expected_valid(unsigned group, uint64_t offset)
     if (group >= DPE_TAG) {
         unsigned n = group - DPE_TAG;
         return n == 7 ? (offset == 0 || offset == 0x100)
-                      : (offset == 0 || offset == 0x200 || offset == 0x300);
+                      : (offset == 0 || offset == 0x200 || offset == 0x300 || offset == 0x304 || offset == 0x308);
     }
     if (group > WAKE_TAG && group <= WAKE_TAG + 3) {
         return offset < PTD[group - WAKE_TAG - 1].size;
@@ -490,13 +490,13 @@ static void plan_tamper(AppleModernBlob tree)
         CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
         CHECK(clusters[28 * 2 + 2] == 5 && clusters[28 * 2 + 0xb] == 0xb);
     }
-    /* The last DPE register (+0x4b00) needs reg[32] to hold 0x4b04 bytes. */
+    /* The last DPE register (+0x4b08) needs reg[32] to hold 0x4b10 bytes. */
     CHECK(reg_size >= 33 * 16);
     memcpy(saved, reg + 32 * 16, 16);
     memset(reg + 32 * 16 + 8, 0, 8);
-    reg[32 * 16 + 8] = 0x04; reg[32 * 16 + 9] = 0x4b;
+    reg[32 * 16 + 8] = 0x10; reg[32 * 16 + 9] = 0x4b;
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    reg[32 * 16 + 8] = 0x03;
+    reg[32 * 16 + 8] = 0x0f;
     CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
     clear_error(&error);
     memcpy(reg + 32 * 16, saved, 16);
@@ -674,10 +674,10 @@ static void core_stock(AppleModernBlob tree)
     CHECK(apple_modern_pmgr_storage_core_read(&core, 9, 0, 4, &v) && v == 0);
     CHECK(apple_modern_pmgr_storage_core_read(&core, 9, 0x300, 4, &v) && v == 0);
     CHECK(!apple_modern_pmgr_storage_core_read(&core, 9, 0x100, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 9, 0x204, 4, &v));
-    CHECK(!apple_modern_pmgr_storage_core_read(&core, 9, 0x304, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 9, 0x200, 8, &v));
+    CHECK(apple_modern_pmgr_storage_core_read(&core, 9, 0x304, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 9, 0x308, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 9, 0x310, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 9, 0x200, 8, &v));
     CHECK(apple_modern_pmgr_storage_core_read(&core, 16, 0, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 16, 0x100, 4, &v));
     CHECK(!apple_modern_pmgr_storage_core_read(&core, 16, 0x200, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 16, 4, 4, &v));
-    CHECK(apple_modern_pmgr_storage_core_read(&core, 18, 0x300, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 18, 0x304, 4, &v));
+    CHECK(apple_modern_pmgr_storage_core_read(&core, 18, 0x300, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 18, 0x304, 4, &v) && apple_modern_pmgr_storage_core_read(&core, 18, 0x308, 4, &v) && !apple_modern_pmgr_storage_core_read(&core, 18, 0x310, 4, &v));
     /* PMC static-voter vote registers: ApplePMC::_enableStaticVoterInterface, for each
      * of the agents PMP (bit 0), CLPC (bit 1) and AP (bit 3) and each rail 0..3 of the
      * agent's mask, reads the rail's register, sets the agent's bit and writes it back

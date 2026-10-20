@@ -316,7 +316,7 @@ typedef struct FixedWindow {
     unsigned nregs;         /* 0: every 4-byte slot of the window is a register */
     uint16_t regs[8];       /* else: register offsets inside the window (multiples of 4) */
 } FixedWindow;
-#define DPE_CHANNEL(n) {32, 0x2400 + 0x400 * (n), 0x304, 3, {0, 0x200, 0x300}}
+#define DPE_CHANNEL(n) {32, 0x2400 + 0x400 * (n), 0x310, 5, {0, 0x200, 0x300, 0x304, 0x308}}  /* 0x310 covers guest 64-bit/seqlock at +0x300/+0x308 (MEASURED GPA 0x30020a708) */
 static const FixedWindow fixed_windows[] = {
     {4, 0x8, 0x20, 0, {0}},
     {34, 0x18200, 0x80, 0, {0}},
@@ -365,7 +365,9 @@ static const FixedWindow acc_counter_windows[] = {
     /* Slotsbc8/bd0: per-core counter pairs9000/9008 (table0x77b2038).
      * CPU0's pair is already inside the board's cpu-impl-reg RAM.
      * Slotsbd8/be0: cluster pair8000/8008; E is already inside cpm-impl
-     * RAM. List only the five other cores and the P cluster here. */
+     * RAM. List the five other cores and the P cluster here; when
+     * all-cpu-register-windows maps every core's cpu-impl-reg, place()
+     * skips those that land in an exclusion (same coverage as CPU0). */
     {11, 0x9000, 0x10, 0, {0}}, {12, 0x9000, 0x10, 0, {0}},
     {13, 0x9000, 0x10, 0, {0}}, {19, 0x9000, 0x10, 0, {0}},
     {20, 0x9000, 0x10, 0, {0}}, {16, 0x8000, 0x10, 0, {0}},
@@ -660,16 +662,39 @@ bool apple_modern_pmgr_storage_plan_build(AppleModernBlob tree,
         uint64_t base, valid[APPLE_MODERN_PMGR_STORAGE_MASKS] = {0};
         uint64_t size = le64(reg.data + 16 * f->reg_index + 8);
         uint64_t expected = acc_counter_banks[i];
+        uint64_t addr;
+        bool covered = false;
         if (size < f->offset + f->size ||
             !translate(ranges, le64(reg.data + 16 * f->reg_index), size, &base) ||
             base != expected) {
             error_setg(errp, "ACC accounting-counter range is outside matched PWRCTL");
             return false;
         }
+        addr = base + f->offset;
+        /* Per-core +0x9000 / P-cluster +0x8000 pairs sit inside cpu-impl-reg /
+         * cpm-impl-reg. When all-cpu-register-windows maps those banks they
+         * appear as exclusions; skip only those offsets so a synthetic punch
+         * against the E/P ACC counter banks still fails the plan. */
+        if (f->offset == 0x9000 || f->offset == 0x8000) {
+            for (size_t k = 0; k < exclusion_count; k++) {
+                uint64_t ea = exclusions[k].physical_address;
+                uint64_t es = exclusions[k].size;
+                /* cpu-impl-reg / cpm-impl-reg spans are kilobytes; a
+                 * one-register punch (unit-test hit[]) must still fail. */
+                if (es >= 0x1000 && addr >= ea &&
+                    addr - ea <= es - f->size) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (covered) {
+                continue;
+            }
+        }
         for (unsigned word = 0; word < f->size / 4; word++) {
             valid[word / 64] |= UINT64_C(1) << (word % 64);
         }
-        if (!place(&plan, base + f->offset, f->size, ACC_COUNTER_TAG_BASE + i,
+        if (!place(&plan, addr, f->size, ACC_COUNTER_TAG_BASE + i,
                    valid, dram_base, dram_size, exclusions, exclusion_count, errp)) {
             return false;
         }
