@@ -12,6 +12,15 @@
  * calibration, and it models no counting, latching, clearing or ready bit.
  * What is attested is which registers the driver touches and how:
  *
+ * Current continuation: the later V2 enable loop at 0x92b84d0 also programs
+ * the remaining six ADT groups. For every non-event counter the split data
+ * writer at 0x92cadb0 uses control offset + group.data_offset (16 here) and
+ * the next word. Type1 flags 1/2 also program the secondary group/offset
+ * (0x92b85dc). These sparse control/data words are all listed; they retain
+ * plain storage semantics and produce no hardware events. Groups 6/7 and
+ * the prior fixed-window identities remain first; groups 0..5 are appended.
+ * The following initial-programming description explains the earlier subset.
+ *
  * Provider "perf-groups" (the only provider so far). The /arm-io/pmgr ADT node
  * carries two tables the driver copies (observed in guest memory at this+0x6108
  * and this+0x6528). perf-counters is equal byte for byte to the ADT property.
@@ -58,8 +67,8 @@
  * unmodelled register shows up as the next frontier. The machine announces the
  * first access to each register so a run shows which ones the guest touched.
  */
-#define APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS 48
-#define APPLE_MODERN_PMGR_STORAGE_MAX_SPAN 0x1000
+#define APPLE_MODERN_PMGR_STORAGE_MAX_WINDOWS 64
+#define APPLE_MODERN_PMGR_STORAGE_MAX_SPAN 0x4000
 #define APPLE_MODERN_PMGR_STORAGE_SLOTS (APPLE_MODERN_PMGR_STORAGE_MAX_SPAN / 4)
 #define APPLE_MODERN_PMGR_STORAGE_MASKS (APPLE_MODERN_PMGR_STORAGE_SLOTS / 64)
 
@@ -112,5 +121,9 @@ bool apple_modern_pmgr_storage_core_touched(const AppleModernPMGRStorageCore *co
 OBJECT_DECLARE_SIMPLE_TYPE(AppleModernPMGRStorageState, APPLE_MODERN_PMGR_STORAGE)
 /* The plan is copied into the device before realize. */
 DeviceState *apple_modern_pmgr_storage_new(const AppleModernPMGRStoragePlan *plan);
+/* Maps validated sparse regions directly, without consuming SysBus's fixed
+ * 32-entry MMIO array. Must be called once after realize. */
+bool apple_modern_pmgr_storage_map(DeviceState *dev, MemoryRegion *memory,
+                                   Error **errp);
 #endif
 #endif

@@ -170,6 +170,13 @@ static bool valid_access(unsigned window, uint64_t offset, unsigned size, bool w
         return false;
     }
     if (window >= APPLE_MODERN_DVFM_TABLE_WINDOWS) {
+        /* AppleT8140PMGR slotbc0 (0x984a6f4), after restoring ACC
+         * counters: 64-bit RMW of +178, replacing top maska800... with
+         * enable?a800...:0. v27 captures the actual first read through
+         * the DBG alias. No poll; plain stored enable, no event producer. */
+        if (offset == 0x178) {
+            return size == 8;
+        }
         return !write && size == 8 && control_register(window, offset);
     }
     return true;

@@ -45,7 +45,7 @@ G6 = 0x30827b800                   # PMGRCLKGEN_AON_TOP + 0x7b800
 G7 = 0x3082b4000                   # PMGR_AON + 0x34000
 WAKE = 0x308004008                 # NUB_FR_GLOBAL_AP_CONTROLS + 0x8
 PTD = 0x3003c0000                  # PMS_PTS_PTD: banks at +0x18200, +0x18300, config +0x18400
-CLUSTER = 0x300780000              # PMGR_SOC_CLUSTER_CTL +0x0 and +0x4
+CLUSTER = 0x300780000              # Five ADT PMGR_SOC_CLUSTER_CTL registers
 PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40, and +0xc8c, +0xcd0
 TVM = 0x300760400                  # PMGR_SOC_TVM +0x400 (control, index 0xb) and +0x7e0 (status)
 DPE = 0x300208000                  # PMGR_SOC_DPE: ten channels of 3 registers (channel 7: 2)
@@ -58,21 +58,33 @@ ACG_BLOCKS = (0x408000000, 0x413000000, 0x417000000, 0x38b000000, 0x380000000,
               0x284000000, 0x288000000, 0x481000000, 0x28c000000, 0x396000000)
 DVFM_WINDOWS = (0x210e78000, 0x211e78000, 0x210e70000, 0x211e70000)
 DVFM_SPAN = 0x1000
-# The control pages (windows 2 and 3) accept only the BootKC-attested 64-bit reads;
-# the state-table windows (0 and 1) accept every aligned 4- or 8-byte access.
+# The control pages (windows 2 and 3) accept only the BootKC-attested 64-bit
+# descriptor reads and accounting-enable RMW at +0x178. The state-table
+# windows (0 and 1) accept every aligned 4- or 8-byte access.
 CONTROL_READS = {2: (0xa8, 0xd0), 3: (0xa8, 0xb0, 0xd0, 0xd8)}
 
 
+ACC_RANGES = [(0x210e20000,0x400,0x40),(0x210e20000,0x500,0x40),
+        (0x210e20000,0x680,0x1d0),(0x210e20000,0x10e8,0x40),(0x210e20000,0x11e8,0x40),
+        (0x211e20000,0x400,0x90),(0x211e20000,0x500,0x90),(0x211e20000,0x680,0x1d0),
+        (0x211e20000,0x11e8,0x90),
+        (0x210150000,0x9000,0x10),(0x210250000,0x9000,0x10),(0x210350000,0x9000,0x10),
+        (0x211050000,0x9000,0x10),(0x211150000,0x9000,0x10),(0x211e40000,0x8000,0x10)]
+
 def storage_registers():
-    regs = {G6 + 0, G7 + 0}
+    spec = json.loads(Path(__file__).with_name('apple-modern-pmgr-counter-table.json').read_text())
+    regs = {int(g['physical_base'],16)+int(off,16) for g in spec['groups'] for off in g['offsets']}
     regs |= {G6 + 0x100 + 0x20 * k for k in range(6)}
     regs |= {G7 + 0x100 + 0x20 * k for k in range(69)}
     regs |= {WAKE + 4 * i for i in range(8)}
     regs |= {PTD + 0x18200 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
-    regs |= {CLUSTER, CLUSTER + 4, PWRGATE, PWRGATE + 0x40, PWRGATE + 0xc8c, PWRGATE + 0xcd0, TVM, TVM + 0x3e0}
+    regs |= {CLUSTER+4*i for i in range(5)}
+    regs |= {PWRGATE, PWRGATE + 0x40, PWRGATE + 0xc8c, PWRGATE + 0xcd0, TVM, TVM + 0x3e0}
     regs |= {PMC + 4 * i for i in range(4)} | {PMC + 0x20, PMC + 0x24, PMC + 0x28, PMC2, PMC3, PMC3 + 0x20, PMC4}
+    for base,offset,size in ACC_RANGES:
+        regs |= {base+offset+i for i in range(0,size,4)}
     for block in ACG_BLOCKS:
         regs |= {block + 0x104, block + 0x108}
     for channel in range(10):
@@ -99,6 +111,8 @@ class Model:
         for index, window in enumerate(DVFM_WINDOWS):
             if window <= address and address + size <= window + DVFM_SPAN:
                 if index in CONTROL_READS:
+                    if address - window == 0x178 and size == 8:
+                        return 'dvfm'
                     if write or size != 8 or address - window not in CONTROL_READS[index]:
                         return None
                 return 'dvfm'
@@ -128,6 +142,14 @@ class Model:
 
 # (operation, address, value) in program order.
 PROGRAM = [
+    ('r64',0x210e70178,None),
+    ('w64',0x210e70178,0xa800000000000000),
+    ('r64',0x210e70178,None),
+    ('r32',0x210e70178,None),
+    ('w32',0x210e70178,0),
+    ('r64',0x211e70178,None),
+    ('w64',0x211e70178,0xa800000000000000),
+    ('r64',0x211e70178,None),
     # E control page (window 2): attested reads +0xa8, +0xd0; P control page (window 3):
     # +0xa8, +0xb0, +0xd0, +0xd8. Everything else in the page, every write and every
     # 4-byte access faults (tightened after the independent verifier's finding).
@@ -167,6 +189,28 @@ PROGRAM = [
     ('r32', 0x210e71000, None),                 # first byte past it
     ('r32', 0x210e6fffc, None),                 # last word before it
     ('r64', 0x211e70f00, None),
+    ('w32', 0x300720110, 0),
+    ('w32', 0x300720114, 0),
+    ('r64', 0x300720110, None),
+    ('r32', 0x300720118, None),
+    ('w32', 0x300720d70, 0x89abcdef),            # measured flags=1 secondary data
+    ('w32', 0x300720d74, 0x01234567),
+    ('r64', 0x300720d70, None),
+    ('r32', 0x300720d78, None),                 # neighboring hole stays refused
+    ('w64', 0x210159000, 0),
+    ('w64', 0x210159008, 0x12345678abcdef00),
+    ('r64', 0x210159008, None),
+    ('r32', 0x210159010, None),
+    ('w64', 0x211e48000, 0),
+    ('r64', 0x211e48008, None),
+    ('r32', 0x211e48010, None),
+    ('w64', 0x210e20400, 0),
+    ('w64', 0x211e20400, 0x0123456789abcdef),
+    ('r64', 0x211e20400, None),
+    ('r64', 0x210e20538, None),
+    ('r32', 0x210e20440, None),
+    ('r64', 0x210e20848, None),
+    ('r64', 0x211e21270, None),
     ('r32', G7 + 0x100, None),                  # the step-2 frontier
     ('w32', G7 + 0x100, 4),
     ('r32', G7 + 0x100, None),
@@ -222,8 +266,16 @@ PROGRAM = [
     ('r32', CLUSTER + 4, None),                 # the step-6 frontier (index 1)
     ('w32', CLUSTER + 4, 0xf),
     ('r64', CLUSTER, None),                     # both registers in one access
-    ('r32', CLUSTER + 8, None),                 # past them
+    ('r32', CLUSTER + 8, None),                 # actual AVE frontier
+    ('w32', CLUSTER + 8, 0xf),
+    ('r32', CLUSTER + 8, None),
     ('r64', CLUSTER + 8, None),
+    ('w32', CLUSTER + 0xc, 0xf),
+    ('r32', CLUSTER + 0xc, None),
+    ('w32', CLUSTER + 0x10, 0xf),
+    ('r32', CLUSTER + 0x10, None),
+    ('r32', CLUSTER + 0x14, None),              # past all five
+    ('r64', CLUSTER + 0x10, None),              # straddles the boundary
     ('r32', CLUSTER - 4, None),
     ('r32', PWRGATE, None),                     # the step-7 frontier
     ('w32', PWRGATE, 0x80000000),
@@ -376,6 +428,15 @@ for _block in ACG_BLOCKS:
                         ('r64', _block + 0x104, None), ('r32', _block + 0x10c, None)])
 
 
+# Touch both ends of every additional ADT group and ACC window. Their addresses
+# are from the independent fixture/disassembly, never queried from the device.
+_counter_spec = json.loads(Path(__file__).with_name('apple-modern-pmgr-counter-table.json').read_text())
+for _g in _counter_spec['groups']:
+    _base=int(_g['physical_base'],16);_span=int(_g['span'],16)
+    PROGRAM.extend([('r32',_base,None),('r32',_base+_span-4,None)])
+for _base,_off,_span in ACC_RANGES:
+    PROGRAM.extend([('r32',_base+_off,None),('r32',_base+_off+_span-4,None)])
+
 def expected_results(enabled):
     """Per-probe expected (value or None, faulted) plus the final counters."""
     model = Model(enabled)
@@ -411,13 +472,13 @@ class ROM(helper.ROM):
         self.mov(0, mailbox.NORMAL_SP)
         self.emit(0x9100001f)
         self.emit(0xd5034fdf)
-        self.set('VBAR_EL2', mailbox.BASE + 0x4000)
+        self.set('VBAR_EL2', mailbox.BASE + 0x8000)
         for number, ((op, address, value), expected) in enumerate(zip(PROGRAM, results)):
             self.probe(number, op, address, value, expected)
         self.mov(0, DONE)
         self.trace('completion', DONE)
         self.branch(len(self.words))
-        for offset in range(0x4000, 0x4800, 0x80):
+        for offset in range(0x8000, 0x8800, 0x80):
             self.at(offset)
             self.mov(0, 1)
             self.store(0, FLAG)
@@ -438,6 +499,8 @@ def run(binary, components, output, no_device):
     enabled = not no_device
     assets = {name: components / name for name in board.ASSETS}
     hashes = {name: digest(path) for name, path in assets.items()}
+    table = Path(__file__).with_name('apple-modern-pmgr-counter-table.json')
+    table_before = digest(table)
     layout = board.expected_layout({name: path.read_bytes() for name, path in assets.items()})
     for name, (address, size) in layout['regions'].items():
         require(mailbox.PROBE_END <= address or mailbox.BASE >= address + size,
@@ -460,6 +523,7 @@ def run(binary, components, output, no_device):
             '-S', '-qmp', 'stdio']
     report = {'passed': False, 'argv': argv, 'binary_sha256': digest(binary),
               'script_sha256': digest(Path(__file__)), 'rom_sha256': digest(rom_path),
+              'expectation_table_sha256': table_before,
               'firmware_executed': False, 'ios_boot_claim': False,
               'no_device_oracle': no_device, 'probes': len(PROGRAM),
               'expected_faults': sum(1 for e in expected if e[3]),
@@ -522,6 +586,8 @@ def run(binary, components, output, no_device):
                             f'Last fault is not a synchronous external data abort: {esr:#x}')
                 counters = {}
                 if enabled:
+                    require(qmp.request('qom-get',{'path':'/machine/pmgr-storage','property':'mapped-window-count'})==56,'All 56 sparse regions mapped')
+                    require(qmp.request('qom-get',{'path':'/machine/pmgr-storage','property':'sysbus-mmio-count'})==0,'No overflow of SysBus MMIO slots')
                     for path, kind in (('/machine/cpu-dvfm', 'dvfm'),
                                        ('/machine/pmgr-storage', 'storage')):
                         got = {prop: qmp.request('qom-get', {'path': path, 'property': prop})
@@ -566,6 +632,7 @@ def run(binary, components, output, no_device):
         if qmp:
             qmp.close()
         report['component_hashes_after'] = {name: digest(path) for name, path in assets.items()}
+        require(digest(table) == table_before, 'Counter expectation table unchanged')
         if report['component_hashes_after'] != hashes:
             report['passed'] = False; report['error'] = 'Preparation inputs changed'
         report['elapsed_seconds'] = time.monotonic() - started

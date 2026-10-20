@@ -15,7 +15,7 @@
  *
  * Windows 2 and 3, the DVFM control page (RegMap E_ACC_CPM_DVFM selector 12 at
  * 0x210e70000 and P_ACC0_CPM_DVFM selector 24 at 0x211e70000, 0x1000 bytes). The
- * attested reads are only these 64-bit registers: +0xa8 and +0xd0 in the E
+ * descriptor reads are these 64-bit registers: +0xa8 and +0xd0 in the E
  * cluster, +0xa8, +0xb0, +0xd0 and +0xd8 in the P cluster. The reader that
  * loops over them (0xfffffff0092ca800, reached through the AppleT8140PMGR
  * thunk at 0xfffffff0098486f8 from the DVMR weight publisher at
@@ -25,7 +25,13 @@
  * driver publishes as the DVMRWeights and DVMRWeightTypes properties. The
  * driver never writes these registers.
  *
- * In every window the driver only reads and republishes the values. DECLARED,
+ * The separate ACC accounting enable at +0x178 is a 64-bit read/write
+ * register in both control pages (AppleT8140PMGR slotbc0, 0x984a6f4).
+ * It replaces mask0xa800000000000000 with the requested enable bits and
+ * does not poll. Other widths/offsets remain rejected. This stored enable
+ * has no event producer and supplies no voltage or frequency behavior.
+ *
+ * For the descriptors the driver only reads and republishes values. DECLARED,
  * not attested: the registers hold zero; the real contents are per-chip
  * firmware-written entries (frequencies, voltage ids and the field values
  * above); none is available for this device, so this is a boot-progress

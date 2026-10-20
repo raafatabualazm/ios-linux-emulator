@@ -435,7 +435,9 @@ static void check_override_capacity(const AppleModernBootInput *components)
     list[1] = (AppleModernAdtOverride){"/arm-io/pmgr", "capacity-prefix1", &byte, 1};
     CHECK(apple_modern_compat_groups_resolve(all, list, &count,
                                              APPLE_MODERN_MAX_ADT_OVERRIDES, &error));
-    CHECK(error == NULL && count == 92); /* 67 exact compatibles + 23 declared ids + 2. */
+    CHECK(error == NULL && count == 89); /* 64 exact compatibles + 23 declared ids + 2.
+                                          * pmgr is the parent only; clpc/ppm/soc-tuner
+                                          * are pmgr-nubs and are not in this string. */
     input.overrides = list;
     input.override_count = count;
     if (!apple_modern_boot_metadata_build(&input, &out, &error)) {

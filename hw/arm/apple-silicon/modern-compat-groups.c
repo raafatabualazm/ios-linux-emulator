@@ -139,8 +139,16 @@ static const AppleModernAdtOverride mcc_rows[] = {
     {"/arm-io/mcc", "compatible", mcc_v0, (uint32_t)sizeof(mcc_v0)},
 };
 
+/*
+ * Parent only. ApplePMGR::start walks these children and, when a child's
+ * compatible matches, registerService calls that driver's start on the same
+ * thread (BootKC 0xfffffff00928f588). AppleT8140CLPC is not modelled, so the
+ * child compatibles stay in pmgr-nubs and off the SMP bring-up recipe.
+ */
 static const AppleModernAdtOverride pmgr_rows[] = {
     {"/arm-io/pmgr", "compatible", pmgr_v0, (uint32_t)sizeof(pmgr_v0)},
+};
+static const AppleModernAdtOverride pmgr_nub_rows[] = {
     {"/arm-io/pmgr/clpc", "compatible", pmgr_v1, (uint32_t)sizeof(pmgr_v1)},
     {"/arm-io/pmgr/ppm", "compatible", pmgr_v2, (uint32_t)sizeof(pmgr_v2)},
     {"/arm-io/pmgr/soc-tuner", "compatible", pmgr_v3, (uint32_t)sizeof(pmgr_v3)},
@@ -402,7 +410,9 @@ const AppleModernCompatGroup apple_modern_compat_groups[] = {
     {"spmi", spmi_rows, sizeof(spmi_rows) / sizeof(spmi_rows[0]),
      "the SPMI buses and the Dialog PMU on them (power button, RTC, charger)"},
     {"pmgr", pmgr_rows, sizeof(pmgr_rows) / sizeof(pmgr_rows[0]),
-     "W-10: AppleT8140PMGR itself plus the CLPC, PPM and SOC-tuner nubs it would publish"},
+     "W-10: AppleT8140PMGR itself (pmgr1,t8140), without the CLPC/PPM/SOC-tuner nubs"},
+    {"pmgr-nubs", pmgr_nub_rows, sizeof(pmgr_nub_rows) / sizeof(pmgr_nub_rows[0]),
+     "CLPC, PPM and SOC-tuner compatibles. Off for SMP bring-up: their start runs inside ApplePMGR::start"},
     {"mcc", mcc_rows, sizeof(mcc_rows) / sizeof(mcc_rows[0]),
      "AppleT8140MCC, whose start publishes the function parent ApplePMGR waits on"},
     {"smc", smc_rows, sizeof(smc_rows) / sizeof(smc_rows[0]),
