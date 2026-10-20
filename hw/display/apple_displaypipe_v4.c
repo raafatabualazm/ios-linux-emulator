@@ -177,6 +177,7 @@ struct AppleDisplayPipeV4State {
     QemuConsole *console;
     QEMUBH *update_disp_image_bh;
     QEMUTimer *boot_splash_timer;
+    QEMUTimer *scanout_timer;
 };
 
 static const VMStateDescription vmstate_adp_v4 = {
@@ -195,6 +196,7 @@ static const VMStateDescription vmstate_adp_v4 = {
             VMSTATE_STRUCT(blend_unit, AppleDisplayPipeV4State, 0,
                            vmstate_adp_v4_blend_unit, ADPV4BlendUnitState),
             VMSTATE_TIMER_PTR(boot_splash_timer, AppleDisplayPipeV4State),
+            VMSTATE_TIMER_PTR(scanout_timer, AppleDisplayPipeV4State),
             VMSTATE_END_OF_LIST(),
         },
 };
@@ -676,6 +678,42 @@ static void adp_v4_gfx_update(void *opaque)
     adp_v4_update_irqs(adp);
 }
 
+#define ADP_V4_SCANOUT_INTERVAL_NS (NANOSECONDS_PER_SECOND / 60)
+
+static void adp_v4_scanout_timer(void *opaque)
+{
+    AppleDisplayPipeV4State *adp = opaque;
+
+    /*
+     * Real hardware scans out continuously, so the pipe always makes progress
+     * on its own. QEMU only invokes our gfx_update via graphic_hw_update(),
+     * which no backend calls on a plain periodic basis:
+     *
+     *   - dpy_refresh() (ui/console.c) runs the listeners' *refresh* ops; this
+     *     device registers none, so the GUI timer never reaches us.
+     *   - VNC does call graphic_hw_update() (ui/vnc.c:2342, :3265, :3384), but
+     *     the periodic one in vnc_refresh() returns early on
+     *     QTAILQ_EMPTY(&vd->clients), and the other two are client-driven.
+     *     So it only fires while a viewer is actually attached.
+     *   - Under -display none there is no backend at all.
+     *
+     * In every headless configuration, then - -display none, or -vnc with
+     * nobody watching - nothing called adp_v4_gfx_update, so OUTPUT_READY was
+     * never raised and the guest blocked forever in
+     * IOMobileFramebufferLegacy::swap_wait_gated, which wedged `restored` and
+     * hung the whole restore.
+     *
+     * Note the corollary: attaching a VNC viewer to the guest masks the bug.
+     * A headless A/B is the only honest way to test this.
+     *
+     * Drive our own scanout so the pipe progresses under any backend, or none.
+     */
+    graphic_hw_update(adp->console);
+
+    timer_mod(adp->scanout_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                                      ADP_V4_SCANOUT_INTERVAL_NS);
+}
+
 static const GraphicHwOps adp_v4_ops = {
     .invalidate = adp_v4_invalidate,
     .gfx_update = adp_v4_gfx_update,
@@ -854,6 +892,11 @@ static void adp_v4_realize(DeviceState *dev, Error **errp)
     AppleDisplayPipeV4State *adp = APPLE_DISPLAY_PIPE_V4(dev);
 
     adp->console = graphic_console_init(dev, 0, &adp_v4_ops, adp);
+
+    adp->scanout_timer =
+        timer_new_ns(QEMU_CLOCK_VIRTUAL, adp_v4_scanout_timer, adp);
+    timer_mod(adp->scanout_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                                      ADP_V4_SCANOUT_INTERVAL_NS);
 }
 
 static const Property adp_v4_props[] = {

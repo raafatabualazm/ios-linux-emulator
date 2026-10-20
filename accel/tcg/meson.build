@@ -2,6 +2,9 @@ if not have_tcg
    subdir_done()
 endif
 
+# SA-RIOT AFL forkserver and coverage runtime
+system_ss.add(files('afl.c'))
+
 tcg_ss = ss.source_set()
 
 tcg_ss.add(files(
