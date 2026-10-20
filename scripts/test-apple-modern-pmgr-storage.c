@@ -60,15 +60,15 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
  * and the vector-config array, windows 3..5 (tags 0x101..0x103). */
 #define PTD_BASE UINT64_C(0x3003c0000)
 #define FIXED_WINDOWS 49
-#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 5 + 2 + 56 + 7 + 1 + 2 + 1 + 2 + 2 + 20 + 2)
+#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 5 + 2 + 59 + 7 + 1 + 2 + 1 + 2 + 2 + 20 + 2)
 /* Five ADT cluster-control registers (reg_index 28): window 6, tag 0x104. */
 #define CLUSTER_BASE UINT64_C(0x300780000)
 #define CLUSTER_TAG 0x104
 /* PMGR_SOC_PWRGATE (reg_index 22, 0x300724000) +0x0 and +0x40: windows 7 and 8, tags 0x105 and 0x106. */
 #define PWRGATE_BASE UINT64_C(0x300724000)
 /* PMGR_SOC_DPE (reg_index 32, 0x300208000): ten channels; windows 9..18, tags 0x107..0x110.
- * Channel n sits at +0x2400 + 0x400 * n with registers +0x0, +0x200, +0x300; channel 7
- * has no +0x0, so its window starts at +0x4200 with registers +0x0 and +0x100. */
+ * Channel n sits at +0x2400 + 0x400 * n; channel 7 is at +0x4200 with the energy-path
+ * registers plus seqlock slots through +0x30c (size 0x310). */
 #define DPE_BASE UINT64_C(0x300208000)
 #define DPE_TAG 0x107
 /* PMC registers in reg_index 43 (0x302000000): the four static-voter vote registers
@@ -104,7 +104,7 @@ static const uint64_t ACG_BASE[10] = {
     UINT64_C(0x380000000), UINT64_C(0x284000000), UINT64_C(0x288000000), UINT64_C(0x481000000),
     UINT64_C(0x28c000000), UINT64_C(0x396000000)};
 static uint64_t dpe_start(unsigned n) { return n == 7 ? 0x4200 : 0x2400 + 0x400 * n; }
-static uint32_t dpe_size(unsigned n) { return n == 7 ? 0x104 : 0x310; }
+static uint32_t dpe_size(unsigned n) { return n == 7 ? 0x110 : 0x310; }
 static const struct { uint64_t offset; uint32_t size; } PTD[3] = {
     {0x18200, 0x80}, {0x18300, 0x80}, {0x18400, 0x400}};
 #define G6_COUNTERS 6
@@ -162,7 +162,8 @@ static bool expected_valid(unsigned group, uint64_t offset)
     }
     if (group >= DPE_TAG) {
         unsigned n = group - DPE_TAG;
-        return n == 7 ? (offset == 0 || offset == 0x100)
+        return n == 7 ? (offset == 0 || offset == 0x100 || offset == 0x104 ||
+                         offset == 0x108 || offset == 0x10c)
                       : (offset == 0 || offset == 0x200 || offset == 0x300 || offset == 0x304 || offset == 0x308 || offset == 0x30c);
     }
     if (group > WAKE_TAG && group <= WAKE_TAG + 3) {

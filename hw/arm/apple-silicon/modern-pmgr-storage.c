@@ -331,7 +331,7 @@ static const FixedWindow fixed_windows[] = {
     {22, 0x40, 0x4, 0, {0}},
     DPE_CHANNEL(0), DPE_CHANNEL(1), DPE_CHANNEL(2), DPE_CHANNEL(3), DPE_CHANNEL(4),
     DPE_CHANNEL(5), DPE_CHANNEL(6),
-    {32, 0x4200, 0x104, 2, {0, 0x100}},     /* channel 7 has no +0x0 register */
+    {32, 0x4200, 0x110, 5, {0, 0x100, 0x104, 0x108, 0x10c}},  /* ch7 window starts at channel+0x200 (no +0x0 RMW); local +0x100=+0x300. Seqlock at abs +0x4308 = local +0x108 (MEASURED GPA 0x30020c308). Size 0x200 stops before ch8 at +0x4400. */
     DPE_CHANNEL(8), DPE_CHANNEL(9),
     {43, 0x8ac000, 0x2c, 7, {0, 4, 8, 0xc, 0x20, 0x24, 0x28}},  /* PMC votes 0..3, bwr, dynamic, boost */
     {43, 0x860000, 0x4, 0, {0}},            /* PMC +0x60000 (kRegGroupPMCDVFM + 0x60000) */
