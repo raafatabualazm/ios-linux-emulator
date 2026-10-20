@@ -37,13 +37,10 @@
  * above); none is available for this device, so this is a boot-progress
  * diagnostic profile, not calibration or silicon behaviour.
  *
- * Windows 0 and 1 (state tables) accept every aligned 4-byte and 8-byte access
- * and keep what is written. Windows 2 and 3 (control pages) accept ONLY the
- * attested 8-byte reads named above, which return zero; writes, 4-byte
- * accesses and every other offset of the page fault, so an unattested access
- * shows up as the next frontier instead of being absorbed. The machine logs
- * the first access to each 8-byte word so a run shows which words the guest
- * really touched.
+ * Windows 0–3 accept every aligned 4-byte and 8-byte access and keep what
+ * is written (zero-reset). Control-page descriptor semantics are not
+ * modelled; this is boot-progress storage only. The machine logs the first
+ * access to each 8-byte word so a run shows which words the guest touched.
  */
 #define APPLE_MODERN_DVFM_WINDOWS 4
 /* Windows [0, TABLE_WINDOWS) are state tables; the rest are control pages. */

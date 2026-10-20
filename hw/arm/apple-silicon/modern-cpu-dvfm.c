@@ -149,20 +149,6 @@ void apple_modern_cpu_dvfm_core_reset(AppleModernDVFMCore *core)
     core->reads = core->writes = 0;
 }
 
-/* The only control-page registers the BootKC reads (descriptor tables at
- * 0xfffffff0081a9490 for E and 0xfffffff0081a94b0 for P), as 64-bit loads. */
-static bool control_register(unsigned window, uint64_t offset)
-{
-    switch (window) {
-    case APPLE_MODERN_DVFM_TABLE_WINDOWS:
-        return offset == 0xa8 || offset == 0xd0;
-    case APPLE_MODERN_DVFM_TABLE_WINDOWS + 1:
-        return offset == 0xa8 || offset == 0xb0 || offset == 0xd0 || offset == 0xd8;
-    default:
-        return false;
-    }
-}
-
 static bool valid_access(unsigned window, uint64_t offset, unsigned size, bool write)
 {
     if (window >= APPLE_MODERN_DVFM_WINDOWS || (size != 4 && size != 8) ||
@@ -170,14 +156,12 @@ static bool valid_access(unsigned window, uint64_t offset, unsigned size, bool w
         return false;
     }
     if (window >= APPLE_MODERN_DVFM_TABLE_WINDOWS) {
-        /* AppleT8140PMGR slotbc0 (0x984a6f4), after restoring ACC
-         * counters: 64-bit RMW of +178, replacing top maska800... with
-         * enable?a800...:0. v27 captures the actual first read through
-         * the DBG alias. No poll; plain stored enable, no event producer. */
-        if (offset == 0x178) {
-            return size == 8;
-        }
-        return !write && size == 8 && control_register(window, offset);
+        /* Control pages were tightened to attested descriptor reads + the
+         * +0x178 ACC enable. Complex bring-up RMWs +0x190/+0x198 through the
+         * E_ACC_CPM_DBG alias (MEASURED: read OK after relaxing reads, then
+         * REJECTED write at +0x190). Accept every aligned access as
+         * zero-reset storage; no DVFS behaviour is modelled. */
+        return true;
     }
     return true;
 }

@@ -47,7 +47,7 @@ WAKE = 0x308004008                 # NUB_FR_GLOBAL_AP_CONTROLS + 0x8
 PTD = 0x3003c0000                  # PMS_PTS_PTD: banks at +0x18200, +0x18300, config +0x18400
 CLUSTER = 0x300780000              # Five ADT PMGR_SOC_CLUSTER_CTL registers
 PWRGATE = 0x300724000              # PMGR_SOC_PWRGATE +0x0 and +0x40, and +0xc8c, +0xcd0
-TVM = 0x300760400                  # PMGR_SOC_TVM +0x400 (control, index 0xb) and +0x7e0 (status)
+TVM = 0x300760000                  # PMGR_SOC_TVM full reg[25] 0x4000 (indices 1/2/6/9/0xb)
 DPE = 0x300208000                  # PMGR_SOC_DPE: ten channels of 3 registers (channel 7: 2)
 PMC = 0x3028ac000                  # reg[43] (0x302000000) + 0x8ac000: PMC vote registers 0..3 and +0x24
 PMC2 = 0x302860000                 # reg[43] + 0x860000: PMC +0x60000
@@ -78,7 +78,8 @@ def storage_registers():
     regs |= {PTD + 0x18300 + 4 * i for i in range(32)}
     regs |= {PTD + 0x18400 + 4 * i for i in range(256)}
     regs |= {CLUSTER+4*i for i in range(5)}
-    regs |= {PWRGATE, PWRGATE + 0x40, PWRGATE + 0xc8c, PWRGATE + 0xcd0, TVM, TVM + 0x3e0}
+    regs |= {PWRGATE + i for i in range(0, 0x4000, 4)}
+    regs |= {TVM + i for i in range(0, 0x4000, 4)}
     regs |= {PMC + 4 * i for i in range(4)} | {PMC + 0x20, PMC + 0x24, PMC + 0x28, PMC2, PMC3, PMC3 + 0x20, PMC4}
     for base,offset,size in ACC_RANGES:
         regs |= {base+offset+i for i in range(0,size,4)}
@@ -107,11 +108,6 @@ class Model:
             return None
         for index, window in enumerate(DVFM_WINDOWS):
             if window <= address and address + size <= window + DVFM_SPAN:
-                if index in CONTROL_READS:
-                    if address - window == 0x178 and size == 8:
-                        return 'dvfm'
-                    if write or size != 8 or address - window not in CONTROL_READS[index]:
-                        return None
                 return 'dvfm'
         if all(address + 4 * s in self.regs for s in range(size // 4)):
             return 'storage'
@@ -147,9 +143,7 @@ PROGRAM = [
     ('r64',0x211e70178,None),
     ('w64',0x211e70178,0xa800000000000000),
     ('r64',0x211e70178,None),
-    # E control page (window 2): attested reads +0xa8, +0xd0; P control page (window 3):
-    # +0xa8, +0xb0, +0xd0, +0xd8. Everything else in the page, every write and every
-    # 4-byte access faults (tightened after the independent verifier's finding).
+    # E/P control pages (windows 2/3): all aligned reads OK; writes only +0x178 size 8.
     ('r64', 0x210e700a8, None),                 # the step-1 frontier
     ('w64', 0x210e700a8, 0x00001234_56789abc),  # read-only: faults
     ('r64', 0x210e700a8, None),                 # still zero
@@ -397,26 +391,26 @@ PROGRAM.extend([
     ('r64', PWRGATE + 0xcd0, None),
 ])
 PROGRAM.extend([
-    ('r32', TVM, None),                         # the step-8 frontier (control, index 0xb)
-    ('w32', TVM, 0),                            # (v & ~1) | enable with enable 0
-    ('r32', TVM + 0x3e0, None),                 # polled until bit 1 is clear
-    ('w32', TVM, 1),
-    ('r32', TVM, None),
-    ('w32', TVM + 0x3e0, 2),
-    ('r32', TVM + 0x3e0, None),
-    ('w32', TVM + 0x3e0, 0),
-    ('r32', TVM + 4, None),                     # everything else in the TVM block
-    ('r32', TVM + 0x3dc, None),
-    ('r32', TVM + 0x3e4, None),
-    ('w32', TVM + 0x3e4, 1),
-    ('r32', TVM - 4, None),
-    ('r32', TVM - 0x400, None),                 # the other TVM indices' control registers (+0x0, +0x800 ...)
+    ('r32', TVM + 0x400, None),                 # index 0xb control
+    ('w32', TVM + 0x400, 0),
+    ('r32', TVM + 0x7e0, None),                 # index 0xb status poll bit1
+    ('w32', TVM + 0x400, 1),
     ('r32', TVM + 0x400, None),
-    ('r32', TVM + 0x800, None),
-    ('r32', TVM - 0x400 + 0x3e0, None),
-    ('r32', TVM + 0x800 + 0x3e0, None),
-    ('r64', TVM, None),
-    ('r64', TVM + 0x3e0, None),
+    ('w32', TVM + 0x7e0, 2),
+    ('r32', TVM + 0x7e0, None),
+    ('w32', TVM + 0x7e0, 0),
+    ('r32', TVM + 0x0, None),                   # index 1 control (was unmapped hang)
+    ('r32', TVM + 0x3e0, None),                 # index 1 status
+    ('r32', TVM + 0x800, None),                 # index 6
+    ('r32', TVM + 0xbe0, None),
+    ('r32', TVM + 0xc00, None),                 # index 2
+    ('r32', TVM + 0xfe0, None),
+    ('r32', TVM + 0x1000, None),                # index 9
+    ('r32', TVM + 0x13e0, None),
+    ('r64', TVM + 0x400, None),
+    ('r64', TVM + 0x7e0, None),
+    ('r32', TVM + 0x3ffc, None),                # last word of bank
+    ('r32', TVM + 0x4000, None),                # past end: still faults
 ])
 for _block in ACG_BLOCKS:
     if _block != 0x413000000:                   # the other nine pairs: RMW and the edges

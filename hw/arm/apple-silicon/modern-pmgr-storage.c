@@ -327,8 +327,6 @@ static const FixedWindow fixed_windows[] = {
      * retained v14 guest witnesses cluster 2 (+8), caller 0x92b57e8.
      * Zero-reset storage retains the existing immediate/no-busy profile. */
     {28, 0x0, 0x14, 0, {0}},
-    {22, 0x0, 0x4, 0, {0}},
-    {22, 0x40, 0x4, 0, {0}},
     DPE_CHANNEL(0), DPE_CHANNEL(1), DPE_CHANNEL(2), DPE_CHANNEL(3), DPE_CHANNEL(4),
     DPE_CHANNEL(5), DPE_CHANNEL(6),
     {32, 0x4200, 0x110, 5, {0, 0x100, 0x104, 0x108, 0x10c}},  /* ch7 window starts at channel+0x200 (no +0x0 RMW); local +0x100=+0x300. Seqlock at abs +0x4308 = local +0x108 (MEASURED GPA 0x30020c308). Size 0x200 stops before ch8 at +0x4400. */
@@ -337,14 +335,22 @@ static const FixedWindow fixed_windows[] = {
     {43, 0x860000, 0x4, 0, {0}},            /* PMC +0x60000 (kRegGroupPMCDVFM + 0x60000) */
     {43, 0x8a4000, 0x24, 2, {0, 0x20}},     /* PMC DVMR state +0xa4000, busy +0xa4020 */
     {43, 0x8a9c14, 0x4, 0, {0}},            /* PMC DVMR popcount +0xa9c14 */
-    {22, 0xc8c, 0x48, 2, {0, 0x44}},        /* PwrGate +0xc8c and +0xcd0 (hook table 2) */
-    {25, 0x400, 0x3e4, 2, {0, 0x3e0}},      /* PMGR_SOC_TVM index 0xb: control +0x400, status +0x7e0 */
-    /* Index 2 (+0xc00/+0xfe0): AppleT8140PMGR early-wake/CLLT path at
-     * 0xfffffff00984812c (gate this+0x738eb) does RMW clear bit10 then an
-     * UNBOUNDED poll for bit11 clear. Stock soc-clusters never selects index 2,
-     * but sleep/early-wake sets the gate and would hang on an unmapped abort.
-     * Zero-reset storage satisfies the poll on the first re-read. */
-    {25, 0xc00, 0x3e4, 2, {0, 0x3e0}},      /* PMGR_SOC_TVM index 2: control +0xc00, status +0xfe0 */
+    /*
+     * PMGR_SOC_PWRGATE (reg[22], size 0x4000). Sparse +0x0/+0x40/+0xc8c left
+     * +0x60 unmapped; complex bring-up hung on PMGR_SOC_PWRGATE ldr at that
+     * offset (MEASURED PA 0x300724060). Serve the whole bank.
+     */
+    {22, 0x0, 0x4000, 0, {0}},
+    /*
+     * PMGR_SOC_TVM (reg[25], size 0x4000). Complex bring-up dispatches by TVM
+     * index (MEASURED AppleT8140PMGR @ 0xfffffff029849284):
+     *   1: +0x0/+0x3e0, 2: +0xc00/+0xfe0, 6: +0x800/+0xbe0,
+     *   9: +0x1000/+0x13e0, 0xb: +0x400/+0x7e0
+     * each RMW control then UNBOUNDED poll status bit1 clear. Sparse windows
+     * for only 0xb and 2 left index-1 (+0x0/+0x3e0) unmapped; start hung in
+     * that poll after ACC (stack 0xfffffff029849390). Serve the whole bank.
+     */
+    {25, 0x0, 0x4000, 0, {0}},
 };
 
 
