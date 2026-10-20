@@ -36,6 +36,7 @@
 #include "target/arm/cpregs.h"
 #include "target/arm/modern-gxf.h"
 #include "target/arm/modern-sprr.h"
+#include "target/arm/modern-apsts.h"
 
 #define EXCP_UDEF            1   /* undefined instruction */
 #define EXCP_SWI             2   /* software interrupt */
@@ -622,6 +623,7 @@ typedef struct CPUArchState {
     AppleModernGXFState modern_gxf;
 
     AppleModernSPRRState modern_sprr;
+    AppleModernAPSTSState modern_apsts;
 
     /* Darwin-VM's simplified Apple timer compatibility stores. */
     struct {
@@ -1054,6 +1056,8 @@ struct ArchCPU {
     bool apple_modern_guarded;
     /* Separate modern page-permission model, requiring guarded CPU state. */
     bool apple_modern_sprr;
+    /* Read-only status interface; backend initialization is not implemented. */
+    bool apple_modern_apsts;
     /* Stable alias metadata for the opt-in modern register interface. */
     GPtrArray *modern_vhe_snapshots;
     /* CPU has security extension */
