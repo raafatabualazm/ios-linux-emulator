@@ -74,6 +74,12 @@ bool apple_modern_large_ramdisk_patch(AppleModernLargeRamdisk *map,
                                       const char *path, unsigned *applied,
                                       Error **errp);
 
+/* IMCOW001: 56-byte header, then ordered 4136-byte records containing
+ * offset, SHA256, and one 4096-byte page. Validate everything before writes. */
+bool apple_modern_large_ramdisk_checkpoint(AppleModernLargeRamdisk *map,
+                                          const char *path, unsigned *applied,
+                                          Error **errp);
+
 /* Release the mapping. Safe on an all-zero struct; zeroes *map. */
 void apple_modern_large_ramdisk_unmap(AppleModernLargeRamdisk *map);
 

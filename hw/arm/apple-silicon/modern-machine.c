@@ -105,6 +105,7 @@ struct AppleModernMachine {
     AppleModernLargeRamdisk large_ramdisk_file;
     /* Optional list of declared in-memory edits to the large ramdisk. */
     char *ramdisk_patches;
+    char *ramdisk_checkpoint;
     MemoryRegion large_ramdisk_mr;
     MemoryRegion cpu_register_ram[APPLE_MODERN_CPU_REGISTER_WINDOWS];
     MemoryRegion aic_ram, sep_ram;
@@ -3369,8 +3370,8 @@ static void modern_init(MachineState *machine)
                                   s->display_stride : 0,
         .trustcache_v2 = s->trustcache_v2,
     };
-    if (s->ramdisk_patches && !s->large_ramdisk) {
-        error_report("apple-modern: ramdisk-patches needs large-ramdisk=on");
+    if ((s->ramdisk_patches || s->ramdisk_checkpoint) && !s->large_ramdisk) {
+        error_report("apple-modern: ramdisk edits need large-ramdisk=on");
         exit(EXIT_FAILURE);
     }
     if (s->large_ramdisk) {
@@ -3392,6 +3393,18 @@ static void modern_init(MachineState *machine)
                         "declared in-memory edit(s) from %s to the private "
                         "ramdisk mapping (the image file is unchanged)",
                         applied, s->ramdisk_patches);
+        }
+        if (s->ramdisk_checkpoint) {
+            unsigned applied;
+            if (!apple_modern_large_ramdisk_checkpoint(&s->large_ramdisk_file,
+                                                       s->ramdisk_checkpoint,
+                                                       &applied, &error)) {
+                error_report_err(error);
+                exit(EXIT_FAILURE);
+            }
+            warn_report("apple-modern: verified ramdisk checkpoint applied %u "
+                        "pages to private mapping from %s", applied,
+                        s->ramdisk_checkpoint);
         }
         s->components.ramdisk = (AppleModernBlob){
             s->large_ramdisk_file.host, s->large_ramdisk_file.file_size };
@@ -3971,11 +3984,7 @@ static void modern_init(MachineState *machine)
                     ks.insn_after0, ks.insn_after1);
     }
     if (s->sepfw_absent) {
-        /*
-         * sks-failfast / sepfw-absent also NOPs the second AppleSEPKeyStore
-         * wait (user-client open BLRAA at 0xfffffff0095cf27c). See
-         * modern-kc-patch.h sks-open-wait-skip.
-         */
+        /* Absent SEP: reject user-client start before workloop side effects. */
         AppleModernSksOpenWaitPatch sow = { 0 };
         uint8_t *bootkc = (uint8_t *)s->blobs[ASSET_BOOTKC].data;
 
@@ -3985,12 +3994,14 @@ static void modern_init(MachineState *machine)
             exit(EXIT_FAILURE);
         }
         warn_report("apple-modern: sks-failfast applied sks-open-wait-skip "
-                    "to the in-memory kernel cache: NOP'd AppleSEPKeyStore "
-                    "user-client open BLRAA at 0x%" PRIx64
-                    " (0x%08x->0x%08x) so waitForMatchingService(AppleSEPManager) "
-                    "is not taken; open still returns success. Compatibility, "
+                    "to the in-memory kernel cache: failed AppleSEPKeyStore "
+                    "user-client start at 0x%" PRIx64
+                    " (0x%08x/0x%08x->0x%08x/0x%08x); "
+                    "native failed-start cleanup detaches/releases the client "
+                    "before command-gate side effects. Compatibility, "
                     "not Apple fidelity",
-                    sow.anchor, sow.insn_before, sow.insn_after);
+                    sow.anchor, sow.insn_before, sow.insn_before1,
+                    sow.insn_after, sow.insn_after1);
     }
     if (s->image_patches) {
         /*
@@ -4262,6 +4273,21 @@ static void set_ramdisk_patches(Object *obj, const char *value, Error **errp)
     if (check_mutable(s, errp)) {
         g_free(s->ramdisk_patches);
         s->ramdisk_patches = value && value[0] && strcmp(value, "off") ?
+                             g_strdup(value) : NULL;
+    }
+}
+
+static char *get_ramdisk_checkpoint(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->ramdisk_checkpoint);
+}
+
+static void set_ramdisk_checkpoint(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->ramdisk_checkpoint);
+        s->ramdisk_checkpoint = value && value[0] && strcmp(value, "off") ?
                              g_strdup(value) : NULL;
     }
 }
@@ -4622,6 +4648,7 @@ static void modern_finalize(Object *obj)
     g_free(s->dcp_attach_cbs);
     g_free(s->dcp_attach_trigger);
     g_free(s->ramdisk_patches);
+    g_free(s->ramdisk_checkpoint);
     for (size_t i = 0; i < ASSET_COUNT; i++) {
         g_free(s->paths[i]);
         g_free((void *)s->blobs[i].data);
@@ -4671,26 +4698,19 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "sepfw-absent", get_sepfw_absent,
                                    set_sepfw_absent);
     object_class_property_set_description(oc, "sepfw-absent",
-        "serve /chosen sepfw-load-at-boot = 0 so AppleSEPKeyStore and "
-        "AppleCredentialManager do not wait for SEP firmware that never runs "
+        "serve /chosen sepfw-load-at-boot = 0 and reject AppleKeyStore "
+        "user-client start before command-gate side effects "
         "(declared guest modification, default off)");
     /*
-     * sks-failfast: alias of sepfw-absent, named for the msg2862 / AppleSEPKeyStore
-     * IOServiceOpen unblock. Grok RE 2026-10-17 + angr proof
-     * (Grok/impl-20261017/re/symex/sks_release_symex.json) show that
-     * AppleSEPKeyStore::getEndpoint (0xfffffff0095ca694) blocks forever in
-     * sep_endpoint() when isSEPExpected (0xfffffff0095ca544) returns 1, and
-     * takes the no-wait "SEP is not booted" path when it returns 0. Serving
-     * /chosen sepfw-load-at-boot=0 forces that return to 0, releasing the
-     * synchronous io_service_open_extended (msgh_id 2862) wait that
-     * backboardd (PearlEventFilter -> MKBGetDeviceLockState -> aks_get_lock_state
-     * -> IOServiceOpen) and biomed both hit. Same storage as sepfw-absent.
+     * Alias of sepfw-absent. The DT property takes getEndpoint's native
+     * no-SEP path; the separate failed-start patch prevents unusable clients
+     * from being published. ACM's hardcoded USESEP requires its own correction.
      */
     object_class_property_add_bool(oc, "sks-failfast", get_sepfw_absent,
                                    set_sepfw_absent);
     object_class_property_set_description(oc, "sks-failfast",
-        "alias of sepfw-absent: make AppleSEPKeyStore open fail-fast (no SEP "
-        "endpoint wait) so io_service_open_extended (msg 2862) returns; "
+        "alias of sepfw-absent: AppleKeyStore user-client start returns false "
+        "with native detach/release cleanup; "
         "default off");
     object_class_property_add_bool(oc, "pmgr-ungate", get_pmgr_ungate,
                                    set_pmgr_ungate);
@@ -4713,6 +4733,10 @@ static void modern_class_init(ObjectClass *oc, const void *data)
         "path of a list of declared same-size edits ('<offset> <old-hex> "
         "<new-hex>' per line, all verified first) applied to the private "
         "large-ramdisk mapping; the image file is never written");
+    object_class_property_add_str(oc, "ramdisk-checkpoint", get_ramdisk_checkpoint,
+                                  set_ramdisk_checkpoint);
+    object_class_property_set_description(oc, "ramdisk-checkpoint",
+        "guarded IMCOW001 filesystem pages applied privately after text edits");
     object_class_property_add_str(oc, "dcp-attach-cbs", get_dcp_attach_cbs,
                                   set_dcp_attach_cbs);
     object_class_property_set_description(oc, "dcp-attach-cbs",

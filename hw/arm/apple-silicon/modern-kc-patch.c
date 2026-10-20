@@ -85,7 +85,7 @@ static void stl_le_p(void *p, uint32_t v)
 
 static bool rd32(const uint8_t *buf, size_t len, uint64_t off, uint32_t *out)
 {
-    if (off > len - 4) {
+    if (len < 4 || off > len - 4) {
         return false;
     }
     *out = ldl_le_p(buf + off);
@@ -94,7 +94,7 @@ static bool rd32(const uint8_t *buf, size_t len, uint64_t off, uint32_t *out)
 
 static bool rd64(const uint8_t *buf, size_t len, uint64_t off, uint64_t *out)
 {
-    if (off > len - 8) {
+    if (len < 8 || off > len - 8) {
         return false;
     }
     *out = ldq_le_p(buf + off);
@@ -1498,14 +1498,15 @@ bool apple_modern_kc_keystore_persona_stub_compat(uint8_t *bootkc, size_t len,
 
 
 /*
- * sks-open-wait-skip: see modern-kc-patch.h. Anchored at AppleSEPKeyStore
- * sub_fffffff0095cefac's blocking BLRAA (vt[0xa0] wait for AppleSEPManager).
+ * Absent-SEP failed start: see modern-kc-patch.h. Preserve BTI and reject
+ * AppleKeyStoreUserClient start before allocating an unregistered command gate.
  */
-#define SKS_OPEN_WAIT_VA     UINT64_C(0xfffffff0095cf27c)
-#define SKS_OPEN_WAIT_OLD    0xd73f0910u /* blraa x8, x16 */
-#define SKS_OPEN_WAIT_NEW    0xd503201fu /* nop */
-#define SKS_OPEN_WAIT_PRE    0xf2e23d10u /* movk x16, #0x11e8, lsl #48 */
-#define SKS_OPEN_WAIT_POST   0x7941e268u /* ldrh w8, [x19, #0xf0] */
+#define SKS_OPEN_WAIT_VA     UINT64_C(0xfffffff0095cefb0)
+#define SKS_OPEN_WAIT_OLD    0xd503237fu /* pacibsp */
+#define SKS_OPEN_WAIT_NEW    0x52800000u /* mov w0, #0 */
+#define SKS_OPEN_WAIT_PRE    0xd503245fu /* bti c */
+#define SKS_OPEN_WAIT_POST   0xd100c3ffu /* sub sp, sp, #0x30 */
+#define SKS_OPEN_WAIT_RET    0xd65f03c0u /* ret */
 
 bool apple_modern_kc_sks_open_wait_skip(uint8_t *bootkc, size_t len,
                                         AppleModernSksOpenWaitPatch *out,
@@ -1537,13 +1538,14 @@ bool apple_modern_kc_sks_open_wait_skip(uint8_t *bootkc, size_t len,
         return false;
     }
     if (SKS_OPEN_WAIT_VA < texec_va ||
-        SKS_OPEN_WAIT_VA - texec_va > texec_size - 4) {
+        SKS_OPEN_WAIT_VA - texec_va < 4 ||
+        SKS_OPEN_WAIT_VA - texec_va > texec_size - 8) {
         error_setg(errp, "sks-open-wait-skip: VA 0x%" PRIx64
                    " outside AppleSEPKeyStore __TEXT_EXEC", SKS_OPEN_WAIT_VA);
         return false;
     }
     off = texec_off + (SKS_OPEN_WAIT_VA - texec_va);
-    if (off < 4 || off + 8 > len) {
+    if (off < 4 || off > len - 8) {
         error_setg(errp, "sks-open-wait-skip: anchor out of range");
         return false;
     }
@@ -1551,7 +1553,7 @@ bool apple_modern_kc_sks_open_wait_skip(uint8_t *bootkc, size_t len,
         ldl_le_p(bootkc + off) != SKS_OPEN_WAIT_OLD ||
         ldl_le_p(bootkc + off + 4) != SKS_OPEN_WAIT_POST) {
         error_setg(errp, "sks-open-wait-skip: unexpected instructions "
-                   "0x%08x/0x%08x/0x%08x at AppleSEPKeyStore open-wait site "
+                   "0x%08x/0x%08x/0x%08x at AppleKeyStoreUserClient start "
                    "(expected 0x%08x/0x%08x/0x%08x); refusing to patch",
                    ldl_le_p(bootkc + off - 4), ldl_le_p(bootkc + off),
                    ldl_le_p(bootkc + off + 4),
@@ -1563,7 +1565,10 @@ bool apple_modern_kc_sks_open_wait_skip(uint8_t *bootkc, size_t len,
         out->anchor = off;
         out->insn_before = SKS_OPEN_WAIT_OLD;
         out->insn_after = SKS_OPEN_WAIT_NEW;
+        out->insn_before1 = SKS_OPEN_WAIT_POST;
+        out->insn_after1 = SKS_OPEN_WAIT_RET;
     }
     stl_le_p(bootkc + off, SKS_OPEN_WAIT_NEW);
+    stl_le_p(bootkc + off + 4, SKS_OPEN_WAIT_RET);
     return true;
 }
