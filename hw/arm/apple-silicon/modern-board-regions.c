@@ -73,11 +73,20 @@ bool apple_modern_board_regions_build(AppleModernBlob dtree,
                                      AppleModernBoardRegions *output,
                                      Error **errp)
 {
-    static const char *const properties[] = {"cpu-impl-reg", "cpm-impl-reg"};
+    /*
+     * coresight-reg is only backed for ALL_CORES (SMP bring-up): XNU
+     * cpu_start() on the master processor (BootKC 0xfffffff00ad3c348) writes
+     * the CoreSight lock-access key 0xc5acce55 to coresight+0xfb0 and takes a
+     * synchronous abort if the bank is unmapped, killing cpu_boot_thread
+     * before any secondary is started.
+     */
+    static const char *const properties[] = {"cpu-impl-reg", "cpm-impl-reg",
+                                             "coresight-reg"};
     static const char *const names[] = {"apple-modern.cpu-impl-reg",
-                                       "apple-modern.cpm-impl-reg"};
+                                       "apple-modern.cpm-impl-reg",
+                                       "apple-modern.coresight-reg"};
     AppleModernBoardRegions plan = {0};
-    size_t cores;
+    size_t cores, nprops;
 
     if (!output) {
         error_setg(errp, "missing modern board region output");
@@ -110,11 +119,12 @@ bool apple_modern_board_regions_build(AppleModernBlob dtree,
     }
     cores = policy == APPLE_MODERN_BOARD_REGIONS_ALL_CORES
                 ? APPLE_MODERN_BOARD_REGION_MAX_CORES : 1;
+    nprops = policy == APPLE_MODERN_BOARD_REGIONS_ALL_CORES ? 3 : 2;
     for (size_t core = 0; core < cores; core++) {
         char path[32];
 
         snprintf(path, sizeof(path), "/cpus/cpu%zu", core);
-        for (size_t i = 0; i < 2; i++) {
+        for (size_t i = 0; i < nprops; i++) {
             AppleModernBlob property;
             AppleModernBoardRegion *window;
             uint64_t base, size;
