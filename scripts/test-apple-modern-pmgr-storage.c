@@ -59,8 +59,8 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
 /* PMS_PTS_PTD (reg_index 34, 0x3003c0000): interrupt enable-set / enable-clear banks
  * and the vector-config array, windows 3..5 (tags 0x101..0x103). */
 #define PTD_BASE UINT64_C(0x3003c0000)
-#define FIXED_WINDOWS 48
-#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 5 + 2 + 29 + 7 + 1 + 2 + 1 + 2 + 2 + 20)
+#define FIXED_WINDOWS 49
+#define FIXED_REGISTERS (8 + 32 + 32 + 256 + 5 + 2 + 29 + 7 + 1 + 2 + 1 + 2 + 2 + 20 + 2)
 /* Five ADT cluster-control registers (reg_index 28): window 6, tag 0x104. */
 #define CLUSTER_BASE UINT64_C(0x300780000)
 #define CLUSTER_TAG 0x104
@@ -91,10 +91,14 @@ static uint8_t *property(AppleModernBlob tree, const char *path, const char *nam
 /* PMGR_SOC_TVM (reg_index 25) +0x400 (control) and +0x7e0 (status, polled) in window 24 (tag 0x116, size 0x3e4). */
 #define TVM_BASE UINT64_C(0x300760400)
 #define TVM_WINDOW 24
+/* PMGR_SOC_TVM index 2 +0xc00/+0xfe0 (CLLT early-wake poll) in window 25 (tag 0x117). */
+#define TVM2_BASE UINT64_C(0x300760c00)
+#define TVM2_WINDOW 25
+#define TVM2_TAG 0x117
 /* Ten block-local register pairs (block base + 0x104 and + 0x108), windows 25..34, tags 0x117..0x120,
  * in the order of the AppleT8140PMGR table at 0xfffffff00b9257c0. */
-#define ACG_WINDOW 25
-#define ACG_TAG 0x117
+#define ACG_WINDOW 26
+#define ACG_TAG 0x118
 static const uint64_t ACG_BASE[10] = {
     UINT64_C(0x408000000), UINT64_C(0x413000000), UINT64_C(0x417000000), UINT64_C(0x38b000000),
     UINT64_C(0x380000000), UINT64_C(0x284000000), UINT64_C(0x288000000), UINT64_C(0x481000000),
@@ -143,7 +147,7 @@ static bool expected_valid(unsigned group, uint64_t offset)
     if (group == PMC_TAG + 4) {
         return offset == 0 || offset == 0x44;
     }
-    if (group == PMC_TAG + 5) {
+    if (group == PMC_TAG + 5 || group == TVM2_TAG) {
         return offset == 0 || offset == 0x3e0;
     }
     if (group >= 0x200 && group < 0x20f) {
@@ -208,6 +212,8 @@ static void plan_exact(AppleModernBlob tree)
           plan.windows[PWRG2_WINDOW].size == 0x48);
     CHECK(plan.windows[TVM_WINDOW].group == PMC_TAG + 5 && plan.windows[TVM_WINDOW].address == TVM_BASE &&
           plan.windows[TVM_WINDOW].size == 0x3e4);
+    CHECK(plan.windows[TVM2_WINDOW].group == TVM2_TAG && plan.windows[TVM2_WINDOW].address == TVM2_BASE &&
+          plan.windows[TVM2_WINDOW].size == 0x3e4);
     for (unsigned k = 0; k < 10; k++) {
         CHECK(plan.windows[ACG_WINDOW + k].group == ACG_TAG + k &&
               plan.windows[ACG_WINDOW + k].address == ACG_BASE[k] + 0x104 &&
@@ -436,13 +442,13 @@ static void plan_tamper(AppleModernBlob tree)
     CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
     clear_error(&error);
     memcpy(reg + 22 * 16, saved, 16);
-    /* The TVM status register +0x7e0 needs reg[25] to hold 0x7e4 bytes. */
+    /* TVM index 0xb needs +0x7e0; index 2 (CLLT) needs +0xfe0 → reg[25] size >= 0xfe4. */
     CHECK(reg_size >= 26 * 16);
     memcpy(saved, reg + 25 * 16, 16);
     memset(reg + 25 * 16 + 8, 0, 8);
-    reg[25 * 16 + 8] = 0xe4; reg[25 * 16 + 9] = 0x07;
+    reg[25 * 16 + 8] = 0xe4; reg[25 * 16 + 9] = 0x0f;  /* 0xfe4 */
     CHECK(apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
-    reg[25 * 16 + 8] = 0xe3;
+    reg[25 * 16 + 8] = 0xe3; reg[25 * 16 + 9] = 0x0f;  /* 0xfe3 — one byte short of index-2 status */
     CHECK(!apple_modern_pmgr_storage_plan_build(tree, DRAM, DRAM_SIZE, NULL, 0, &junk, &error));
     clear_error(&error);
     memcpy(reg + 25 * 16, saved, 16);

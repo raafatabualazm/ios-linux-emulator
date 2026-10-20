@@ -339,7 +339,14 @@ static const FixedWindow fixed_windows[] = {
     {43, 0x8a9c14, 0x4, 0, {0}},            /* PMC DVMR popcount +0xa9c14 */
     {22, 0xc8c, 0x48, 2, {0, 0x44}},        /* PwrGate +0xc8c and +0xcd0 (hook table 2) */
     {25, 0x400, 0x3e4, 2, {0, 0x3e0}},      /* PMGR_SOC_TVM index 0xb: control +0x400, status +0x7e0 */
+    /* Index 2 (+0xc00/+0xfe0): AppleT8140PMGR early-wake/CLLT path at
+     * 0xfffffff00984812c (gate this+0x738eb) does RMW clear bit10 then an
+     * UNBOUNDED poll for bit11 clear. Stock soc-clusters never selects index 2,
+     * but sleep/early-wake sets the gate and would hang on an unmapped abort.
+     * Zero-reset storage satisfies the poll on the first re-read. */
+    {25, 0xc00, 0x3e4, 2, {0, 0x3e0}},      /* PMGR_SOC_TVM index 2: control +0xc00, status +0xfe0 */
 };
+
 
 /* AppleT8140PMGR slot0xb88 (0x984a4cc) restores ACC accounting
  * counters, NOT power votes. Kinds0/1 have 8/18 qwords at +400/+500;
