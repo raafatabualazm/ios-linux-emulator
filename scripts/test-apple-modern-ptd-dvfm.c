@@ -162,6 +162,30 @@ static void ptd_core(void)
     CHECK(core.reads == UINT64_MAX && core.writes == UINT64_MAX);
     apple_modern_pmp_ptd_core_reset(&core);
     CHECK(!core.reads && !core.writes && !core.msg[432] && !core.hidden[0] && !core.hidden[1023]);
+
+    /* Quiet responder contract from the AP + PMP firmware, independently
+     * known command commit/sequence/metadata fields. It is default-off. */
+    CHECK(!core.command_responder && !core.command_count && !core.ack_count);
+    core.command_responder = true;
+    CHECK(apple_modern_pmp_ptd_core_write(&core, 1, 433 * 8, 8, 0x12345678));
+    CHECK(!core.ack_count && !core.msg[448]); /* word1 does not commit */
+    CHECK(apple_modern_pmp_ptd_core_write(&core, 1, 432 * 8, 8, 0x1002));
+    CHECK(core.command_count == 1 && core.ack_count == 1);
+    CHECK(core.command_word0 == 0x1002 && core.command_word1 == 0x12345678);
+    CHECK(apple_modern_pmp_ptd_core_read(&core, 0, 448 * 16, 8, &v) && v == 2);
+    CHECK(apple_modern_pmp_ptd_core_read(&core, 0, 448 * 16 + 8, 8, &v) && v == 2);
+    CHECK(!core.msg[1] && !core.meta[1]); /* receipt is not PMP online */
+    for (unsigned i = 440; i < 448; i++) {
+        CHECK(!core.msg[i] && !core.meta[i]); /* no invented quota grants */
+    }
+    CHECK(apple_modern_pmp_ptd_core_write(&core, 1, 432 * 8, 8, 0xf000));
+    CHECK(core.command_count == 2 && core.ack_count == 1 && core.msg[448] == 2);
+    CHECK(apple_modern_pmp_ptd_core_write(&core, 1, 432 * 8, 8, 0xefff));
+    CHECK(core.ack_count == 2 && core.msg[448] == 0xfff && core.meta[448] == 2);
+    apple_modern_pmp_ptd_core_reset(&core);
+    CHECK(!core.command_responder); /* QOM wrapper reapplies its fixed profile */
+    CHECK(!core.command_count && !core.ack_count && !core.command_word0 &&
+          !core.command_word1 && !core.msg[448] && !core.meta[448]);
 }
 
 static void dvfm_plan(AppleModernBlob tree)

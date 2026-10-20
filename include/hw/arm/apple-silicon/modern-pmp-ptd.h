@@ -18,8 +18,14 @@
  * DECLARED by this model: an Update store to slot i < 1024 latches into the
  * Dashboard msg of entry i (the quota read-back requires the mirror, but who
  * performs it, the board or the PMP firmware, is not known); metadata stays
- * zero; slots >= 1024 are stored and not visible. There is NO responder: no
- * acknowledgement, no quota response and no PMP-status value is produced.
+ * zero; slots >= 1024 are stored and not visible.
+ * Optional command-responder (default off): on the command commit at slot 432,
+ * publish its nonzero low 12-bit sequence to Dashboard[448], with new_data.
+ * This is the quiet PMP stand-in described by the retained T8140 firmware/AP
+ * disassembly in evidence/features-20261009/w2-pmp/README.md, profile Q. It
+ * acknowledges receipt only: no cache quota grant, power-status, power ack,
+ * thermal control or PMP firmware execution is supplied. In particular it
+ * does not claim that a power transition or a key operation succeeded.
  * The Update port is write-only and the Dashboard read-only; every other
  * access width, alignment or offset is rejected.
  */
@@ -38,6 +44,8 @@ typedef struct AppleModernPTDCore {
     uint64_t meta[APPLE_MODERN_PTD_ENTRIES];
     uint64_t hidden[APPLE_MODERN_PTD_SLOTS - APPLE_MODERN_PTD_ENTRIES];
     uint64_t reads, writes;
+    bool command_responder;
+    uint64_t command_count, ack_count, command_word0, command_word1;
 } AppleModernPTDCore;
 
 bool apple_modern_pmp_ptd_plan_build(AppleModernBlob tree,
