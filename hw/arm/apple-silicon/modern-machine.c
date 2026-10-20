@@ -2936,23 +2936,16 @@ static void modern_init(MachineState *machine)
     }
     if (s->disp0_panel_id && !s->prepare_only) {
         /*
-         * iBoot injects the built-in panel's Embedded-Display-Timing (EDT)
-         * identity into /arm-io/disp0; our stock dtree has the geometry/power
-         * data but none of the panel identity, so AppleMobileDispH17P-DCP
-         * set_panel_id logs "missing EDT data raw-panel-serial-number" and
-         * skips Panel_ID, and CoreDisplay never mints a CGDirectDisplayID
-         * (main-display stays 0xFFFFFFFFFFFFFFFF). Supply a minimal valid
-         * 1024x768 internal-panel identity so the synchronous kernel reads
-         * succeed. Data-only; complementary to the D126/D127/D128 mode push.
+         * RE (BootKC a36b9241): set_panel_id/set_ffr_index read the panel
+         * serials and the FFR keys from the ROOT /product DT node, which the
+         * kernel EDT wrapper finds via childFromPath("product") three
+         * registry levels above the display pipe's nub. The stock dtree has
+         * no /product node at all, so the loader appends one (data-only) via
+         * input.product_panel_id. Only the geometry/timing block belongs on
+         * /arm-io/disp0 itself.
          */
         static const uint8_t fb_w[] = {0x00, 0x04, 0x00, 0x00};   /* 1024 */
         static const uint8_t fb_h[] = {0x00, 0x03, 0x00, 0x00};   /* 768 */
-        static const uint8_t panel_serial[] = {
-            0x51, 0x45, 0x4d, 0x55, 0x44, 0x34, 0x37, 0x00,       /* "QEMUD47" */
-        };
-        static const uint8_t coverglass_serial[] = {
-            0x43, 0x47, 0x51, 0x45, 0x4d, 0x55, 0x00, 0x00,       /* "CGQEMU" */
-        };
         static const uint8_t timing_info[] = {
             0x00, 0x04, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00,
             0x33, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00,
@@ -2960,19 +2953,6 @@ static void modern_init(MachineState *machine)
             0x06, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00,
         };
         static const AppleModernAdtOverride disp0_overrides[] = {
-            /*
-             * set_panel_id reads the panel serials from the ROOT /product node
-             * (via childFromPath("../../../product")), NOT from the disp0 nub --
-             * confirmed by RE and by v14 (injecting onto disp0 had no effect).
-             */
-            {"/product", "raw-panel-serial-number", panel_serial,
-             sizeof(panel_serial)},
-            {"/product", "coverglass-serial-number", coverglass_serial,
-             sizeof(coverglass_serial)},
-            /*
-             * The native-size / EDT block (read_edt_data, set_ffr_index) is read
-             * from the disp0 nub itself (provider+0x198).
-             */
             {"/arm-io/disp0", "framebuffer-width", fb_w, sizeof(fb_w)},
             {"/arm-io/disp0", "framebuffer-height", fb_h, sizeof(fb_h)},
             {"/arm-io/disp0", "display-timing-info", timing_info,
@@ -3134,6 +3114,10 @@ static void modern_init(MachineState *machine)
         metadata_input.chosen_sepfw_absent = true;
         warn_report("apple-modern: sepfw-absent serves /chosen "
                     "sepfw-load-at-boot = 0 (declared: no SEP firmware runs)");
+    }
+    if (s->disp0_panel_id && !s->prepare_only) {
+        /* Loader appends the synthetic /product EDT node; see disp0-panel-id. */
+        metadata_input.product_panel_id = true;
     }
     if (s->pmgr_ungate) {
         size_t ungate_count = 0;

@@ -54,6 +54,7 @@ typedef struct Tree {
     unsigned chosen_count, map_count, vram_count, aic_count;
     uint32_t aic_iack_offset;
     bool chosen_sepfw_absent;
+    bool product_panel_id, product_seen;
     /*
      * dart-id generation. dart_pending and dart_value describe only the node
      * whose properties are being emitted: walk() sets them after reading the
@@ -343,6 +344,9 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
     vram = tree->layout && tree->layout->framebuffer_size &&
            !strcmp(path, "/vram");
     aic = tree->aic_iack_offset && !strcmp(path, "/arm-io/aic");
+    if (depth == 1 && !strcmp(name, "product")) {
+        tree->product_seen = true;
+    }
     if ((chosen && ++tree->chosen_count > 1) ||
         (map && ++tree->map_count > 1) ||
         (vram && ++tree->vram_count > 1) ||
@@ -422,6 +426,42 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
         }
         put32(tree->output + output_header + 4, children + 1);
         tree->map_count = 1;
+    }
+    /*
+     * Synthetic /product child (product_panel_id): the EDT factory-identity
+     * node AppleMobileDispH17P resolves via childFromPath("product") three
+     * levels above the display pipe's nub. Values mirror the disp0-panel-id
+     * board option; the two FFR keys are big-endian u32 (set_ffr_index
+     * byteswaps them) and zero disables overdrive exactly like real hardware
+     * without factory FDR calibration.
+     */
+    if (tree->output && !depth && tree->product_panel_id) {
+        static const uint8_t panel_serial[] = {
+            'Q', 'E', 'M', 'U', 'D', '4', '7', '\0',
+        };
+        static const uint8_t coverglass_serial[] = {
+            'C', 'G', 'Q', 'E', 'M', 'U', '\0', '\0',
+        };
+        static const uint8_t ffr_zero[4];
+        uint8_t header[8];
+        if (children == 8192 || ++tree->nodes > 8192) {
+            return fail(errp, "cannot append ADT product child");
+        }
+        put32(header, 5);
+        put32(header + 4, 0);
+        if (!emit(tree, header, sizeof(header), errp) ||
+            !property(tree, "name", "product", 8, errp) ||
+            !property(tree, "raw-panel-serial-number", panel_serial,
+                      sizeof(panel_serial), errp) ||
+            !property(tree, "coverglass-serial-number", coverglass_serial,
+                      sizeof(coverglass_serial), errp) ||
+            !property(tree, "first-frame-response", ffr_zero,
+                      sizeof(ffr_zero), errp) ||
+            !property(tree, "first-frame-response-high", ffr_zero,
+                      sizeof(ffr_zero), errp)) {
+            return false;
+        }
+        put32(tree->output + output_header + 4, children + 1);
     }
     return true;
 }
@@ -678,8 +718,13 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     if (prepared.layout.framebuffer_size) {
         AppleModernBootVideo derived = {
             .base_address = prepared.layout.framebuffer_physical,
-            /* XNU PE_create_console selects its text console when zero. */
-            .display = 0,
+            /*
+             * GRAPHICS_MODE (1): XNU renders its verbose boot text console onto
+             * a graphics framebuffer. display=0 is legacy TEXT_MODE (no ARM fb
+             * console) -- which left the panel black while the log went only to
+             * serial.
+             */
+            .display = 1,
             .row_bytes = components->framebuffer_stride ?
                          components->framebuffer_stride :
                          (uint64_t)components->framebuffer_width * 4,
@@ -713,6 +758,7 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     tree.capacity = capacity;
     tree.aic_iack_offset = input->aic_iack_offset;
     tree.chosen_sepfw_absent = input->chosen_sepfw_absent;
+    tree.product_panel_id = input->product_panel_id;
     tree.assign_dart_ids = input->assign_dart_ids;
     tree.overrides = input->overrides;
     tree.override_count = input->override_count;
@@ -723,6 +769,11 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
         if (!errp || !*errp) {
             fail(errp, "ADT chosen path missing or serialization incomplete");
         }
+        goto failed;
+    }
+    if (tree.product_panel_id && tree.product_seen) {
+        fail(errp, "product node generation requested but the ADT already "
+             "has a /product child");
         goto failed;
     }
     for (size_t i = 0; i < tree.override_count; i++) {

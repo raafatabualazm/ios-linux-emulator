@@ -57,6 +57,19 @@ typedef struct AppleModernBootMetadataInput {
      */
     bool chosen_sepfw_absent;
     /*
+     * Append a synthetic root child node "product" carrying the built-in
+     * panel's factory identity (board option disp0-panel-id). AppleMobileDispH17P
+     * reads these keys through IOMobileFramebufferAP's EDT wrapper, which finds
+     * the node via childFromPath("product") three registry levels above the
+     * pipe's nub; the stock Darwin-derived tree has no /product node, so
+     * set_panel_id logs "missing EDT data raw-panel-serial-number" and never
+     * publishes Panel_ID. Properties (data-only): name, raw-panel-serial-number,
+     * coverglass-serial-number, first-frame-response, first-frame-response-high
+     * (the two FFR keys are big-endian u32, read with rev by set_ffr_index).
+     * The stock tree must not already carry a /product child.
+     */
+    bool product_panel_id;
+    /*
      * Optional property overrides. Every node must exist exactly once and the
      * (path, name) pairs must be unique. Nodes the loader already rewrites
      * (/chosen, /chosen/memory-map, /vram, /arm-io/aic) are refused; the
