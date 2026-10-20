@@ -441,6 +441,62 @@ void apple_modern_pmgr_core_write(AppleModernPMGRCore *core,
     core->values[i] = controls | (actual << 4);
 }
 
+/*
+ * AppleT8140PMGR::initRegGroups binds MISC_CORES to RegMap 0x69 at +0x4000
+ * (0xfffffff009846d7c-0xfffffff009846d88), and initRegMaps binds RegMap 0x69
+ * to `reg` entry 0x18 (0xfffffff009846b58). Those two constants come from the
+ * kernel; every address below is read from the ADT.
+ */
+#define PMGR_MISC_CORES_REG_INDEX 0x18
+#define PMGR_MISC_CORES_GROUP_OFFSET 0x4000
+#define PMGR_MISC_CORES_SIZE 0x10
+
+bool apple_modern_pmgr_core_enable_site(AppleModernBlob dtree,
+                                        const AppleModernPMGRPlan *plan,
+                                        unsigned *window, uint32_t *offset,
+                                        Error **errp)
+{
+    AppleModernBlob reg, ranges;
+    uint64_t child, span, base;
+
+    if (!plan || !window || !offset) {
+        error_setg(errp, "missing PMGR core-enable output");
+        return false;
+    }
+    if (!apple_modern_adt_property(dtree, "/arm-io", "ranges", &ranges, errp) ||
+        !apple_modern_adt_property(dtree, "/arm-io/pmgr", "reg", &reg, errp)) {
+        return false;
+    }
+    if (reg.size % 16 ||
+        reg.size < (PMGR_MISC_CORES_REG_INDEX + 1) * 16) {
+        error_setg(errp, "PMGR reg has no entry 0x%x for MISC_CORES",
+                   PMGR_MISC_CORES_REG_INDEX);
+        return false;
+    }
+    child = get_le(reg.data + PMGR_MISC_CORES_REG_INDEX * 16, 8);
+    span = get_le(reg.data + PMGR_MISC_CORES_REG_INDEX * 16 + 8, 8);
+    if (span < PMGR_MISC_CORES_GROUP_OFFSET + PMGR_MISC_CORES_SIZE) {
+        error_setg(errp, "PMGR MISC_CORES lies outside its register window");
+        return false;
+    }
+    if (!translate(ranges, child, span, &base, errp)) {
+        return false;
+    }
+    base += PMGR_MISC_CORES_GROUP_OFFSET;
+    for (unsigned i = 0; i < plan->window_count; i++) {
+        uint64_t wb = plan->windows[i].base, ws = plan->windows[i].size;
+
+        if (base >= wb && base - wb <= ws - PMGR_MISC_CORES_SIZE) {
+            *window = i;
+            *offset = (uint32_t)(base - wb);
+            return true;
+        }
+    }
+    error_setg(errp, "PMGR MISC_CORES at 0x%llx is in no mapped window",
+               (unsigned long long)base);
+    return false;
+}
+
 #ifndef APPLE_MODERN_LAYOUT_STANDALONE
 typedef struct AppleModernPMGRPort {
     AppleModernPMGRState *state;
@@ -458,6 +514,14 @@ struct AppleModernPMGRState {
     /* Default-off trace: ADT device name per cell, "" when unnamed. */
     bool trace;
     char names[APPLE_MODERN_PMGR_MAX_CELLS][17];
+    /* MISC_CORES: the core start/stop register group. */
+    bool core_enable_valid;
+    unsigned core_enable_window;
+    uint32_t core_enable_offset;
+    uint32_t core_enable_values[4];
+    AppleModernPMGRCoreEnable core_enable_callback;
+    void *core_enable_opaque;
+    MemoryRegion core_enable_mr;
 };
 
 static const char *pmgr_cell_name(const AppleModernPMGRState *s, unsigned cell)
@@ -493,6 +557,55 @@ void apple_modern_pmgr_set_trace(DeviceState *dev, AppleModernBlob dtree)
             s->names[c][16] = 0;
         }
     }
+}
+
+static uint64_t core_enable_read(void *opaque, hwaddr offset, unsigned size)
+{
+    AppleModernPMGRState *s = opaque;
+    return s->core_enable_values[(offset / 4) % 4];
+}
+
+static void core_enable_write(void *opaque, hwaddr offset, uint64_t value,
+                              unsigned size)
+{
+    AppleModernPMGRState *s = opaque;
+    unsigned index = (offset / 4) % 4;
+    const char *what = index == 1 ? "enable core"
+                     : index == 0 ? "disable core" : "cluster";
+
+    s->core_enable_values[index] = (uint32_t)value;
+    qemu_log_mask(LOG_UNIMP, "PMGR MISC_CORES %-12s +%u mask 0x%08" PRIx32 "\n",
+                  what, (unsigned)offset, (uint32_t)value);
+    if (index != 1 || !s->core_enable_callback) {
+        return;
+    }
+    for (unsigned core = 0; core < 32; core++) {
+        if (value & (UINT64_C(1) << core)) {
+            s->core_enable_callback(s->core_enable_opaque, core);
+        }
+    }
+}
+
+static const MemoryRegionOps core_enable_ops = {
+    .read = core_enable_read,
+    .write = core_enable_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {.min_access_size = 4, .max_access_size = 4},
+    .impl = {.min_access_size = 4, .max_access_size = 4},
+};
+
+void apple_modern_pmgr_set_core_enable(DeviceState *dev, unsigned window,
+                                       uint32_t offset,
+                                       AppleModernPMGRCoreEnable callback,
+                                       void *opaque)
+{
+    AppleModernPMGRState *s = APPLE_MODERN_PMGR(dev);
+
+    s->core_enable_valid = true;
+    s->core_enable_window = window;
+    s->core_enable_offset = offset;
+    s->core_enable_callback = callback;
+    s->core_enable_opaque = opaque;
 }
 
 static uint64_t pmgr_read(void *opaque, hwaddr offset, unsigned size)
@@ -538,7 +651,10 @@ static const MemoryRegionOps pmgr_ops = {
 
 static void pmgr_reset(DeviceState *dev)
 {
-    apple_modern_pmgr_core_reset(&APPLE_MODERN_PMGR(dev)->core);
+    AppleModernPMGRState *s = APPLE_MODERN_PMGR(dev);
+
+    memset(s->core_enable_values, 0, sizeof(s->core_enable_values));
+    apple_modern_pmgr_core_reset(&s->core);
 }
 
 static void pmgr_realize(DeviceState *dev, Error **errp)
@@ -568,6 +684,18 @@ static void pmgr_realize(DeviceState *dev, Error **errp)
                               &s->ports[i], name, 8);
         memory_region_add_subregion(&s->windows[cell->window], cell->offset,
                                      &s->cells[i]);
+    }
+    if (s->core_enable_valid) {
+        if (s->core_enable_window >= s->core.plan.window_count) {
+            error_setg(errp, "PMGR core-enable window is out of range");
+            return;
+        }
+        memory_region_init_io(&s->core_enable_mr, OBJECT(dev),
+                              &core_enable_ops, s, "apple-modern.pmgr-misc-cores",
+                              PMGR_MISC_CORES_SIZE);
+        memory_region_add_subregion(&s->windows[s->core_enable_window],
+                                     s->core_enable_offset,
+                                     &s->core_enable_mr);
     }
     apple_modern_pmgr_core_reset(&s->core);
 }

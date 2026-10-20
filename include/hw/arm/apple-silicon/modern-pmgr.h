@@ -73,6 +73,10 @@ uint32_t apple_modern_pmgr_core_read(AppleModernPMGRCore *core,
 void apple_modern_pmgr_core_write(AppleModernPMGRCore *core,
                                   unsigned window, uint64_t offset,
                                   uint32_t value);
+bool apple_modern_pmgr_core_enable_site(AppleModernBlob dtree,
+                                        const AppleModernPMGRPlan *plan,
+                                        unsigned *window, uint32_t *offset,
+                                        Error **errp);
 
 #ifndef APPLE_MODERN_LAYOUT_STANDALONE
 #include "hw/sysbus.h"
@@ -91,5 +95,31 @@ DeviceState *apple_modern_pmgr_new(const AppleModernPMGRPlan *plan);
  * domains ECPU_0..ECPU_3 and PCPU_0..PCPU_1.
  */
 void apple_modern_pmgr_set_trace(DeviceState *dev, AppleModernBlob dtree);
+
+/*
+ * MISC_CORES, the register the guest actually uses to start a CPU core.
+ *
+ * It is NOT a power-state cell. ApplePMGR reaches it as
+ *   cpu_start -> IOPMGR::enableCPUCore -> AbstractPMGR::enableCPUCore
+ *   (mask = 1 << cpu-id) -> enableCPUCores -> ApplePMGR::configMiscCores
+ *   -> a 32-bit store at regmap base + offset,
+ * where AppleT8140PMGR binds the register group MISC_CORES to RegMap 0x69
+ * (PMGR_SOC_MISC) at +0x4000, and RegMap 0x69 to /arm-io/pmgr `reg` entry
+ * 0x18. On the served d47ap tree that is physical 0x300734000, inside
+ * ps-group 0's window, so it falls in a hole between power cells and would
+ * otherwise reach no callback at all.
+ *
+ * Writes are fire-and-forget: enable is +4, disable +0, per-cluster +8 + 4*n,
+ * each a bitmask whose bit N is ADT cpu-id N. The driver performs no
+ * completion read on this register group, so nothing has to be presented back.
+ *
+ * `site` locates the register from the ADT rather than hardcoding an address.
+ * `callback` is invoked once per core bit set by an enable write.
+ */
+typedef void (*AppleModernPMGRCoreEnable)(void *opaque, unsigned core);
+void apple_modern_pmgr_set_core_enable(DeviceState *dev, unsigned window,
+                                       uint32_t offset,
+                                       AppleModernPMGRCoreEnable callback,
+                                       void *opaque);
 #endif
 #endif

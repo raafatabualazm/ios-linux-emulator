@@ -571,8 +571,7 @@ static void modern_cpu_on_work(CPUState *cs, run_on_cpu_data data)
  * core with no vCPU behind it (index >= -smp) is ignored, as a single-CPU
  * board ignores every secondary; a core already on is left alone.
  */
-static G_GNUC_UNUSED void modern_cpu_release(AppleModernMachine *s,
-                                             unsigned index)
+static void modern_cpu_release(AppleModernMachine *s, unsigned index)
 {
     ARMCPU *cpu;
 
@@ -1333,6 +1332,12 @@ static bool map_disp0(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
     return true;
 }
 
+/* ADT cpu-id N, the numbering the PMGR core mask uses, is vCPU index N. */
+static void modern_pmgr_core_enable(void *opaque, unsigned core)
+{
+    modern_cpu_release(opaque, core);
+}
+
 static bool map_pmgr(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
                        Error **errp)
 {
@@ -1365,6 +1370,24 @@ static bool map_pmgr(AppleModernMachine *s, uint64_t uart, uint64_t uart_span,
                     s->pmgr_boot_on);
     }
     DeviceState *dev = apple_modern_pmgr_new(&plan);
+    {
+        unsigned window;
+        uint32_t offset;
+        Error *local = NULL;
+
+        if (apple_modern_pmgr_core_enable_site(dtree, &plan, &window, &offset,
+                                               &local)) {
+            apple_modern_pmgr_set_core_enable(dev, window, offset,
+                                              modern_pmgr_core_enable, s);
+            warn_report("apple-modern: PMGR MISC_CORES served at window %u "
+                        "+0x%05x; a core-enable write starts that vCPU when "
+                        "-smp provides one", window, offset);
+        } else {
+            warn_report_err(local);
+            warn_report("apple-modern: PMGR MISC_CORES not located; the guest's "
+                        "core-enable writes will reach no model");
+        }
+    }
     if (s->pmgr_trace) {
         apple_modern_pmgr_set_trace(dev, dtree);
         warn_report("apple-modern: PMGR access trace on; every power-cell read "
