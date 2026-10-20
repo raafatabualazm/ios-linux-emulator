@@ -100,9 +100,17 @@ static void check_table_shape(void)
             if (!strcmp(row->name, "compatible")) {
                 CHECK(row->value[row->size - 1] == '\0');
                 CHECK(row->size >= 2);
+            } else if (!strcmp(row->name, "graphics-featureset-class") ||
+                       !strcmp(row->name, "graphics-featureset-fallbacks")) {
+                /* Also NUL-terminated token strings; the fallbacks may be "". */
+                CHECK(row->value[row->size - 1] == '\0');
             } else {
-                /* The only other property any group serves is dart-id. */
-                CHECK(!strcmp(row->name, "dart-id") && row->size == 4);
+                /*
+                 * The remaining served properties are fixed-width u32 values:
+                 * dart-id, and /filesystems e-apfs.
+                 */
+                CHECK((!strcmp(row->name, "dart-id") ||
+                       !strcmp(row->name, "e-apfs")) && row->size == 4);
             }
         }
     }

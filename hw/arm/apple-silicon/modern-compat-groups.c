@@ -126,6 +126,19 @@ static const uint8_t pmgr_v1[] = {0x63, 0x6c, 0x70, 0x63, 0x2c, 0x74, 0x38, 0x31
 static const uint8_t pmgr_v2[] = {0x70, 0x70, 0x6d, 0x2c, 0x63, 0x70, 0x6d, 0x73, 0x00};
 /* /arm-io/pmgr/soc-tuner compatible = soc-tuner,t8030 */
 static const uint8_t pmgr_v3[] = {0x73, 0x6f, 0x63, 0x2d, 0x74, 0x75, 0x6e, 0x65, 0x72, 0x2c, 0x74, 0x38, 0x30, 0x33, 0x30, 0x00};
+/*
+ * /arm-io/mcc compatible = mcc,t8140. Byte-for-byte the value the stock tree
+ * carries (features-20261008/mcc-dcs-perf/guest-probe-v2/dtree). Without it
+ * AppleT8140MCC cannot match, so nothing publishes the IOFunctionParent
+ * property that ApplePMGR::start waits on for function-mcc_ctrl, and start
+ * never returns. The served tree's /arm-io/mcc is otherwise identical to
+ * stock, so this one property is the whole difference.
+ */
+static const uint8_t mcc_v0[] = {0x6d, 0x63, 0x63, 0x2c, 0x74, 0x38, 0x31, 0x34, 0x30, 0x00};
+static const AppleModernAdtOverride mcc_rows[] = {
+    {"/arm-io/mcc", "compatible", mcc_v0, (uint32_t)sizeof(mcc_v0)},
+};
+
 static const AppleModernAdtOverride pmgr_rows[] = {
     {"/arm-io/pmgr", "compatible", pmgr_v0, (uint32_t)sizeof(pmgr_v0)},
     {"/arm-io/pmgr/clpc", "compatible", pmgr_v1, (uint32_t)sizeof(pmgr_v1)},
@@ -390,6 +403,8 @@ const AppleModernCompatGroup apple_modern_compat_groups[] = {
      "the SPMI buses and the Dialog PMU on them (power button, RTC, charger)"},
     {"pmgr", pmgr_rows, sizeof(pmgr_rows) / sizeof(pmgr_rows[0]),
      "W-10: AppleT8140PMGR itself plus the CLPC, PPM and SOC-tuner nubs it would publish"},
+    {"mcc", mcc_rows, sizeof(mcc_rows) / sizeof(mcc_rows[0]),
+     "AppleT8140MCC, whose start publishes the function parent ApplePMGR waits on"},
     {"smc", smc_rows, sizeof(smc_rows) / sizeof(smc_rows[0]),
      "the SMC coprocessor: its 7 already-matching child services have no provider without it"},
     {"aop", aop_rows, sizeof(aop_rows) / sizeof(aop_rows[0]),
