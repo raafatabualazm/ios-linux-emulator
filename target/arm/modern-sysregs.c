@@ -198,7 +198,7 @@ static void apple_modern_ipi_sr_reset(CPUARMState *env, const ARMCPRegInfo *ri)
 
 /*
  * Opt-in access trace (apple-modern-sysreg-trace): registers whose name starts
- * with one of the listed prefixes get logging accessors over the unchanged
+ * with one of the listed prefixes (separated by '+' or ',') get logging accessors over the unchanged
  * opaque storage. Reads and writes are logged with the vCPU index and the
  * exception level, capped per CPU so a polling loop cannot flood the log.
  */
@@ -209,7 +209,9 @@ static bool apple_modern_sysreg_traced_name(const ARMCPU *cpu, const char *name)
     const char *list = cpu->apple_modern_sysreg_trace;
 
     while (list && *list) {
-        const char *end = strchr(list, ',');
+        /* '+' separates prefixes on the -M line (commas end a -M option, as
+         * adt-compat-restore already does); ',' is accepted for QOM use. */
+        const char *end = strpbrk(list, "+,");
         size_t len = end ? (size_t)(end - list) : strlen(list);
 
         if (len && !strncmp(name, list, len)) {

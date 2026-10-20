@@ -5014,8 +5014,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "sysreg-trace", get_sysreg_trace,
                                   set_sysreg_trace);
     object_class_property_set_description(oc, "sysreg-trace",
-        "diagnostic: comma-separated name prefixes of opaque modern registers "
-        "(for example ACC_,CTRR_,CTXR_) whose accesses are logged under -d "
+        "diagnostic: '+'-separated name prefixes of opaque modern registers "
+        "(for example ACC_+CTRR_+CTXR_) whose accesses are logged under -d "
         "unimp with vCPU index and EL; default off");
     object_class_property_add_bool(oc, "modern-cpu-dvfm", get_modern_cpu_dvfm,
                                    set_modern_cpu_dvfm);
