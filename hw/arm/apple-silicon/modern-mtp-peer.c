@@ -48,6 +48,42 @@ static const uint8_t mt_hid_descriptor_digitizer[] = {
     0xc0, 0xc0,
 };
 
+/*
+ * Feature-report answers for interface 1 (multi-touch). These are the cached
+ * GET responses the kernel itself carries for the AppleGenericMultitouch
+ * controllers (BootKC personality "GetReportCachedResponse", first variant,
+ * ExpectedVersion 896): the exact bytes a real controller returns for these
+ * report ids. d47's own personality (D47S1) travels in the touch firmware
+ * image, which is not retained, so the nearest shipped variant is served.
+ */
+typedef struct CachedGet {
+    uint8_t id;
+    uint8_t len;
+    uint8_t data[96];
+} CachedGet;
+
+static const CachedGet mt_cached_gets[] = {
+    { 0x7f, 5,  { 0x7f, 0x00, 0x00, 0x00, 0x00 } },
+    { 0xa1, 7,  { 0xa1, 0x00, 0x00, 0x07, 0x00, 0x00, 0x02 } },
+    { 0xd0, 23, { 0xd0, 0x03, 0x01, 0x00, 0x1e, 0x01, 0x00, 0x0e, 0x00, 0x08,
+                  0x00, 0x1e, 0x01, 0x0e, 0x01, 0x00, 0x0b, 0x1e, 0x01, 0x01,
+                  0x00, 0x0f, 0x00 } },
+    { 0xd1, 2,  { 0xd1, 0xc0 } },
+    { 0xd3, 13, { 0xd3, 0x01, 0x1f, 0x0f, 0x03, 0x80, 0x00, 0x0e, 0x1e, 0x00,
+                  0x05, 0x00, 0x00 } },
+    { 0xd9, 17, { 0xd9, 0x58, 0x18, 0x00, 0x00, 0xb7, 0x34, 0x00, 0x00, 0x26,
+                  0xff, 0x24, 0xff, 0x76, 0x17, 0xd3, 0x33 } },
+    { 0xdb, 81, { 0xdb, 0x01, 0x02, 0x00, 0xd1, 0xc0, 0x0d, 0x00, 0xd3, 0x01,
+                  0x1f, 0x0f, 0x03, 0x80, 0x00, 0x0e, 0x1e, 0x00, 0x05, 0x00,
+                  0x00, 0x17, 0x00, 0xd0, 0x03, 0x01, 0x00, 0x1e, 0x01, 0x00,
+                  0x0e, 0x00, 0x08, 0x00, 0x1e, 0x01, 0x0e, 0x01, 0x00, 0x0b,
+                  0x1e, 0x01, 0x01, 0x00, 0x0f, 0x00, 0x07, 0x00, 0xa1, 0x00,
+                  0x00, 0x07, 0x00, 0x00, 0x02, 0x11, 0x00, 0xd9, 0x58, 0x18,
+                  0x00, 0x00, 0xb7, 0x34, 0x00, 0x00, 0x26, 0xff, 0x24, 0xff,
+                  0x76, 0x17, 0xd3, 0x33, 0x05, 0x00, 0x7f, 0x00, 0x00, 0x00,
+                  0x00 } },
+};
+
 typedef struct PeerMsg {
     uint8_t data[APPLE_MODERN_SCM_MAX_MSG];
     size_t len;
@@ -186,11 +222,23 @@ static void peer_handle(AppleModernMtpPeer *p, const uint8_t *f, size_t len)
          */
         static const uint8_t power_on[4] = { 0x41, 1, 1, 0 };
         bool power = get && f[5] == 0 && plen >= 1 && f[16] == 0x41;
+        const uint8_t *body = get ? f + 16 : NULL;
+        size_t blen = get ? plen : 0;
 
+        if (power) {
+            body = power_on;
+            blen = sizeof(power_on);
+        } else if (get && f[5] == 1 && plen >= 1) {
+            for (size_t i = 0; i < ARRAY_SIZE(mt_cached_gets); i++) {
+                if (mt_cached_gets[i].id == f[16]) {
+                    body = mt_cached_gets[i].data;
+                    blen = mt_cached_gets[i].len;
+                    break;
+                }
+            }
+        }
         n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_CONTROL, f[4], f[5],
-                                    power ? power_on : (get ? f + 16 : NULL),
-                                    power ? sizeof(power_on) : (get ? plen : 0),
-                                    true, len >= 16 ? f[8] : 0, 0);
+                                    body, blen, true, len >= 16 ? f[8] : 0, 0);
     }
     peer_queue(p, out, n, PEER_REPLY_DELAY_NS);
 }
