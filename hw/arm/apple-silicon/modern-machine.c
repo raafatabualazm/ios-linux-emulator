@@ -262,6 +262,8 @@ struct AppleModernMachine {
     AddressSpace *sep_dma_as;
     AppleDARTT8110State *dcp_mapper;
     AddressSpace *dcp_dma_as;
+    AppleDARTT8110State *mtp_mapper;   /* modern-mtp-input: /arm-io/dart-mtp */
+    AddressSpace *mtp_dma_as;          /* the MTP DART stream the device side DMAs through */
     uint64_t dcp_dart_address, dcp_dart_size;
     AppleDARTT8110State *disp0_mapper;
     AddressSpace *disp0_dma_as;
@@ -2169,6 +2171,61 @@ static bool map_modern_mtp_input(AppleModernMachine *s, Error **errp)
         sysbus_mmio_map(sbd, i, windows[i]);
     }
     sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(s->aic, ldl_le_p(ints.data)));
+
+    /*
+     * The transport's shared-memory manager asks for an IOMapper through the
+     * mtp-transport iommu-parent (mapper-mtp, a child of dart-mtp). Without a
+     * DART the AppleHIDTransport FIFO logs "fifoMapperIdx < _mappers->getCount()"
+     * and "createSharedMemory ERROR" and cannot create its 2 MiB memory FIFO.
+     * Serve the same declared T8110 DART model the DCP and display use, and keep
+     * the stream's DMA address space for a device-side stand-in.
+     */
+    {
+        AppleModernBlob dreg, dints, dpage, dsid;
+        uint64_t dart_base, dart_span;
+
+        if (apple_modern_adt_property(tree, "/arm-io/dart-mtp", "reg", &dreg, NULL) &&
+            apple_modern_adt_property(tree, "/arm-io/dart-mtp", "interrupts", &dints, NULL) &&
+            apple_modern_adt_property(tree, "/arm-io/dart-mtp", "page-size", &dpage, NULL) &&
+            apple_modern_adt_property(tree, "/arm-io/dart-mtp", "sid-count", &dsid, NULL)) {
+            if (dreg.size < 16 || dints.size != 4 || dpage.size != 4 ||
+                ldl_le_p(dpage.data) != 0x4000 || dsid.size != 4 ||
+                !ldl_le_p(dsid.data) || ldl_le_p(dsid.data) > APPLE_DART_T8110_STREAMS ||
+                ldl_le_p(dints.data) >= s->aic_num_irqs) {
+                error_setg(errp, "modern-mtp-input: unsupported /arm-io/dart-mtp schema");
+                return false;
+            }
+            dart_span = ldq_le_p(dreg.data + 8);
+            if (dart_span < 0x1800 || dart_span > 0x400000 ||
+                !arm_io_translate(tree, ldq_le_p(dreg.data), dart_span, &dart_base, errp) ||
+                !mtp_window_free(dart_base, dart_span, "/arm-io/dart-mtp", errp)) {
+                if (errp && !*errp) {
+                    error_setg(errp, "modern-mtp-input: /arm-io/dart-mtp geometry out of bounds");
+                }
+                return false;
+            }
+            DeviceState *dart = qdev_new(TYPE_APPLE_DART_T8110);
+            s->mtp_mapper = APPLE_DART_T8110(dart);
+            dart->id = g_strdup("modern-mtp-dart");
+            object_property_add_child(OBJECT(s), "dart-mtp", OBJECT(dart));
+            qdev_prop_set_uint32(dart, "mmio-size", dart_span);
+            qdev_prop_set_uint32(dart, "num-streams", ldl_le_p(dsid.data));
+            qdev_prop_set_uint32(dart, "va-bits", 42);
+            qdev_prop_set_uint32(dart, "pa-bits", 42);
+            qdev_prop_set_uint32(dart, "revision", 2);
+            qdev_prop_set_bit(dart, "trace", true);
+            sysbus_connect_irq(SYS_BUS_DEVICE(dart), 0,
+                               qdev_get_gpio_in(s->aic, ldl_le_p(dints.data)));
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(dart), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(dart), 0, dart_base);
+            s->mtp_dma_as = apple_dart_t8110_dma_as(s->mtp_mapper, 0);
+            warn_report("apple-modern: modern-mtp-input serves a declared t8110 DART "
+                        "for /arm-io/dart-mtp at 0x%" PRIx64 "+0x%" PRIx64 " (%u "
+                        "streams, IRQ %u, 42-bit VA/PA, revision 2); mapper-mtp has "
+                        "no reg, so the transport uses stream 0",
+                        dart_base, dart_span, ldl_le_p(dsid.data), ldl_le_p(dints.data));
+        }
+    }
 
     warn_report("apple-modern: modern-mtp-input maps /arm-io/mtp-gpio (Apple GPIO "
                 "model, %u pins, %u groups) at 0x%" PRIx64 " and a declared "
