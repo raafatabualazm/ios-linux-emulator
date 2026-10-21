@@ -15,7 +15,7 @@
 #include "hw/arm/apple-silicon/modern-mtp-peer.h"
 
 #define PEER_QUEUE 16
-#define PEER_LOG_FRAMES 256
+#define PEER_LOG_FRAMES 4096
 #define PEER_REPLY_DELAY_NS (1 * SCALE_MS)
 #define PEER_READY_DELAY_NS (5 * SCALE_MS)
 #define PEER_RETRY_NS (2 * SCALE_MS)
@@ -122,7 +122,8 @@ struct AppleModernMtpPeer {
     QEMUTimer *gesture_timer;
     bool gesture_on;
     int64_t gesture_t0;          /* virtual ns of the first frame */
-    int64_t gesture_dur;         /* ns from first to last Touching frame */
+    int64_t gesture_dur;         /* ns from the first frame to the end point */
+    int64_t gesture_hold;        /* ns the finger stays at the end point before lifting */
     int gesture_x0, gesture_y0, gesture_x1, gesture_y1;   /* ABS units */
     unsigned gesture_tick;
     const uint8_t *hid_desc;     /* descriptor served for interface 1 */
@@ -425,23 +426,30 @@ static int peer_px_to_abs(int px, int size)
 
 /*
  * One scripted gesture, one frame per MT_FRAME_NS on the virtual clock:
- * MakeTouch at the start point, Touching along the line, then the release
- * sequence at the end point. A tap is a gesture with equal endpoints.
+ * MakeTouch at the start point, Touching along the line, and the lift-off at
+ * the end point followed by LingerInRange and OutOfRange. A tap is a gesture
+ * with equal endpoints.
+ *
+ * The lift-off (BreakTouch) frame is the last step of the motion, so it still
+ * carries the finger's velocity, as a real controller's does: a flick is judged
+ * by the velocity at release. With a hold time the finger stays at the end
+ * point for that long first and lifts with zero velocity (a drag and release).
  */
 static void peer_gesture_tick(void *opaque)
 {
     AppleModernMtpPeer *p = opaque;
     int64_t steps = MAX(1, (p->gesture_dur + MT_FRAME_NS - 1) / MT_FRAME_NS);
-    int64_t k = p->gesture_tick;
-    int ax, ay, x, y;
+    int64_t last = steps + (p->gesture_hold + MT_FRAME_NS - 1) / MT_FRAME_NS;
+    int64_t k = p->gesture_tick, m = MIN(k, steps);
+    int x, y;
 
     if (!p->gesture_on) {
         return;
     }
-    if (k > steps) {
-        p->abs_x = p->gesture_x1;
-        p->abs_y = p->gesture_y1;
-        peer_pointer_sensor(p, &x, &y);
+    p->abs_x = p->gesture_x0 + (int)((int64_t)(p->gesture_x1 - p->gesture_x0) * m / steps);
+    p->abs_y = p->gesture_y0 + (int)((int64_t)(p->gesture_y1 - p->gesture_y0) * m / steps);
+    peer_pointer_sensor(p, &x, &y);
+    if (k >= last) {
         peer_send_mt(p, APPLE_MODERN_MT_STAGE_BREAK_TOUCH, x, y, 0);
         peer_send_mt(p, APPLE_MODERN_MT_STAGE_LINGER_IN_RANGE, x, y, MT_FRAME_NS);
         peer_send_mt(p, APPLE_MODERN_MT_STAGE_OUT_OF_RANGE, x, y, 2 * MT_FRAME_NS);
@@ -449,11 +457,6 @@ static void peer_gesture_tick(void *opaque)
         p->contact = false;
         return;
     }
-    ax = p->gesture_x0 + (int)((int64_t)(p->gesture_x1 - p->gesture_x0) * k / steps);
-    ay = p->gesture_y0 + (int)((int64_t)(p->gesture_y1 - p->gesture_y0) * k / steps);
-    p->abs_x = ax;
-    p->abs_y = ay;
-    peer_pointer_sensor(p, &x, &y);
     peer_send_mt(p, k == 0 ? APPLE_MODERN_MT_STAGE_MAKE_TOUCH : APPLE_MODERN_MT_STAGE_TOUCHING, x, y, 0);
     p->gesture_tick++;
     timer_mod(p->gesture_timer, p->gesture_t0 + (int64_t)p->gesture_tick * MT_FRAME_NS);
@@ -461,13 +464,13 @@ static void peer_gesture_tick(void *opaque)
 
 /*
  * QOM property "x-touch" on the DockChannel device (QMP qom-set):
- *   "tap X Y [HOLD_MS]"                 pixel coordinates of the 1024x768 panel
- *   "swipe X0 Y0 X1 Y1 [DURATION_MS]"   e.g. "swipe 512 762 512 307 250"
+ *   "tap X Y [HOLD_MS]"                          pixel coordinates of the 1024x768 panel
+ *   "swipe X0 Y0 X1 Y1 [DURATION_MS [HOLD_MS]]"  e.g. "swipe 512 745 512 300 250"
  */
 static void peer_x_touch_set(Object *obj, const char *value, Error **errp)
 {
     AppleModernMtpPeer *p = APPLE_MODERN_DOCKCHANNEL(obj)->peer_opaque;
-    int a, b, c, d, ms = 0;
+    int a, b, c, d, ms = 0, hold = 0;
     int n;
 
     if (!p || !p->init_sent) {
@@ -482,10 +485,11 @@ static void peer_x_touch_set(Object *obj, const char *value, Error **errp)
         c = a;
         d = b;
         ms = n == 3 ? ms : 60;
-    } else if ((n = sscanf(value, "swipe %d %d %d %d %d", &a, &b, &c, &d, &ms)) >= 4) {
-        ms = n == 5 ? ms : 250;
+    } else if ((n = sscanf(value, "swipe %d %d %d %d %d %d", &a, &b, &c, &d, &ms, &hold)) >= 4) {
+        ms = n >= 5 ? ms : 250;
+        hold = n == 6 ? hold : 0;
     } else {
-        error_setg(errp, "x-touch: expected 'tap X Y [MS]' or 'swipe X0 Y0 X1 Y1 [MS]'");
+        error_setg(errp, "x-touch: expected 'tap X Y [MS]' or 'swipe X0 Y0 X1 Y1 [MS [HOLD_MS]]'");
         return;
     }
     p->gesture_x0 = peer_px_to_abs(a, PEER_FB_W);
@@ -493,6 +497,7 @@ static void peer_x_touch_set(Object *obj, const char *value, Error **errp)
     p->gesture_x1 = peer_px_to_abs(c, PEER_FB_W);
     p->gesture_y1 = peer_px_to_abs(d, PEER_FB_H);
     p->gesture_dur = (int64_t)MAX(ms, 1) * SCALE_MS;
+    p->gesture_hold = (int64_t)MAX(hold, 0) * SCALE_MS;
     p->gesture_tick = 0;
     p->gesture_on = true;
     p->contact = true;
