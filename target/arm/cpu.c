@@ -2044,6 +2044,7 @@ static const Property arm_cpu_properties[] = {
     DEFINE_PROP_BOOL("apple-modern-sprr", ARMCPU, apple_modern_sprr, false),
     DEFINE_PROP_BOOL("apple-modern-apsts", ARMCPU, apple_modern_apsts, false),
     DEFINE_PROP_BOOL("apple-modern-sysregs", ARMCPU, apple_modern_sysregs, false),
+    DEFINE_PROP_BOOL("apple-modern-sep", ARMCPU, apple_modern_sep, false),
     DEFINE_PROP_BOOL("apple-modern-pauth-compat", ARMCPU, apple_modern_pauth_compat, false),
     DEFINE_PROP_BOOL("apple-modern-el0-trap-trace", ARMCPU,
                      apple_modern_el0_trap_trace, false),

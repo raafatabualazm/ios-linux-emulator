@@ -108,6 +108,8 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
     object_property_set_bool(cpuobj, "has_el2", false, &error_fatal);
     object_property_set_bool(cpuobj, "has_el3", false, &error_fatal);
     object_property_set_bool(cpuobj, "pauth-noop", false, &error_fatal);
+    /* Model the SEP's own IMPDEF system registers (read-as-written; not GXF-gated). */
+    object_property_set_bool(cpuobj, "apple-modern-sep", true, &error_fatal);
     /* No apple-modern-sysregs here: it requires GXF (EL2) and defines the AP's
      * register set, not the SEP's. The SEP's own IMPDEF registers are modelled
      * separately (M2.2). */

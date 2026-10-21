@@ -7189,6 +7189,9 @@ void register_cp_regs_for_features(ARMCPU *cpu)
     if (cpu->apple_modern_sysregs) {
         arm_register_apple_modern_sysregs(cpu);
     }
+    if (cpu->apple_modern_sep) {
+        arm_register_apple_modern_sep_sysregs(cpu);
+    }
 
     /*
      * Register redirections and aliases must be done last,

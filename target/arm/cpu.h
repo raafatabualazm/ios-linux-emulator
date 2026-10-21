@@ -627,6 +627,8 @@ typedef struct CPUArchState {
     AppleModernAPSTSState modern_apsts;
     /* Darwin-VM-compatible implementation register stores. */
     AppleModernSysregState modern_sysregs;
+    /* SEP-core IMPDEF register read-as-written store (apple-modern-sep). */
+    uint64_t apple_modern_sep_store[32];
 
     /* Darwin-VM's simplified Apple timer compatibility stores. */
     struct {
@@ -1063,6 +1065,9 @@ struct ArchCPU {
     bool apple_modern_apsts;
     /* Darwin-compatible read-as-written implementation registers. */
     bool apple_modern_sysregs;
+    /* SEP core: model the SEP's own IMPDEF system registers (read-as-written);
+     * NOT gated on GXF, unlike apple_modern_sysregs. For the sep-core machine. */
+    bool apple_modern_sep;
     /*
      * Declared compatibility measure, default off: pointer-authentication
      * sign/authenticate become no-ops (ID registers unchanged). Mirrors the

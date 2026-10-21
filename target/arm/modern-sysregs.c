@@ -391,3 +391,64 @@ unsigned arm_apple_modern_sysreg_copy_prefix(ARMCPU *dst, const ARMCPU *src,
     }
     return n;
 }
+
+/* SEP-core IMPDEF system registers (read-as-written). Encodings enumerated
+ * from the j410 24A437 sepOS image (crn=15 op0=3 cluster used in early boot).
+ * Values are lab choices: boot-role (s3_7_c15_c2_6)=0 selects the cold path,
+ * ready (s3_6_c15_c12_4) bit0=1 clears the reset poll. NOT Apple-attested. */
+static const ARMCPRegInfo apple_modern_sep_sysregs[] = {
+    { .name = "SEP_s3_0_c15_c5_0", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 0, .crn = 15, .crm = 5, .opc2 = 0,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[0]) },
+    { .name = "SEP_s3_0_c15_c9_1", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 0, .crn = 15, .crm = 9, .opc2 = 1,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[1]) },
+    { .name = "SEP_s3_3_c15_c10_0", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 10, .opc2 = 0,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[2]) },
+    { .name = "SEP_s3_3_c15_c2_0", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 2, .opc2 = 0,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[3]) },
+    { .name = "SEP_s3_3_c15_c8_0", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 8, .opc2 = 0,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[4]) },
+    { .name = "SEP_s3_3_c15_c9_0", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 9, .opc2 = 0,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[5]) },
+    { .name = "SEP_s3_4_c15_c0_2", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 0, .opc2 = 2,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[6]) },
+    { .name = "SEP_s3_4_c15_c0_4", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 0, .opc2 = 4,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[7]) },
+    { .name = "SEP_s3_4_c15_c0_5", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 0, .opc2 = 5,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[8]) },
+    { .name = "SEP_s3_4_c15_c12_5", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 12, .opc2 = 5,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[9]) },
+    { .name = "SEP_s3_5_c15_c0_5", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 5, .crn = 15, .crm = 0, .opc2 = 5,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[10]) },
+    { .name = "SEP_s3_5_c15_c0_6", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 5, .crn = 15, .crm = 0, .opc2 = 6,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[11]) },
+    { .name = "SEP_s3_5_c15_c7_0", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 5, .crn = 15, .crm = 7, .opc2 = 0,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[12]) },
+    { .name = "SEP_s3_6_c15_c12_4", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 6, .crn = 15, .crm = 12, .opc2 = 4,
+      .access = PL1_RW, .resetvalue = 1ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[13]) },
+    { .name = "SEP_s3_7_c15_c2_6", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 7, .crn = 15, .crm = 2, .opc2 = 6,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[14]) },
+    { .name = "SEP_s3_7_c15_c4_6", .state = ARM_CP_STATE_AA64, .opc0 = 3, .opc1 = 7, .crn = 15, .crm = 4, .opc2 = 6,
+      .access = PL1_RW, .resetvalue = 0ULL,
+      .fieldoffset = offsetof(CPUARMState, apple_modern_sep_store[15]) },
+};
+
+void arm_register_apple_modern_sep_sysregs(ARMCPU *cpu)
+{
+    assert(cpu->apple_modern_sep);
+    define_arm_cp_regs(cpu, apple_modern_sep_sysregs);
+}

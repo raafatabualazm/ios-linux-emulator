@@ -20,6 +20,7 @@ struct ArchCPU;
 struct Error;
 bool arm_apple_modern_sysregs_validate(struct ArchCPU *cpu, struct Error **errp);
 void arm_register_apple_modern_sysregs(struct ArchCPU *cpu);
+void arm_register_apple_modern_sep_sysregs(struct ArchCPU *cpu);
 void arm_register_apple_modern_sysreg_aliases(struct ArchCPU *cpu);
 /* Board-supplied value for a store, by register name; false if absent. */
 bool arm_apple_modern_sysreg_set(struct ArchCPU *cpu, const char *name,
