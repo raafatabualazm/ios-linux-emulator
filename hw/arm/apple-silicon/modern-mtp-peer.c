@@ -9,6 +9,8 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
+#include "qapi/error.h"
+#include "qom/object.h"
 #include "ui/input.h"
 #include "hw/arm/apple-silicon/modern-mtp-peer.h"
 
@@ -17,6 +19,7 @@
 #define PEER_REPLY_DELAY_NS (1 * SCALE_MS)
 #define PEER_READY_DELAY_NS (5 * SCALE_MS)
 #define PEER_RETRY_NS (2 * SCALE_MS)
+#define PEER_INITDONE_DELAY_NS (1500 * SCALE_MS)
 
 /*
  * Multitouch frames (report 0x44, decoded from MultitouchSupport and checked
@@ -79,6 +82,7 @@ static const CachedGet mt_cached_gets_template[] = {
                   0x05, 0x00, 0x00 } },
     { 0xd9, 17, { 0xd9, 0x58, 0x18, 0x00, 0x00, 0xb7, 0x34, 0x00, 0x00, 0x26,
                   0xff, 0x24, 0xff, 0x76, 0x17, 0xd3, 0x33 } },
+    { 0xbf, 9,  { 0xbf } },
     { 0xdb, 81, { 0xdb, 0x01, 0x02, 0x00, 0xd1, 0xc0, 0x0d, 0x00, 0xd3, 0x01,
                   0x1f, 0x0f, 0x03, 0x80, 0x00, 0x0e, 0x1e, 0x00, 0x05, 0x00,
                   0x00, 0x17, 0x00, 0xd0, 0x03, 0x01, 0x00, 0x1e, 0x01, 0x00,
@@ -121,6 +125,14 @@ struct AppleModernMtpPeer {
     int mt_x, mt_y;              /* last position reported, sensor units */
     uint32_t mt_pos_ms;          /* timestamp that position was reported at */
     uint64_t touch_frames;
+    bool initdone_sent;          /* the one-time "InitDone" status report */
+    /* Scripted gesture (x-touch): tap or swipe, paced on the virtual clock. */
+    QEMUTimer *gesture_timer;
+    bool gesture_on;
+    int64_t gesture_t0;          /* virtual ns of the first frame */
+    int64_t gesture_dur;         /* ns from first to last Touching frame */
+    int gesture_x0, gesture_y0, gesture_x1, gesture_y1;   /* ABS units */
+    unsigned gesture_tick;
     const uint8_t *hid_desc;     /* descriptor served for interface 1 */
     size_t hid_desc_len;
     unsigned frames_logged;
@@ -264,6 +276,22 @@ static void peer_handle(AppleModernMtpPeer *p, const uint8_t *f, size_t len)
                                     body, blen, true, len >= 16 ? f[8] : 0, 0);
     }
     peer_queue(p, out, n, PEER_REPLY_DELAY_NS);
+
+    /*
+     * A real touch IC reports "Power on Reset and InitDone" (report 0x60,
+     * code 0x11) once it is up. The kernel service is open by the time it has
+     * read the sensor description (report 0xdb), so say it shortly after that
+     * answer; user space turns it into a bootloaded notification.
+     */
+    if (!p->initdone_sent && len >= 20 && f[5] == 1 && (f[8] & 1) &&
+        f[16] == 0xdb) {
+        static const uint8_t initdone[2] = { 0x60, 0x11 };
+
+        p->initdone_sent = true;
+        n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 1,
+                                    initdone, sizeof(initdone), true, 0, 0);
+        peer_queue(p, out, n, PEER_INITDONE_DELAY_NS);
+    }
 
     /*
      * The AP enables an interface with SET FEATURE 0xb4 [iface] once it has the
@@ -472,6 +500,98 @@ static void peer_touch_tick(void *opaque)
               qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + MT_FRAME_NS);
 }
 
+/* Console pixels (the guest's 1024x768 framebuffer) to pointer ABS units. */
+#define PEER_FB_W 1024
+#define PEER_FB_H 768
+
+static int peer_px_to_abs(int px, int size)
+{
+    return CLAMP(px, 0, size - 1) * INPUT_EVENT_ABS_MAX / (size - 1);
+}
+
+/*
+ * One scripted gesture, one frame per MT_FRAME_NS on the virtual clock:
+ * MakeTouch at the start point, Touching along the line, then the release
+ * sequence at the end point. A tap is a gesture with equal endpoints.
+ */
+static void peer_gesture_tick(void *opaque)
+{
+    AppleModernMtpPeer *p = opaque;
+    int64_t steps = MAX(1, (p->gesture_dur + MT_FRAME_NS - 1) / MT_FRAME_NS);
+    int64_t k = p->gesture_tick;
+    int ax, ay, x, y;
+
+    if (!p->gesture_on) {
+        return;
+    }
+    if (k > steps) {
+        p->abs_x = p->gesture_x1;
+        p->abs_y = p->gesture_y1;
+        peer_pointer_sensor(p, &x, &y);
+        peer_send_mt(p, MT_STAGE_BREAK, x, y, 0);
+        peer_send_mt(p, MT_STAGE_LINGER, x, y, MT_FRAME_NS);
+        peer_send_mt(p, MT_STAGE_OUT, x, y, 2 * MT_FRAME_NS);
+        p->gesture_on = false;
+        p->contact = false;
+        return;
+    }
+    ax = p->gesture_x0 + (int)((int64_t)(p->gesture_x1 - p->gesture_x0) * k / steps);
+    ay = p->gesture_y0 + (int)((int64_t)(p->gesture_y1 - p->gesture_y0) * k / steps);
+    p->abs_x = ax;
+    p->abs_y = ay;
+    peer_pointer_sensor(p, &x, &y);
+    peer_send_mt(p, k == 0 ? MT_STAGE_MAKE : MT_STAGE_TOUCHING, x, y, 0);
+    p->gesture_tick++;
+    timer_mod(p->gesture_timer, p->gesture_t0 + (int64_t)p->gesture_tick * MT_FRAME_NS);
+}
+
+/*
+ * QOM property "x-touch" on the DockChannel device (QMP qom-set):
+ *   "tap X Y [HOLD_MS]"                 pixel coordinates of the 1024x768 panel
+ *   "swipe X0 Y0 X1 Y1 [DURATION_MS]"   e.g. "swipe 512 762 512 307 250"
+ */
+static void peer_x_touch_set(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMtpPeer *p = APPLE_MODERN_DOCKCHANNEL(obj)->peer_opaque;
+    int a, b, c, d, ms = 0;
+    int n;
+
+    if (!p || !p->init_sent) {
+        error_setg(errp, "x-touch: the guest has not attached the touch device yet");
+        return;
+    }
+    if (p->gesture_on || p->contact) {
+        error_setg(errp, "x-touch: a contact is already in progress");
+        return;
+    }
+    if ((n = sscanf(value, "tap %d %d %d", &a, &b, &ms)) >= 2) {
+        c = a;
+        d = b;
+        ms = n == 3 ? ms : 60;
+    } else if ((n = sscanf(value, "swipe %d %d %d %d %d", &a, &b, &c, &d, &ms)) >= 4) {
+        ms = n == 5 ? ms : 250;
+    } else {
+        error_setg(errp, "x-touch: expected 'tap X Y [MS]' or 'swipe X0 Y0 X1 Y1 [MS]'");
+        return;
+    }
+    p->gesture_x0 = peer_px_to_abs(a, PEER_FB_W);
+    p->gesture_y0 = peer_px_to_abs(b, PEER_FB_H);
+    p->gesture_x1 = peer_px_to_abs(c, PEER_FB_W);
+    p->gesture_y1 = peer_px_to_abs(d, PEER_FB_H);
+    p->gesture_dur = (int64_t)MAX(ms, 1) * SCALE_MS;
+    p->gesture_tick = 0;
+    p->gesture_on = true;
+    p->contact = true;
+    p->gesture_t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    timer_mod(p->gesture_timer, p->gesture_t0);
+    warn_report("apple-modern: mtp-peer gesture: %s", value);
+}
+
+static char *peer_x_touch_get(Object *obj, Error **errp)
+{
+    return g_strdup("");
+}
+
 static AppleModernMtpPeer *peer_of(DeviceState *dev)
 {
     return APPLE_MODERN_DOCKCHANNEL(dev)->peer_opaque;
@@ -517,7 +637,7 @@ static void peer_input_sync(DeviceState *dev)
     AppleModernMtpPeer *p = peer_of(dev);
     int x, y;
 
-    if (!p->init_sent) {
+    if (!p->init_sent || p->gesture_on) {
         return;
     }
     peer_pointer_sensor(p, &x, &y);
@@ -588,6 +708,9 @@ AppleModernMtpPeer *apple_modern_mtp_peer_new(AppleModernDockChannelState *dc,
     peer_set_surface(p, MT_SURFACE_W, MT_SURFACE_H);
     p->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, peer_timer, p);
     p->touch_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, peer_touch_tick, p);
+    p->gesture_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, peer_gesture_tick, p);
+    object_property_add_str(OBJECT(dc), "x-touch", peer_x_touch_get,
+                            peer_x_touch_set);
     apple_modern_dockchannel_set_peer(dc, peer_tx, p);
     apple_modern_dockchannel_set_arm_cb(dc, peer_arm, p);
     p->input = qemu_input_handler_register(DEVICE(dc), &peer_input_handler);
