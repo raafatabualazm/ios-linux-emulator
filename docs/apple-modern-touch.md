@@ -24,7 +24,9 @@ Diagnostics and test hooks, all on the QOM object `/machine/modern-dockchannel-m
   so its timing does not depend on host scheduling. The lift-off (BreakTouch) frame is the last step of the motion and keeps
   its velocity, as a real controller's does; a HOLD_MS keeps the finger at the end point and lifts with zero velocity.
   Example: `qom-set ... x-touch "swipe 512 745 512 300 250"`.
-* A pointer drag (VNC, QMP `input-send-event`) is one finger: absolute X/Y move it, the left button is touch down / up.
+* A pointer drag (VNC, QMP `input-send-event`) is one finger: absolute X/Y move it, the left button is touch down / up. A frame is generated every 16 ms while the
+  button is down; frames are never closer than 8 ms (a release a millisecond after a periodic frame is delayed), and the lift-off frame carries the average velocity of the
+  last 100 ms of the contact, because a flick is judged by the velocity at release.
 * Bounded logs of every RX arm and IRQ transition, `sysreg-trace`.
 
 ## Protocol (confirmed against the guest's own byte dumps)
@@ -79,6 +81,13 @@ Positions are 0.01 mm from the bottom-left of the sensor, velocities 1/8 mm/s, r
 `zTotal / 256`. Stages: 3 MakeTouch, 4 Touching, 5 BreakTouch, 6 LingerInRange, 7 OutOfRange. The kernel service only
 forwards the frame; MultitouchSupport and `MultitouchHID.plugin` (parser type 1) turn it into digitizer events. Frames
 are dropped while the touch mode is Off (the guest sets it to On with `SET 0xbf` by itself).
+
+## What stops a swipe from opening Setup (not a touch problem)
+
+SpringBoard's key bag state on this guest is "passcode set, not unlocked since boot" (read live: `SBFMobileKeyBag` `hasPasscodeSet = 1`, `hasUnlockedSinceBoot = 0`), because the
+guest has no SEP and the AppleKeyStore user client is deliberately unsupported (`sks-open-wait-skip` candidate), so MobileKeyBag's `aks_get_lock_state` / `aks_get_configuration`
+fail and SpringBoard keeps its fail-secure defaults. A swipe lifts the cover sheet and shows only the Emergency button; Setup is alive but never presented. A fresh,
+never-set-up device reports no passcode and unlocked since boot; modelling that answer in the key store is the next step.
 
 ## Not done
 
