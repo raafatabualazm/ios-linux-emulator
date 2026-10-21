@@ -52,6 +52,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'modern-machine.c',
     'mt-spi.c',
     'sep-sim.c',
+    'modern-sep-core.c',
     'sep-sks-wire.c',
     'sep.c',
     'patcher.c',

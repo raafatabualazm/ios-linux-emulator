@@ -31,6 +31,7 @@
 #include "hw/arm/apple-silicon/modern-pmgr-ungate.h"
 #include "hw/arm/apple-silicon/modern-pmp-ptd.h"
 #include "hw/arm/apple-silicon/modern-cpu-dvfm.h"
+#include "hw/arm/apple-silicon/modern-sep-core.h"
 #include "hw/arm/apple-silicon/modern-dcp-asc.h"
 #include "hw/arm/apple-silicon/modern-dcp-iop.h"
 #include "hw/arm/apple-silicon/modern-disp-trace.h"
@@ -168,6 +169,9 @@ struct AppleModernMachine {
     uint32_t sep_preboot;
     uint32_t sep_chip_id;
     bool sep_chip_id_set;
+    bool sep_core;
+    char *sep_core_image;
+    AppleModernSEPCore sep_core_state;
     char *sep_txm_sc_hex;
     uint32_t sep_txm_sc_fill;
     bool sep_dart;
@@ -4903,6 +4907,16 @@ static void modern_init(MachineState *machine)
         s->cpus[i] = modern_create_cpu(s, machine, i);
     }
     s->cpu = s->cpus[0];
+    if (s->sep_core) {
+        Error *sep_err = NULL;
+        if (!apple_modern_sep_core_create(OBJECT(s), &s->sep_core_state,
+                                          machine->cpu_type,
+                                          s->timebase_frequency,
+                                          s->sep_core_image, &sep_err)) {
+            error_report_err(sep_err);
+            exit(EXIT_FAILURE);
+        }
+    }
     for (unsigned i = 0; i < s->cpu_count; i++) {
         modern_wire_cpu_fiq(s, i);
     }
@@ -5209,6 +5223,19 @@ static void set_sep_fw_filename(Object *obj, const char *value, Error **errp)
     }
 }
 
+static char *get_sep_core_image(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->sep_core_image);
+}
+static void set_sep_core_image(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->sep_core_image);
+        s->sep_core_image = g_strdup(value);
+    }
+}
+
 #define BOOL_PROPERTY(name, field) \
     static bool get_##name(Object *obj, Error **errp) \
     { return APPLE_MODERN_MACHINE(obj)->field; } \
@@ -5242,6 +5269,7 @@ BOOL_PROPERTY(el0_trap_trace, el0_trap_trace)
 BOOL_PROPERTY(sep_trace, sep_trace)
 BOOL_PROPERTY(sep_mailbox, sep_mailbox)
 BOOL_PROPERTY(sep_sim, sep_sim)
+BOOL_PROPERTY(sep_core, sep_core)
 BOOL_PROPERTY(sep_dart, sep_dart)
 BOOL_PROPERTY(modern_pmgr, modern_pmgr)
 BOOL_PROPERTY(modern_mcc_dramcfg, modern_mcc_dramcfg)
@@ -5612,6 +5640,15 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "sep-mailbox", get_sep_mailbox,
                                    set_sep_mailbox);
     object_class_property_add_bool(oc, "sep-sim", get_sep_sim, set_sep_sim);
+    object_class_property_add_bool(oc, "sep-core", get_sep_core, set_sep_core);
+    object_class_property_set_description(oc, "sep-core",
+        "run the real decrypted sepOS on a second Apple core in its own "
+        "address space (needs sep-core-image=; default off; alternative to "
+        "the sep-sim protocol faker)");
+    object_class_property_add_str(oc, "sep-core-image", get_sep_core_image,
+                                  set_sep_core_image);
+    object_class_property_set_description(oc, "sep-core-image",
+        "host path to the decrypted sepOS legion2 image for sep-core");
     object_class_property_add_str(oc, "sep-txm-sc-hex", get_sep_txm_sc_hex, set_sep_txm_sc_hex);
     object_class_property_set_description(oc, "sep-txm-sc-hex",
         "sep-sim diagnostic: hex bytes the simulated SEP writes at offset 0 of the TXM secure channel page");
