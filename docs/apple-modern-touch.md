@@ -89,6 +89,12 @@ guest has no SEP and the AppleKeyStore user client is deliberately unsupported (
 fail and SpringBoard keeps its fail-secure defaults. A swipe lifts the cover sheet and shows only the Emergency button; Setup is alive but never presented. A fresh,
 never-set-up device reports no passcode and unlocked since boot; modelling that answer in the key store is the next step.
 
+## Known limitation: pointer-driven drags
+
+A pointer tap (QMP `input-send-event`, a VNC click) works like a scripted tap. A pointer-driven flick did not lift the lock screen's cover sheet on two clean boots, while the scripted
+`x-touch swipe` with the same positions and velocities (every frame is logged decoded, the two sequences match number for number apart from one stationary frame after MakeTouch)
+did on three. The cause is not found (1 ms and 8 ms release spacing, release velocity and release-while-moving were ruled out); use `x-touch` for swipes until it is.
+
 ## Not done
 
 * the other three interfaces' descriptors, the memory FIFOs (no IOMapper: `AppleT8110DART` never starts for `dart-mtp`
