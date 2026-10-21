@@ -378,7 +378,7 @@ static void peer_send_mt_v(AppleModernMtpPeer *p, uint8_t stage, int x, int y,
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     int64_t due = now + delay_ns;
     uint32_t ms;
-    int64_t vx = 0, vy = 0;
+    int64_t vx = 0, vy = 0, spacing;
     size_t n;
 
     /*
@@ -386,8 +386,10 @@ static void peer_send_mt_v(AppleModernMtpPeer *p, uint8_t stage, int x, int y,
      * a millisecond after the last periodic frame, and the touch stack's
      * debounce treats frames that close together as unstable.
      */
-    if (due < p->mt_last_due + MT_MIN_SPACING_NS) {
-        due = p->mt_last_due + MT_MIN_SPACING_NS;
+    /* the release sequence keeps the nominal frame period */
+    spacing = stage >= APPLE_MODERN_MT_STAGE_BREAK_TOUCH ? MT_FRAME_NS : MT_MIN_SPACING_NS;
+    if (due < p->mt_last_due + spacing) {
+        due = p->mt_last_due + spacing;
     }
     delay_ns = due - now;
     p->mt_last_due = due;
@@ -418,6 +420,10 @@ static void peer_send_mt_v(AppleModernMtpPeer *p, uint8_t stage, int x, int y,
         p->mt_hist[slot].y = y;
     }
 
+    if (p->touch_frames < PEER_LOG_FRAMES) {
+        warn_report("apple-modern: mtp-peer mt frame %u ts %u stage %u x %d y %d "
+                    "vx %d vy %d", p->mt_frame, ms, stage, x, y, (int)vx, (int)vy);
+    }
     apple_modern_mt_frame(rep, p->mt_frame++, ms, stage, x, y, vx, vy);
     n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 1, rep,
                                 sizeof(rep), true, 0, 0);
