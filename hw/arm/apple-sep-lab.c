@@ -78,8 +78,23 @@ struct AppleSEPLabState {
      */
     bool discover;
     uint64_t discover_logged;
+    /*
+     * SEPROM-handoff reconnaissance (default off; implies discover). Backs the
+     * SEP RAM carveout and the memory-config register pages with RAM so the
+     * exact handoff values (HW regs + "BPSE" boot-args + boot-role pointer) can
+     * be poked with gdb and iterated without a rebuild, driving sepOS onto its
+     * self-bootstrapping build path. Pure reconnaissance; fabricates nothing.
+     */
+    bool seprom;
+    MemoryRegion carveout;      /* SEP DRAM the kernel allocates page tables in */
+    MemoryRegion cfg0800;       /* memory-config regs 0x2a0800xxx as RAM        */
+    MemoryRegion cfg0c40;       /* memory-config regs 0x2a0c40xxx as RAM        */
     Error *migration_blocker;
 };
+
+/* SEP DRAM carveout for seprom mode (point the memory-config regs here). */
+#define SEP_CARVEOUT_BASE 0x2a4000000ULL
+#define SEP_CARVEOUT_SIZE 0x10000000ULL  /* 256 MiB */
 
 /* SEP SRAM (stack/data) discovered at boot: SP := 0x2a0220000 (image pc 0x404c).
  * Kept well below the first SEP MMIO block (0x2a0800000) so it shadows none. */
@@ -207,6 +222,9 @@ static void sep_lab_init(MachineState *machine)
     int64_t file_size;
     MemoryRegion *system_memory = get_system_memory();
 
+    if (s->seprom) {
+        s->discover = true; /* seprom is a superset of discover */
+    }
     if (!tcg_enabled()) {
         error_report("SEP lab requires TCG; host virtualization is not a SEP model");
         exit(EXIT_FAILURE);
@@ -275,6 +293,23 @@ static void sep_lab_init(MachineState *machine)
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, SEP_SRAM_BASE,
                                             &s->sram, 0);
+    }
+    if (s->seprom) {
+        /* SEP DRAM the kernel builds its page tables in, plus the two
+         * memory-config register pages backed as RAM so gdb can poke the
+         * handoff values and iterate. */
+        memory_region_init_ram(&s->carveout, NULL, "sep-carveout",
+                               SEP_CARVEOUT_SIZE, &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory,
+                                            SEP_CARVEOUT_BASE, &s->carveout, 0);
+        memory_region_init_ram(&s->cfg0800, NULL, "sep-cfg0800", 0x10000,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, 0x2a0800000ULL,
+                                            &s->cfg0800, 0);
+        memory_region_init_ram(&s->cfg0c40, NULL, "sep-cfg0c40", 0x10000,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, 0x2a0c40000ULL,
+                                            &s->cfg0c40, 0);
     }
 
     /* AP regions are not silently reused as the SEP's private MMIO map. */
@@ -356,6 +391,16 @@ static void sep_lab_set_discover(Object *obj, bool value, Error **errp)
     APPLE_SEP_LAB(obj)->discover = value;
 }
 
+static bool sep_lab_get_seprom(Object *obj, Error **errp)
+{
+    return APPLE_SEP_LAB(obj)->seprom;
+}
+
+static void sep_lab_set_seprom(Object *obj, bool value, Error **errp)
+{
+    APPLE_SEP_LAB(obj)->seprom = value;
+}
+
 static char *sep_lab_get_ap_probe(Object *obj, Error **errp)
 {
     return g_strdup_printf("0x%" PRIx64, APPLE_SEP_LAB(obj)->last_ap_probe);
@@ -432,6 +477,13 @@ static void sep_lab_class_init(ObjectClass *oc, const void *data)
         "Reconnaissance mode (default off): model SEP IMPDEF sysregs, back the "
         "SEP SRAM, and log unknown MMIO (returning 0) instead of faulting, so "
         "one boot traces the SEP's register map. Fabricates no protocol reply.");
+    object_class_property_add_bool(oc, "seprom", sep_lab_get_seprom,
+                                   sep_lab_set_seprom);
+    object_class_property_set_description(oc, "seprom",
+        "SEPROM-handoff reconnaissance (default off; implies discover): also "
+        "back the SEP DRAM carveout and the memory-config register pages as RAM "
+        "so the boot handoff (HW regs, BPSE boot-args, boot-role pointer) can be "
+        "poked with gdb and iterated to drive sepOS onto its build path.");
 }
 
 static void sep_lab_finalize(Object *obj)
