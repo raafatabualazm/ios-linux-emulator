@@ -89,11 +89,12 @@ guest has no SEP and the AppleKeyStore user client is deliberately unsupported (
 fail and SpringBoard keeps its fail-secure defaults. A swipe lifts the cover sheet and shows only the Emergency button; Setup is alive but never presented. A fresh,
 never-set-up device reports no passcode and unlocked since boot; modelling that answer in the key store is the next step.
 
-## Known limitation: pointer-driven drags
+## Pointer-driven flicks
 
-A pointer tap (QMP `input-send-event`, a VNC click) works like a scripted tap. A pointer-driven flick did not lift the lock screen's cover sheet on two clean boots, while the scripted
-`x-touch swipe` with the same positions and velocities (every frame is logged decoded, the two sequences match number for number apart from one stationary frame after MakeTouch)
-did on three. The cause is not found (1 ms and 8 ms release spacing, release velocity and release-while-moving were ruled out); use `x-touch` for swipes until it is.
+A pointer tap (QMP `input-send-event`, a VNC click) works like a scripted tap, and a pointer drag that is released while still moving lifts the cover sheet like the scripted
+`x-touch swipe` (the decoded frame logs of the two match number for number). A drag that pauses before the release does not: the frames before the lift-off are stationary, so the
+velocity at release is near zero and the system does not treat it as a flick (the test script of the first boots paused 16 ms before releasing). A human flick with a VNC client
+releases while moving.
 
 ## Not done
 
