@@ -19,12 +19,28 @@
 #define PEER_RETRY_NS (2 * SCALE_MS)
 
 /*
- * First-cut HID report descriptor for interface 1 (multi-touch): one finger of a
- * standard Digitizer / Touch Screen collection (tip switch + 7-bit contact id,
- * 16-bit X and Y, 0..2047). The transport accepts any descriptor; whether
- * AppleMultitouchHIDService consumes this shape is what the first touch
- * reports will show.
+ * Multitouch frames (report 0x44, decoded from MultitouchSupport and checked
+ * against the t8030 model in mt-spi.c): 28-byte header, one 20-byte path per
+ * finger. Positions are in 0.01 mm with the origin at the bottom-left of the
+ * sensor, velocities in 1/8 mm/s.
+ *
+ * The guest's panel is the 1024x768 framebuffer, so the sensor surface served
+ * for report 0xd9 is 100.00 x 75.00 mm. Whole multiples of 100 units matter:
+ * the HID plug-in normalises with floor(size / 100), so a remainder could push
+ * the far edge above 1.0.
  */
+#define MT_SURFACE_W 10000
+#define MT_SURFACE_H 7500
+#define MT_FRAME_NS (16 * SCALE_MS)
+#define MT_REPORT_ID 0x44
+#define MT_HDR_LEN 28
+#define MT_PATH_LEN 20
+#define MT_STAGE_MAKE 3
+#define MT_STAGE_TOUCHING 4
+#define MT_STAGE_BREAK 5
+#define MT_STAGE_LINGER 6
+#define MT_STAGE_OUT 7
+
 /*
  * The HID report descriptor the real MTP firmware serves for the multi-touch
  * interface (D47_MtpFirmware A5PH/P4S1/P4B1 at 0x8a194, 29 bytes): a Digitizer
@@ -36,17 +52,6 @@ static const uint8_t mt_hid_descriptor_firmware[] = {
     0x05, 0x0d, 0x09, 0x04, 0xa1, 0x01, 0x06, 0x00, 0xff, 0x09, 0x23, 0x95,
     0x01, 0xa1, 0x00, 0x05, 0x0d, 0x09, 0x04, 0x77, 0xff, 0xff, 0x01, 0x00,
     0x82, 0x22, 0x01, 0xc0, 0xc0,
-};
-
-static const uint8_t mt_hid_descriptor_digitizer[] = {
-    0x05, 0x0d, 0x09, 0x04, 0xa1, 0x01, 0x09, 0x22, 0xa1, 0x02,
-    0x09, 0x42, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
-    0x09, 0x51, 0x75, 0x07, 0x95, 0x01, 0x81, 0x02,
-    0x05, 0x01, 0x09, 0x30, 0x15, 0x00, 0x26, 0xff, 0x07, 0x75, 0x10, 0x95,
-    0x01, 0x81, 0x02,
-    0x09, 0x31, 0x15, 0x00, 0x26, 0xff, 0x07, 0x75, 0x10, 0x95, 0x01, 0x81,
-    0x02,
-    0xc0, 0xc0,
 };
 
 /*
@@ -63,7 +68,7 @@ typedef struct CachedGet {
     uint8_t data[96];
 } CachedGet;
 
-static const CachedGet mt_cached_gets[] = {
+static const CachedGet mt_cached_gets_template[] = {
     { 0x7f, 5,  { 0x7f, 0x00, 0x00, 0x00, 0x00 } },
     { 0xa1, 7,  { 0xa1, 0x00, 0x00, 0x07, 0x00, 0x00, 0x02 } },
     { 0xd0, 23, { 0xd0, 0x03, 0x01, 0x00, 0x1e, 0x01, 0x00, 0x0e, 0x00, 0x08,
@@ -85,6 +90,8 @@ static const CachedGet mt_cached_gets[] = {
                   0x00 } },
 };
 
+#define N_CACHED_GETS ARRAY_SIZE(mt_cached_gets_template)
+
 typedef struct PeerMsg {
     uint8_t data[APPLE_MODERN_SCM_MAX_MSG];
     size_t len;
@@ -98,13 +105,21 @@ struct AppleModernMtpPeer {
     size_t acc_len;
     PeerMsg *queue[PEER_QUEUE];
     unsigned queued;
-    bool ready_sent;
-    /* Pointer-to-touch bridge: a primary-button drag is one finger. */
+    bool init_sent;
+    CachedGet gets[N_CACHED_GETS];   /* feature-report answers for interface 1 */
+    /*
+     * Pointer-to-touch bridge: a primary-button drag is one finger. The pointer
+     * position is kept in console units and turned into sensor units per frame.
+     */
     QemuInputHandlerState *input;
-    bool digitizer_frames;       /* encode reports for the generic descriptor */
-    bool frame_format_warned;
     int abs_x, abs_y;            /* last pointer position, 0..INPUT_EVENT_ABS_MAX */
-    bool touching, touch_was_down;
+    bool touching;               /* primary button state after the latest sync */
+    bool contact;                /* a contact is in progress (MakeTouch sent) */
+    QEMUTimer *touch_timer;      /* one Touching frame per MT_FRAME_NS while down */
+    uint8_t mt_frame;            /* frame counter, wraps */
+    uint32_t mt_last_ms;         /* last timestamp used; strictly increasing */
+    int mt_x, mt_y;              /* last position reported, sensor units */
+    uint32_t mt_pos_ms;          /* timestamp that position was reported at */
     uint64_t touch_frames;
     const uint8_t *hid_desc;     /* descriptor served for interface 1 */
     size_t hid_desc_len;
@@ -237,10 +252,10 @@ static void peer_handle(AppleModernMtpPeer *p, const uint8_t *f, size_t len)
             body = power_on;
             blen = sizeof(power_on);
         } else if (get && f[5] == 1 && plen >= 1) {
-            for (size_t i = 0; i < ARRAY_SIZE(mt_cached_gets); i++) {
-                if (mt_cached_gets[i].id == f[16]) {
-                    body = mt_cached_gets[i].data;
-                    blen = mt_cached_gets[i].len;
+            for (size_t i = 0; i < N_CACHED_GETS; i++) {
+                if (p->gets[i].id == f[16]) {
+                    body = p->gets[i].data;
+                    blen = p->gets[i].len;
                     break;
                 }
             }
@@ -249,6 +264,21 @@ static void peer_handle(AppleModernMtpPeer *p, const uint8_t *f, size_t len)
                                     body, blen, true, len >= 16 ? f[8] : 0, 0);
     }
     peer_queue(p, out, n, PEER_REPLY_DELAY_NS);
+
+    /*
+     * The AP enables an interface with SET FEATURE 0xb4 [iface] once it has the
+     * interface's descriptor. After the acknowledgement the device reports the
+     * interface READY (report 0xf1, status 0 = HID): only then does the
+     * transport register the interface. READY ahead of the descriptor is ignored.
+     */
+    if (!(len >= 16 && (f[8] & 1)) && f[5] == 0 && len >= 20 &&
+        lduw_le_p(f + 10) >= 2 && f[16] == 0xb4) {
+        const uint8_t ready[4] = { 0xf1, f[17], 0, 0 };
+
+        n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 0, ready,
+                                    sizeof(ready), true, 0, 0);
+        peer_queue(p, out, n, PEER_REPLY_DELAY_NS + PEER_READY_DELAY_NS);
+    }
 }
 
 static void peer_tx(void *opaque, const uint8_t *data, size_t len)
@@ -320,92 +350,126 @@ static void peer_timer(void *opaque)
     peer_arm_timer(p);
 }
 
-/* The AP armed its first asynchronous receive: it is listening, so say READY. */
+/*
+ * The AP armed its first asynchronous receive: it is listening. The device
+ * announces interface 1 with a descriptor packet (report 0xf0 on the comm
+ * interface): {0xf0, u16 version=1, u8 interface, char name[16], u16 more=0},
+ * then sections {u16 type, u16 length, body}. Type 0 is the HID report
+ * descriptor, type 4 the ready status (0 = HID). more=0 completes the
+ * interface. The AP answers with SET FEATURE 0xb4 [iface]; the READY report
+ * follows that acknowledgement (see peer_handle).
+ */
 static void peer_arm(void *opaque, uint32_t thresh)
 {
     AppleModernMtpPeer *p = opaque;
     uint8_t out[APPLE_MODERN_SCM_MAX_MSG];
-    static const uint8_t ready[4] = { 0xf1, 1, 1, 0 };  /* interface 1, status 1 */
-    size_t n;
+    uint8_t pkt[22 + 4 + 64 + 6];
+    size_t n, k = 0;
 
-    if (p->ready_sent) {
+    if (p->init_sent) {
         return;
     }
-    p->ready_sent = true;
-    n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 0, ready,
-                                sizeof(ready), true, 0, 0);
+    p->init_sent = true;
+    g_assert(p->hid_desc_len <= 64);
+    memset(pkt, 0, sizeof(pkt));
+    pkt[k++] = 0xf0;
+    stw_le_p(pkt + k, 1);
+    k += 2;
+    pkt[k++] = 1;
+    memcpy(pkt + k, "multi-touch", 11);
+    k += 16;
+    stw_le_p(pkt + k, 0);                         /* more packets: none */
+    k += 2;
+    stw_le_p(pkt + k, 0);                         /* section 0: HID descriptor */
+    stw_le_p(pkt + k + 2, p->hid_desc_len);
+    k += 4;
+    memcpy(pkt + k, p->hid_desc, p->hid_desc_len);
+    k += p->hid_desc_len;
+    stw_le_p(pkt + k, 4);                         /* section 4: ready status */
+    stw_le_p(pkt + k + 2, 2);
+    stw_le_p(pkt + k + 4, 0);
+    k += 6;
+    n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 0, pkt, k,
+                                true, 0, 0);
     peer_queue(p, out, n, PEER_READY_DELAY_NS);
-
-    /*
-     * Descriptor packet for interface 1, a report 0xf0 on the comm interface:
-     * {0xf0, u16 version=1, u8 interface, char name[16], u16 more=0} followed
-     * by sections {u16 type, u16 length, body}; type 0 is the HID report
-     * descriptor. more=0 completes the interface's descriptor set.
-     */
-    {
-        uint8_t pkt[22 + 4 + 64];
-
-        g_assert(p->hid_desc_len <= 64);
-        size_t k = 0;
-
-        memset(pkt, 0, sizeof(pkt));
-        pkt[k++] = 0xf0;
-        stw_le_p(pkt + k, 1);
-        k += 2;
-        pkt[k++] = 1;
-        memcpy(pkt + k, "multi-touch", 11);
-        k += 16;
-        stw_le_p(pkt + k, 0);
-        k += 2;
-        stw_le_p(pkt + k, 0);
-        stw_le_p(pkt + k + 2, p->hid_desc_len);
-        k += 4;
-        memcpy(pkt + k, p->hid_desc, p->hid_desc_len);
-        k += p->hid_desc_len;
-        n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 0, pkt, k,
-                                    true, 0, 0);
-        peer_queue(p, out, n, PEER_READY_DELAY_NS + 10 * SCALE_MS);
-    }
 }
 
 /*
- * Pointer events (VNC, QMP input-send-event, a tablet) become one finger: ABS X/Y
- * move it and the left button is touch down / up. One input batch (a sync) yields
- * one frame, so a drag produces a frame per pointer sample.
+ * One multitouch frame for the single tracked finger (path 1). delay_ns is
+ * when the frame is due on the virtual clock; its timestamp is that instant in
+ * milliseconds, forced to be non-zero and strictly increasing (the library
+ * rejects 0 and backward time). Velocity is the displacement since the previous
+ * frame in 1/8 mm/s: dx[0.01 mm] * 80 / dt[ms].
  */
-static void peer_send_touch(AppleModernMtpPeer *p)
+static void peer_send_mt(AppleModernMtpPeer *p, uint8_t stage, int x, int y,
+                         int64_t delay_ns)
 {
+    uint8_t rep[MT_HDR_LEN + MT_PATH_LEN] = { 0 };
     uint8_t out[APPLE_MODERN_SCM_MAX_MSG];
-    uint8_t body[8];
-    size_t n, blen = 0;
+    uint8_t *path = rep + MT_HDR_LEN;
+    int64_t due = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + delay_ns;
+    uint32_t ms = due / SCALE_MS + 1;
+    int64_t vx = 0, vy = 0;
+    size_t n;
 
-    if (!p->ready_sent) {
-        return;
+    if (ms <= p->mt_last_ms) {
+        ms = p->mt_last_ms + 1;
     }
-    if (!p->digitizer_frames) {
-        if (!p->frame_format_warned) {
-            p->frame_format_warned = true;
-            warn_report("apple-modern: mtp-peer has pointer input but no encoder for "
-                        "the firmware descriptor's opaque multitouch frame yet; "
-                        "use mtp-peer-descriptor=digitizer to exercise the path");
-        }
-        return;
+    if (stage != MT_STAGE_MAKE && ms > p->mt_pos_ms) {
+        vx = (int64_t)(x - p->mt_x) * 80 / (int64_t)(ms - p->mt_pos_ms);
+        vy = (int64_t)(y - p->mt_y) * 80 / (int64_t)(ms - p->mt_pos_ms);
     }
-    {
-        /* Matches the generic descriptor: tip + contact id, then X and Y (0..2047). */
-        unsigned x = (uint64_t)p->abs_x * 2047 / INPUT_EVENT_ABS_MAX;
-        unsigned y = (uint64_t)p->abs_y * 2047 / INPUT_EVENT_ABS_MAX;
+    p->mt_last_ms = ms;
+    p->mt_pos_ms = ms;
+    p->mt_x = x;
+    p->mt_y = y;
 
-        body[blen++] = p->touching ? 1 : 0;
-        stw_le_p(body + blen, x);
-        blen += 2;
-        stw_le_p(body + blen, y);
-        blen += 2;
-    }
-    n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 1, body, blen,
-                                true, 0, 0);
+    rep[0] = MT_REPORT_ID;
+    rep[1] = p->mt_frame++;
+    rep[2] = MT_HDR_LEN;
+    rep[3] = 0;                         /* header version */
+    stl_le_p(rep + 4, ms);
+    rep[16] = 1;                        /* path count */
+    rep[17] = MT_PATH_LEN;              /* path stride */
+    path[0] = 1;                        /* path id */
+    path[1] = stage;
+    path[2] = 1;                        /* finger id */
+    path[3] = 1;                        /* hand id */
+    stw_le_p(path + 4, x);
+    stw_le_p(path + 6, y);
+    stw_le_p(path + 8, (uint16_t)CLAMP(vx, INT16_MIN, INT16_MAX));
+    stw_le_p(path + 10, (uint16_t)CLAMP(vy, INT16_MIN, INT16_MAX));
+    stw_le_p(path + 12, 660);           /* major radius, 0.01 mm */
+    stw_le_p(path + 14, 580);           /* minor radius */
+    stw_le_p(path + 16, 19317);         /* angle, units of pi/32768 */
+    stw_le_p(path + 18, 100);           /* zTotal, /256 */
+
+    n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 1, rep,
+                                sizeof(rep), true, 0, 0);
     p->touch_frames++;
-    peer_queue(p, out, n, 0);
+    peer_queue(p, out, n, delay_ns);
+}
+
+/* Pointer position in sensor units: x to the right, y up from the bottom edge. */
+static void peer_pointer_sensor(AppleModernMtpPeer *p, int *x, int *y)
+{
+    *x = (uint64_t)p->abs_x * (MT_SURFACE_W - 1) / INPUT_EVENT_ABS_MAX;
+    *y = (MT_SURFACE_H - 1) -
+         (int)((uint64_t)p->abs_y * (MT_SURFACE_H - 1) / INPUT_EVENT_ABS_MAX);
+}
+
+static void peer_touch_tick(void *opaque)
+{
+    AppleModernMtpPeer *p = opaque;
+    int x, y;
+
+    if (!p->contact || !p->touching) {
+        return;
+    }
+    peer_pointer_sensor(p, &x, &y);
+    peer_send_mt(p, MT_STAGE_TOUCHING, x, y, 0);
+    timer_mod(p->touch_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + MT_FRAME_NS);
 }
 
 static AppleModernMtpPeer *peer_of(DeviceState *dev)
@@ -413,6 +477,10 @@ static AppleModernMtpPeer *peer_of(DeviceState *dev)
     return APPLE_MODERN_DOCKCHANNEL(dev)->peer_opaque;
 }
 
+/*
+ * Pointer events (VNC, QMP input-send-event, a tablet) become one finger: ABS
+ * X/Y move it and the primary button is touch down / up.
+ */
 static void peer_input_event(DeviceState *dev, QemuConsole *src, InputEvent *evt)
 {
     AppleModernMtpPeer *p = peer_of(dev);
@@ -439,14 +507,32 @@ static void peer_input_event(DeviceState *dev, QemuConsole *src, InputEvent *evt
     }
 }
 
+/*
+ * Contact lifecycle, as the real controller reports it: MakeTouch, Touching
+ * every frame, BreakTouch, LingerInRange, OutOfRange, one frame period apart.
+ * Nothing is sent until the AP has been given the interface (init_sent).
+ */
 static void peer_input_sync(DeviceState *dev)
 {
     AppleModernMtpPeer *p = peer_of(dev);
+    int x, y;
 
-    if (p->touching || p->touch_was_down) {
-        peer_send_touch(p);
+    if (!p->init_sent) {
+        return;
     }
-    p->touch_was_down = p->touching;
+    peer_pointer_sensor(p, &x, &y);
+    if (p->touching && !p->contact) {
+        p->contact = true;
+        peer_send_mt(p, MT_STAGE_MAKE, x, y, 0);
+        timer_mod(p->touch_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + MT_FRAME_NS);
+    } else if (!p->touching && p->contact) {
+        p->contact = false;
+        timer_del(p->touch_timer);
+        peer_send_mt(p, MT_STAGE_BREAK, x, y, 0);
+        peer_send_mt(p, MT_STAGE_LINGER, x, y, MT_FRAME_NS);
+        peer_send_mt(p, MT_STAGE_OUT, x, y, 2 * MT_FRAME_NS);
+    }
 }
 
 static const QemuInputHandler peer_input_handler = {
@@ -456,23 +542,54 @@ static const QemuInputHandler peer_input_handler = {
     .sync = peer_input_sync,
 };
 
+/*
+ * The cached feature-report answers describe a real phone sensor. Replace the
+ * sensor-surface report (0xd9: u32 width, u32 height, then the s16 x/y origin
+ * and u16 x/y extent) with this machine's 100 x 75 mm surface, both in its own
+ * answer and inside the 0xdb composite.
+ */
+static void peer_set_surface(AppleModernMtpPeer *p, unsigned w, unsigned h)
+{
+    static const uint8_t shipped[17] = {
+        0xd9, 0x58, 0x18, 0x00, 0x00, 0xb7, 0x34, 0x00, 0x00, 0x26, 0xff, 0x24,
+        0xff, 0x76, 0x17, 0xd3, 0x33,
+    };
+    uint8_t surface[17] = { 0xd9 };
+
+    stl_le_p(surface + 1, w);
+    stl_le_p(surface + 5, h);
+    stw_le_p(surface + 9, 0);
+    stw_le_p(surface + 11, 0);
+    stw_le_p(surface + 13, w);
+    stw_le_p(surface + 15, h);
+    for (size_t i = 0; i < N_CACHED_GETS; i++) {
+        for (size_t k = 0; k + sizeof(shipped) <= p->gets[i].len; k++) {
+            if (!memcmp(p->gets[i].data + k, shipped, sizeof(shipped))) {
+                memcpy(p->gets[i].data + k, surface, sizeof(surface));
+            }
+        }
+    }
+}
+
 AppleModernMtpPeer *apple_modern_mtp_peer_new(AppleModernDockChannelState *dc,
                                               const char *descriptor)
 {
     AppleModernMtpPeer *p = g_new0(AppleModernMtpPeer, 1);
 
-    p->dc = dc;
-    if (descriptor && !strcmp(descriptor, "digitizer")) {
-        p->hid_desc = mt_hid_descriptor_digitizer;
-        p->hid_desc_len = sizeof(mt_hid_descriptor_digitizer);
-    } else {
-        p->hid_desc = mt_hid_descriptor_firmware;
-        p->hid_desc_len = sizeof(mt_hid_descriptor_firmware);
+    if (descriptor && strcmp(descriptor, "firmware")) {
+        warn_report("apple-modern: mtp-peer-descriptor '%s' is not supported; "
+                    "the multitouch service only understands the firmware's own "
+                    "opaque-frame descriptor, which is served", descriptor);
     }
+    p->dc = dc;
+    p->hid_desc = mt_hid_descriptor_firmware;
+    p->hid_desc_len = sizeof(mt_hid_descriptor_firmware);
+    memcpy(p->gets, mt_cached_gets_template, sizeof(p->gets));
+    peer_set_surface(p, MT_SURFACE_W, MT_SURFACE_H);
     p->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, peer_timer, p);
+    p->touch_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, peer_touch_tick, p);
     apple_modern_dockchannel_set_peer(dc, peer_tx, p);
     apple_modern_dockchannel_set_arm_cb(dc, peer_arm, p);
-    p->digitizer_frames = descriptor && !strcmp(descriptor, "digitizer");
     p->input = qemu_input_handler_register(DEVICE(dc), &peer_input_handler);
     qemu_input_handler_activate(p->input);
     return p;

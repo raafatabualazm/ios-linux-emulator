@@ -211,7 +211,7 @@ struct AppleModernMachine {
     /* Declared touch-path register blocks; see map_modern_mtp_input(). */
     bool modern_mtp_input;
     bool modern_mtp_peer;   /* device-side SCMFIFO stand-in on the DockChannel */
-    char *mtp_peer_descriptor; /* "firmware" (default) or "digitizer" */
+    char *mtp_peer_descriptor; /* only "firmware" (the default) is supported */
     AppleModernSMCPlan smc_plan;
     AppleModernDispTracePlan disp_trace_plan;
     /*
@@ -5422,8 +5422,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "mtp-peer-descriptor", get_mtp_peer_descriptor,
                                   set_mtp_peer_descriptor);
     object_class_property_set_description(oc, "mtp-peer-descriptor",
-        "with modern-mtp-peer: the multi-touch HID descriptor to serve, 'firmware' "
-        "(the real opaque-frame one, default) or 'digitizer' (generic touch screen)");
+        "with modern-mtp-peer: the multi-touch HID descriptor to serve; only "
+        "'firmware' (the real opaque-frame one, the default) is supported");
     object_class_property_add_bool(oc, "modern-mtp-peer", get_modern_mtp_peer,
                                    set_modern_mtp_peer);
     object_class_property_set_description(oc, "modern-mtp-peer",

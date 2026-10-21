@@ -1584,7 +1584,9 @@ bool apple_modern_kc_sks_open_wait_skip(uint8_t *bootkc, size_t len,
  * The MTP Config dict OSUnserializeXML builds at run time. Real values from the
  * pinned FTAB personality MTP_SYS[0].Config (re/mtpfw/iokt.json): exactly the
  * keys cacheConfig ("Protocol") and the SCMFIFO protocol configure method
- * (vtable +0x600: Interfaces, MaxReadSize, MaxWriteSize, MemoryFifos) consume.
+ * (vtable +0x600: Interfaces, MaxReadSize, MaxWriteSize, MemoryFifos) consume,
+ * plus AllowReportTimeout: with it an unanswered control report fails with a
+ * timeout status after 5 s, without it the transport panics the guest.
  * The per-interface Reporters/Channels/reset-sequence sub-arrays are omitted on
  * purpose: configure() stores the Interfaces array by reference and logs its
  * count but never walks it, and the whole dict (~58 KiB of XML) would not fit
@@ -1599,6 +1601,7 @@ static const char apple_modern_hid_static_config_xml[] =
     "<key>Protocol</key><string>SCMFIFO</string>"
     "<key>MaxReadSize</key><integer>16384</integer>"
     "<key>MaxWriteSize</key><integer>16384</integer>"
+    "<key>AllowReportTimeout</key><true/>"
     "<key>MemoryFifos</key><array>"
         "<dict><key>WriteSize</key><integer>0</integer>"
             "<key>ReadSize</key><integer>2097152</integer></dict>"
