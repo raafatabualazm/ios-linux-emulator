@@ -58,6 +58,7 @@ struct AppleSEPLabState {
     ARMCPU *cpu;
     MemoryRegion private_memory;
     MemoryRegion private_ram;
+    MemoryRegion sram;
     SEPLabRegion unknown;
     SEPLabRegion ap[2];
     char *trace_path;
@@ -67,8 +68,24 @@ struct AppleSEPLabState {
     uint64_t reset_generation;
     uint64_t last_ap_probe;
     bool faulted;
+    /*
+     * Discovery mode (default off): instead of faulting+stopping on the first
+     * unknown MMIO, model the Apple SEP IMPDEF sysregs, back the SEP SRAM, and
+     * LOG every unknown access returning 0 so one boot yields the whole ordered
+     * MMIO trace. This is a reconnaissance aid, identical in spirit to the M1
+     * Unicorn harness (return 0, advance); it fabricates no protocol response.
+     * The machine's default (strict, no-fabrication) semantics are unchanged.
+     */
+    bool discover;
+    uint64_t discover_logged;
     Error *migration_blocker;
 };
+
+/* SEP SRAM (stack/data) discovered at boot: SP := 0x2a0220000 (image pc 0x404c).
+ * Kept well below the first SEP MMIO block (0x2a0800000) so it shadows none. */
+#define SEP_SRAM_BASE 0x2a0200000ULL
+#define SEP_SRAM_SIZE 0x400000ULL   /* 4 MiB */
+#define SEP_DISCOVER_LOG_CAP 200000
 
 static void sep_lab_trace_reset(AppleSEPLabState *s)
 {
@@ -79,6 +96,30 @@ static void sep_lab_trace_reset(AppleSEPLabState *s)
             "\"cpu_model\":\"generic-aarch64\",\"reset_el\":1}\n",
             ++s->sequence, s->reset_generation, s->entry);
     fflush(s->trace);
+}
+
+/* Discovery mode: record one JSONL line per unknown access and continue
+ * (read returns 0). Capped so a polling loop cannot grow the trace unbounded. */
+static MemTxResult sep_lab_discover(SEPLabRegion *r, hwaddr addr,
+                                    unsigned size, bool write, uint64_t val)
+{
+    AppleSEPLabState *s = r->lab;
+
+    if (s->discover_logged < SEP_DISCOVER_LOG_CAP) {
+        s->discover_logged++;
+        fprintf(s->trace,
+                "{\"event\":\"mmio\",\"sequence\":%" PRIu64
+                ",\"domain\":\"%s\",\"address\":\"0x%" HWADDR_PRIx
+                "\",\"size\":%u,\"write\":%s,\"value\":\"0x%" PRIx64
+                "\",\"pc\":\"0x%" PRIx64 "\"}\n",
+                ++s->sequence, r->domain, r->base + addr, size,
+                write ? "true" : "false", write ? val : 0,
+                (uint64_t)s->cpu->env.pc);
+        if ((s->discover_logged & 0x3ff) == 0) {
+            fflush(s->trace);
+        }
+    }
+    return MEMTX_OK;
 }
 
 static MemTxResult sep_lab_fault(SEPLabRegion *r, hwaddr addr,
@@ -111,15 +152,23 @@ static MemTxResult sep_lab_fault(SEPLabRegion *r, hwaddr addr,
 static MemTxResult sep_lab_read(void *opaque, hwaddr addr, uint64_t *data,
                                unsigned size, MemTxAttrs attrs)
 {
+    SEPLabRegion *r = opaque;
     *data = 0; /* Deterministic host output; MEMTX_ERROR marks it invalid. */
-    return sep_lab_fault(opaque, addr, size, false);
+    if (r->lab->discover) {
+        return sep_lab_discover(r, addr, size, false, 0);
+    }
+    return sep_lab_fault(r, addr, size, false);
 }
 
 static MemTxResult sep_lab_write(void *opaque, hwaddr addr, uint64_t data,
                                 unsigned size, MemTxAttrs attrs)
 {
+    SEPLabRegion *r = opaque;
+    if (r->lab->discover) {
+        return sep_lab_discover(r, addr, size, true, data);
+    }
     /* Values are intentionally omitted from default traces. */
-    return sep_lab_fault(opaque, addr, size, true);
+    return sep_lab_fault(r, addr, size, true);
 }
 
 static const MemoryRegionOps sep_lab_ops = {
@@ -216,6 +265,18 @@ static void sep_lab_init(MachineState *machine)
     memory_region_add_subregion_overlap(&s->private_memory, 0,
                                         &s->private_ram, 0);
 
+    /* Discovery mode backs the SEP SRAM with real RAM so the stack at
+     * 0x2a0220000 works and the kernel runs far enough to touch its KIC and
+     * mailbox (whose addresses this trace is meant to reveal). Off by default. */
+    if (s->discover) {
+        /* owner NULL: a MachineState is not a DeviceState, and a non-NULL
+         * non-device owner crashes memory_region_init_ram via qdev_get_dev_path. */
+        memory_region_init_ram(&s->sram, NULL, "sep-sram", SEP_SRAM_SIZE,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_SRAM_BASE,
+                                            &s->sram, 0);
+    }
+
     /* AP regions are not silently reused as the SEP's private MMIO map. */
     for (unsigned i = 0; i < ARRAY_SIZE(d47_ap_regions); i++) {
         SEPLabRegion *r = &s->ap[i];
@@ -231,6 +292,14 @@ static void sep_lab_init(MachineState *machine)
     s->cpu = ARM_CPU(object_new(machine->cpu_type));
     object_property_set_bool(OBJECT(s->cpu), "has_el3", false, &error_fatal);
     object_property_set_bool(OBJECT(s->cpu), "has_el2", false, &error_fatal);
+    /* Discovery mode installs the SEP's IMPDEF system registers (boot role,
+     * ready bit, the crn=15 cluster) so sepOS gets past its first Apple mrs
+     * at 0xa00 and runs its real platform init -- exactly as modern-sep-core
+     * does. Without it the generic core parks at 0xa00 and reveals nothing. */
+    if (s->discover) {
+        object_property_set_bool(OBJECT(s->cpu), "apple-modern-sep", true,
+                                 &error_fatal);
+    }
     object_property_set_link(OBJECT(s->cpu), "memory",
                              OBJECT(&s->private_memory), &error_fatal);
     qdev_realize(DEVICE(s->cpu), NULL, &error_fatal);
@@ -275,6 +344,16 @@ static void sep_lab_set_entry(Object *obj, const char *value, Error **errp)
         return;
     }
     APPLE_SEP_LAB(obj)->entry = entry;
+}
+
+static bool sep_lab_get_discover(Object *obj, Error **errp)
+{
+    return APPLE_SEP_LAB(obj)->discover;
+}
+
+static void sep_lab_set_discover(Object *obj, bool value, Error **errp)
+{
+    APPLE_SEP_LAB(obj)->discover = value;
 }
 
 static char *sep_lab_get_ap_probe(Object *obj, Error **errp)
@@ -347,6 +426,12 @@ static void sep_lab_class_init(ObjectClass *oc, const void *data)
                                   sep_lab_set_ap_probe);
     object_class_property_set_description(oc, "x-ap-probe",
         "Host-only debugger read of an AP window; NOT a SEP wire operation");
+    object_class_property_add_bool(oc, "discover", sep_lab_get_discover,
+                                   sep_lab_set_discover);
+    object_class_property_set_description(oc, "discover",
+        "Reconnaissance mode (default off): model SEP IMPDEF sysregs, back the "
+        "SEP SRAM, and log unknown MMIO (returning 0) instead of faulting, so "
+        "one boot traces the SEP's register map. Fabricates no protocol reply.");
 }
 
 static void sep_lab_finalize(Object *obj)
