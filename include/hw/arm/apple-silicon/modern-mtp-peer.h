@@ -40,6 +40,8 @@ size_t apple_modern_scm_encode(uint8_t *out, uint8_t type, uint8_t transfer_id,
 uint32_t apple_modern_scm_checksum(const uint8_t *body, size_t len);
 
 /* Attach a peer to dc and start it; the machine owns the result for its lifetime. */
-AppleModernMtpPeer *apple_modern_mtp_peer_new(AppleModernDockChannelState *dc);
+/* descriptor: "digitizer" serves a generic Digitizer/Touch Screen descriptor, anything else the firmware's own. */
+AppleModernMtpPeer *apple_modern_mtp_peer_new(AppleModernDockChannelState *dc,
+                                              const char *descriptor);
 
 #endif

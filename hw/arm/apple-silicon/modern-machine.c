@@ -211,6 +211,7 @@ struct AppleModernMachine {
     /* Declared touch-path register blocks; see map_modern_mtp_input(). */
     bool modern_mtp_input;
     bool modern_mtp_peer;   /* device-side SCMFIFO stand-in on the DockChannel */
+    char *mtp_peer_descriptor; /* "firmware" (default) or "digitizer" */
     AppleModernSMCPlan smc_plan;
     AppleModernDispTracePlan disp_trace_plan;
     /*
@@ -2174,7 +2175,7 @@ static bool map_modern_mtp_input(AppleModernMachine *s, Error **errp)
     }
     sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(s->aic, ldl_le_p(ints.data)));
     if (s->modern_mtp_peer) {
-        apple_modern_mtp_peer_new(APPLE_MODERN_DOCKCHANNEL(sbd));
+        apple_modern_mtp_peer_new(APPLE_MODERN_DOCKCHANNEL(sbd), s->mtp_peer_descriptor);
         warn_report("apple-modern: modern-mtp-peer attaches a device-side SCMFIFO "
                     "stand-in to the DockChannel: it acknowledges the transport's "
                     "commands and reports interface 1 ready once the AP listens; no "
@@ -5079,6 +5080,19 @@ BOOL_PROPERTY(modern_smc, modern_smc)
 BOOL_PROPERTY(modern_smc_buttons, modern_smc_buttons)
 BOOL_PROPERTY(modern_mtp_input, modern_mtp_input)
 BOOL_PROPERTY(modern_mtp_peer, modern_mtp_peer)
+static char *get_mtp_peer_descriptor(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->mtp_peer_descriptor);
+}
+static void set_mtp_peer_descriptor(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+
+    if (check_mutable(s, errp)) {
+        g_free(s->mtp_peer_descriptor);
+        s->mtp_peer_descriptor = g_strdup(value);
+    }
+}
 BOOL_PROPERTY(aic_record_irq_config, aic_record_irq_config)
 BOOL_PROPERTY(boot_display, boot_display)
 BOOL_PROPERTY(disp0_pipe, disp0_pipe)
@@ -5405,6 +5419,11 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_modern_smc_buttons);
     object_class_property_add_bool(oc, "modern-smc", get_modern_smc,
                                    set_modern_smc);
+    object_class_property_add_str(oc, "mtp-peer-descriptor", get_mtp_peer_descriptor,
+                                  set_mtp_peer_descriptor);
+    object_class_property_set_description(oc, "mtp-peer-descriptor",
+        "with modern-mtp-peer: the multi-touch HID descriptor to serve, 'firmware' "
+        "(the real opaque-frame one, default) or 'digitizer' (generic touch screen)");
     object_class_property_add_bool(oc, "modern-mtp-peer", get_modern_mtp_peer,
                                    set_modern_mtp_peer);
     object_class_property_set_description(oc, "modern-mtp-peer",

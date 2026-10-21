@@ -17,6 +17,37 @@
 #define PEER_READY_DELAY_NS (5 * SCALE_MS)
 #define PEER_RETRY_NS (2 * SCALE_MS)
 
+/*
+ * First-cut HID report descriptor for interface 1 (multi-touch): one finger of a
+ * standard Digitizer / Touch Screen collection (tip switch + 7-bit contact id,
+ * 16-bit X and Y, 0..2047). The transport accepts any descriptor; whether
+ * AppleMultitouchHIDService consumes this shape is what the first touch
+ * reports will show.
+ */
+/*
+ * The HID report descriptor the real MTP firmware serves for the multi-touch
+ * interface (D47_MtpFirmware A5PH/P4S1/P4B1 at 0x8a194, 29 bytes): a Digitizer
+ * / Touch Screen application collection holding one vendor-page input that is a
+ * single buffered-bytes report of 0x1ffff bits (16 KiB), i.e. an opaque
+ * multitouch frame parsed by AppleMultitouchHIDService, not field-by-field HID.
+ */
+static const uint8_t mt_hid_descriptor_firmware[] = {
+    0x05, 0x0d, 0x09, 0x04, 0xa1, 0x01, 0x06, 0x00, 0xff, 0x09, 0x23, 0x95,
+    0x01, 0xa1, 0x00, 0x05, 0x0d, 0x09, 0x04, 0x77, 0xff, 0xff, 0x01, 0x00,
+    0x82, 0x22, 0x01, 0xc0, 0xc0,
+};
+
+static const uint8_t mt_hid_descriptor_digitizer[] = {
+    0x05, 0x0d, 0x09, 0x04, 0xa1, 0x01, 0x09, 0x22, 0xa1, 0x02,
+    0x09, 0x42, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
+    0x09, 0x51, 0x75, 0x07, 0x95, 0x01, 0x81, 0x02,
+    0x05, 0x01, 0x09, 0x30, 0x15, 0x00, 0x26, 0xff, 0x07, 0x75, 0x10, 0x95,
+    0x01, 0x81, 0x02,
+    0x09, 0x31, 0x15, 0x00, 0x26, 0xff, 0x07, 0x75, 0x10, 0x95, 0x01, 0x81,
+    0x02,
+    0xc0, 0xc0,
+};
+
 typedef struct PeerMsg {
     uint8_t data[APPLE_MODERN_SCM_MAX_MSG];
     size_t len;
@@ -31,6 +62,8 @@ struct AppleModernMtpPeer {
     PeerMsg *queue[PEER_QUEUE];
     unsigned queued;
     bool ready_sent;
+    const uint8_t *hid_desc;     /* descriptor served for interface 1 */
+    size_t hid_desc_len;
     unsigned frames_logged;
     uint64_t ap_frames, dev_frames;
 };
@@ -142,8 +175,23 @@ static void peer_handle(AppleModernMtpPeer *p, const uint8_t *f, size_t len)
      * empty payload, retcode 0. Replies that carry data (descriptors, feature
      * reads) are added as the transport asks for them.
      */
-    n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_CONTROL, f[4], f[5],
-                                NULL, 0, true, len >= 16 ? f[8] : 0, 0);
+    {
+        bool get = len >= 16 && (f[8] & 1);   /* flags bit 0: 1 = GET, 0 = SET */
+        size_t plen = len >= 20 ? lduw_le_p(f + 10) : 0;
+
+        /*
+         * A GET gets its own request payload back (report id and arguments
+         * echoed) until the real per-report contents are known; a SET gets an
+         * empty acknowledgement.
+         */
+        static const uint8_t power_on[4] = { 0x41, 1, 1, 0 };
+        bool power = get && f[5] == 0 && plen >= 1 && f[16] == 0x41;
+
+        n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_CONTROL, f[4], f[5],
+                                    power ? power_on : (get ? f + 16 : NULL),
+                                    power ? sizeof(power_on) : (get ? plen : 0),
+                                    true, len >= 16 ? f[8] : 0, 0);
+    }
     peer_queue(p, out, n, PEER_REPLY_DELAY_NS);
 }
 
@@ -231,13 +279,52 @@ static void peer_arm(void *opaque, uint32_t thresh)
     n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 0, ready,
                                 sizeof(ready), true, 0, 0);
     peer_queue(p, out, n, PEER_READY_DELAY_NS);
+
+    /*
+     * Descriptor packet for interface 1, a report 0xf0 on the comm interface:
+     * {0xf0, u16 version=1, u8 interface, char name[16], u16 more=0} followed
+     * by sections {u16 type, u16 length, body}; type 0 is the HID report
+     * descriptor. more=0 completes the interface's descriptor set.
+     */
+    {
+        uint8_t pkt[22 + 4 + 64];
+
+        g_assert(p->hid_desc_len <= 64);
+        size_t k = 0;
+
+        memset(pkt, 0, sizeof(pkt));
+        pkt[k++] = 0xf0;
+        stw_le_p(pkt + k, 1);
+        k += 2;
+        pkt[k++] = 1;
+        memcpy(pkt + k, "multi-touch", 11);
+        k += 16;
+        stw_le_p(pkt + k, 0);
+        k += 2;
+        stw_le_p(pkt + k, 0);
+        stw_le_p(pkt + k + 2, p->hid_desc_len);
+        k += 4;
+        memcpy(pkt + k, p->hid_desc, p->hid_desc_len);
+        k += p->hid_desc_len;
+        n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 0, pkt, k,
+                                    true, 0, 0);
+        peer_queue(p, out, n, PEER_READY_DELAY_NS + 10 * SCALE_MS);
+    }
 }
 
-AppleModernMtpPeer *apple_modern_mtp_peer_new(AppleModernDockChannelState *dc)
+AppleModernMtpPeer *apple_modern_mtp_peer_new(AppleModernDockChannelState *dc,
+                                              const char *descriptor)
 {
     AppleModernMtpPeer *p = g_new0(AppleModernMtpPeer, 1);
 
     p->dc = dc;
+    if (descriptor && !strcmp(descriptor, "digitizer")) {
+        p->hid_desc = mt_hid_descriptor_digitizer;
+        p->hid_desc_len = sizeof(mt_hid_descriptor_digitizer);
+    } else {
+        p->hid_desc = mt_hid_descriptor_firmware;
+        p->hid_desc_len = sizeof(mt_hid_descriptor_firmware);
+    }
     p->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, peer_timer, p);
     apple_modern_dockchannel_set_peer(dc, peer_tx, p);
     apple_modern_dockchannel_set_arm_cb(dc, peer_arm, p);
