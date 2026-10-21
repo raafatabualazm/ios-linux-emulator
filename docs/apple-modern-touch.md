@@ -19,9 +19,11 @@ the HID transport, so the unmodified iOS kernel publishes a digitizer.
 Diagnostics and test hooks, all on the QOM object `/machine/modern-dockchannel-mtp`:
 
 * `x-push-rx` (write-only hex bytes queued as device-to-AP data).
-* `x-touch` (write-only, needs `modern-mtp-peer`): `tap X Y [HOLD_MS]` or `swipe X0 Y0 X1 Y1 [DURATION_MS]`, pixel
+* `x-touch` (write-only, needs `modern-mtp-peer`): `tap X Y [HOLD_MS]` or `swipe X0 Y0 X1 Y1 [DURATION_MS [HOLD_MS]]`, pixel
   coordinates of the 1024x768 framebuffer. The gesture is generated on the guest's virtual clock, one frame every 16 ms,
-  so its timing does not depend on host scheduling. Example: `qom-set ... x-touch "swipe 512 762 512 307 250"`.
+  so its timing does not depend on host scheduling. The lift-off (BreakTouch) frame is the last step of the motion and keeps
+  its velocity, as a real controller's does; a HOLD_MS keeps the finger at the end point and lifts with zero velocity.
+  Example: `qom-set ... x-touch "swipe 512 745 512 300 250"`.
 * A pointer drag (VNC, QMP `input-send-event`) is one finger: absolute X/Y move it, the left button is touch down / up.
 * Bounded logs of every RX arm and IRQ transition, `sysreg-trace`.
 
@@ -82,5 +84,5 @@ are dropped while the touch mode is Off (the guest sets it to On with `SET 0xbf`
 
 * the other three interfaces' descriptors, the memory FIFOs (no IOMapper: `AppleT8110DART` never starts for `dart-mtp`
   here), the MTP coprocessor itself, wftm provisioning (its D47S1 personality is not retained), more than one finger.
-* Whether the 4:3 surface should be rotated or flipped relative to the guest's notion of the display is verified only
-  by the first end-to-end test (a tap on the carousel's information button).
+* Verified on the guest: sensor x to the right and sensor y up from the bottom edge map to the framebuffer without any flip
+  (a tap at the carousel's information button opened its information view). One finger only.
