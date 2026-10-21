@@ -39,6 +39,7 @@
 #include "hw/arm/apple-silicon/modern-compat-groups.h"
 #include "hw/arm/apple-silicon/modern-smc.h"
 #include "hw/arm/apple-silicon/modern-dockchannel.h"
+#include "hw/arm/apple-silicon/modern-mtp-peer.h"
 #include "hw/gpio/apple_gpio.h"
 #include "hw/misc/apple-silicon/buttons.h"
 #include "hw/arm/apple-silicon/modern-pmgr-storage.h"
@@ -209,6 +210,7 @@ struct AppleModernMachine {
     bool modern_smc_buttons;
     /* Declared touch-path register blocks; see map_modern_mtp_input(). */
     bool modern_mtp_input;
+    bool modern_mtp_peer;   /* device-side SCMFIFO stand-in on the DockChannel */
     AppleModernSMCPlan smc_plan;
     AppleModernDispTracePlan disp_trace_plan;
     /*
@@ -2171,6 +2173,13 @@ static bool map_modern_mtp_input(AppleModernMachine *s, Error **errp)
         sysbus_mmio_map(sbd, i, windows[i]);
     }
     sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(s->aic, ldl_le_p(ints.data)));
+    if (s->modern_mtp_peer) {
+        apple_modern_mtp_peer_new(APPLE_MODERN_DOCKCHANNEL(sbd));
+        warn_report("apple-modern: modern-mtp-peer attaches a device-side SCMFIFO "
+                    "stand-in to the DockChannel: it acknowledges the transport's "
+                    "commands and reports interface 1 ready once the AP listens; no "
+                    "MTP firmware runs");
+    }
 
     /*
      * The transport's shared-memory manager asks for an IOMapper through the
@@ -4695,6 +4704,8 @@ static void modern_init(MachineState *machine)
         (s->modern_ans && !modern_create_ans(s, &error)) ||
         (s->disp0_pipe && !map_disp0(s, uart, uart_span, &error)) ||
         /* Last, so its overlap refusal sees every other mapping. */
+        (s->modern_mtp_peer && !s->modern_mtp_input &&
+         (error_setg(&error, "modern-mtp-peer needs modern-mtp-input=on"), true)) ||
         (s->modern_mtp_input && !map_modern_mtp_input(s, &error))) {
         error_report_err(error);
         exit(EXIT_FAILURE);
@@ -5067,6 +5078,7 @@ BOOL_PROPERTY(modern_aic, modern_aic)
 BOOL_PROPERTY(modern_smc, modern_smc)
 BOOL_PROPERTY(modern_smc_buttons, modern_smc_buttons)
 BOOL_PROPERTY(modern_mtp_input, modern_mtp_input)
+BOOL_PROPERTY(modern_mtp_peer, modern_mtp_peer)
 BOOL_PROPERTY(aic_record_irq_config, aic_record_irq_config)
 BOOL_PROPERTY(boot_display, boot_display)
 BOOL_PROPERTY(disp0_pipe, disp0_pipe)
@@ -5393,6 +5405,12 @@ static void modern_class_init(ObjectClass *oc, const void *data)
                                    set_modern_smc_buttons);
     object_class_property_add_bool(oc, "modern-smc", get_modern_smc,
                                    set_modern_smc);
+    object_class_property_add_bool(oc, "modern-mtp-peer", get_modern_mtp_peer,
+                                   set_modern_mtp_peer);
+    object_class_property_set_description(oc, "modern-mtp-peer",
+        "Declared, default-off, needs modern-mtp-input: attach a device-side "
+        "SCMFIFO stand-in (frames and acknowledges the HID transport, reports "
+        "ready) to the DockChannel; no MTP firmware runs");
     object_class_property_add_bool(oc, "modern-mtp-input",
                                    get_modern_mtp_input,
                                    set_modern_mtp_input);

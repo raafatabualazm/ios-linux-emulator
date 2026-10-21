@@ -35,6 +35,9 @@ enum {
 typedef void (*AppleModernDockChannelPeerTx)(void *opaque, const uint8_t *data,
                                              size_t len);
 
+/* Called each time the AP arms an asynchronous receive (RX threshold write). */
+typedef void (*AppleModernDockChannelArmCb)(void *opaque, uint32_t thresh);
+
 #define APPLE_MODERN_DOCKCHANNEL_WIN_SIZE 0x1000
 #define APPLE_MODERN_DOCKCHANNEL_FIFO_MAX 0x1000
 
@@ -56,12 +59,16 @@ struct AppleModernDockChannelState {
     uint32_t irq_flag;
     uint32_t tx_thresh;
     uint32_t rx_thresh;
+    bool irq_level;         /* last level driven on the AIC line */
+    unsigned arm_logged, irq_logged;
 
     /* AP -> remote: counted, logged and handed to the peer if there is one. */
     uint64_t tx_total;
     uint32_t tx_logged;
     AppleModernDockChannelPeerTx peer_tx;
     void *peer_opaque;
+    AppleModernDockChannelArmCb arm_cb;
+    void *arm_opaque;
 
     /* Remote -> AP: filled by apple_modern_dockchannel_push_rx(). */
     uint8_t rx[APPLE_MODERN_DOCKCHANNEL_FIFO_MAX];
@@ -84,5 +91,9 @@ uint32_t apple_modern_dockchannel_rx_space(AppleModernDockChannelState *s);
 void apple_modern_dockchannel_set_peer(AppleModernDockChannelState *s,
                                        AppleModernDockChannelPeerTx tx,
                                        void *opaque);
+/* Be told each time the AP arms an asynchronous receive; cb may be NULL. */
+void apple_modern_dockchannel_set_arm_cb(AppleModernDockChannelState *s,
+                                         AppleModernDockChannelArmCb cb,
+                                         void *opaque);
 
 #endif

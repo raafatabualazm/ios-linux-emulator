@@ -411,8 +411,9 @@ static void t8110_trace(AppleDARTT8110State *s, const char *what,
 {
     if (s->trace && s->traced < 256) {
         s->traced++;
-        qemu_log_mask(LOG_UNIMP, "apple-dart-t8110: %s +0x%05" PRIx64
-                      " value 0x%" PRIx64 "%s%s\n", what, offset, value,
+        qemu_log_mask(LOG_UNIMP, "apple-dart-t8110[%s]: %s +0x%05" PRIx64
+                      " value 0x%" PRIx64 "%s%s\n",
+                      DEVICE(s)->id ? DEVICE(s)->id : "?", what, offset, value,
                       known ? "" : " unsupported",
                       s->traced == 256 ? " (limit)" : "");
     }

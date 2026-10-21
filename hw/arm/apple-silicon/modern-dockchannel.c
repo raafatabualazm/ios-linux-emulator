@@ -68,6 +68,7 @@
 
 /* Bound the per-write TX log; the running total is always kept. */
 #define TX_LOG_WRITES 512
+#define ARM_LOG_MAX 128
 
 static const char *const window_names[APPLE_MODERN_DOCKCHANNEL_WINDOWS] = {
     "global", "agent", "dev-config", "dev-data", "dock-config", "dock-data",
@@ -98,7 +99,16 @@ static uint32_t conditions(AppleModernDockChannelState *s)
 static void update_irq(AppleModernDockChannelState *s)
 {
     s->irq_flag |= conditions(s);
-    qemu_set_irq(s->irq, (s->irq_flag & s->irq_mask) != 0);
+    bool level = (s->irq_flag & s->irq_mask) != 0;
+
+    if (level != s->irq_level && s->irq_logged < ARM_LOG_MAX) {
+        s->irq_logged++;
+        warn_report("apple-modern: dockchannel-mtp IRQ %s (flag 0x%x mask 0x%x "
+                    "queued %u thresh %u)", level ? "asserted" : "deasserted",
+                    s->irq_flag, s->irq_mask, s->rx_count, s->rx_thresh);
+    }
+    s->irq_level = level;
+    qemu_set_irq(s->irq, level);
 }
 
 static void log_first(AppleModernDockChannelState *s, unsigned win, hwaddr off,
@@ -231,7 +241,16 @@ static void dockchannel_write(void *opaque, hwaddr off, uint64_t value,
             s->tx_thresh = value;
         } else if (off == CFG_RX_THRESH) {
             s->rx_thresh = value;
+            if (s->arm_logged < ARM_LOG_MAX) {
+                s->arm_logged++;
+                warn_report("apple-modern: dockchannel-mtp RX arm #%u: rx-thresh <- %u "
+                            "(queued %u, mask 0x%x, flag 0x%x)", s->arm_logged,
+                            (unsigned)value, s->rx_count, s->irq_mask, s->irq_flag);
+            }
             update_irq(s);
+            if (s->arm_cb && value) {
+                s->arm_cb(s->arm_opaque, value);
+            }
         } else if (off == CFG_FLUSH && (value & 1) && s->rx_count) {
             warn_report("apple-modern: dockchannel-mtp device-side flush drops "
                         "%u queued RX bytes", s->rx_count);
@@ -284,6 +303,14 @@ void apple_modern_dockchannel_set_peer(AppleModernDockChannelState *s,
 {
     s->peer_tx = tx;
     s->peer_opaque = opaque;
+}
+
+void apple_modern_dockchannel_set_arm_cb(AppleModernDockChannelState *s,
+                                         AppleModernDockChannelArmCb cb,
+                                         void *opaque)
+{
+    s->arm_cb = cb;
+    s->arm_opaque = opaque;
 }
 
 static void dockchannel_reset(DeviceState *dev)
