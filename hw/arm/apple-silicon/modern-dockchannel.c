@@ -43,6 +43,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
+#include "qapi/error.h"
 #include "hw/irq.h"
 #include "hw/arm/apple-silicon/modern-dockchannel.h"
 
@@ -320,9 +321,58 @@ SysBusDevice *apple_modern_dockchannel_new(uint32_t fifo_size, uint32_t channel)
     return sbd;
 }
 
+/*
+ * Experimental, diagnostic: x-push-rx takes hex byte pairs (whitespace and ':'
+ * ignored) and queues them as bytes the remote side sent to the AP, exactly as
+ * apple_modern_dockchannel_push_rx() does for a peer. It lets a transport be
+ * explored on a running guest through QMP qom-set without rebuilding:
+ *   {"execute":"qom-set","arguments":{"path":"/machine/modern-dockchannel-mtp",
+ *    "property":"x-push-rx","value":"08 12 00 00 ..."}}
+ * Write-only; reading returns the empty string.
+ */
+static void dockchannel_set_push_rx(Object *obj, const char *value, Error **errp)
+{
+    AppleModernDockChannelState *s = APPLE_MODERN_DOCKCHANNEL(obj);
+    uint8_t buf[APPLE_MODERN_DOCKCHANNEL_FIFO_MAX];
+    size_t n = 0;
+
+    for (const char *p = value; *p;) {
+        if (g_ascii_isspace(*p) || *p == ':') {
+            p++;
+            continue;
+        }
+        if (!g_ascii_isxdigit(p[0]) || !g_ascii_isxdigit(p[1])) {
+            error_setg(errp, "x-push-rx: expected hex byte pairs");
+            return;
+        }
+        if (n == sizeof(buf)) {
+            error_setg(errp, "x-push-rx: more than %zu bytes", sizeof(buf));
+            return;
+        }
+        buf[n++] = (g_ascii_xdigit_value(p[0]) << 4) | g_ascii_xdigit_value(p[1]);
+        p += 2;
+    }
+    if (!apple_modern_dockchannel_push_rx(s, buf, n)) {
+        error_setg(errp, "x-push-rx: %zu bytes do not fit (free %u)", n,
+                   apple_modern_dockchannel_rx_space(s));
+        return;
+    }
+    warn_report("apple-modern: dockchannel-mtp x-push-rx queued %zu bytes", n);
+}
+
+static char *dockchannel_get_push_rx(Object *obj, Error **errp)
+{
+    return g_strdup("");
+}
+
 static void dockchannel_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+
+    object_class_property_add_str(klass, "x-push-rx", dockchannel_get_push_rx,
+                                  dockchannel_set_push_rx);
+    object_class_property_set_description(klass, "x-push-rx",
+        "experimental: queue hex bytes as remote-to-AP data (write-only)");
 
     dc->desc = "Apple DockChannel FIFO (modern-mtp-input)";
     dc->user_creatable = false;
