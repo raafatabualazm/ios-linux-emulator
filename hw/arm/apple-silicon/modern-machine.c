@@ -165,6 +165,7 @@ struct AppleModernMachine {
     bool sep_trace;
     bool sep_mailbox;
     bool sep_sim;
+    uint32_t sep_preboot;
     bool sep_dart;
     bool modern_pmgr;
     bool modern_mcc_dramcfg;
@@ -2975,6 +2976,11 @@ static bool map_sep_mailbox(AppleModernMachine *s, Error **errp)
                    "no doorbell can be delivered");
         return false;
     }
+    if (s->sep_preboot && (!s->sep_sim || s->sep_preboot > 3)) {
+        error_setg(errp, "sep-preboot (1..3) needs sep-sim: it changes only "
+                   "what the protocol simulator announces at reset");
+        return false;
+    }
 
     if (s->sep_sim) {
         /*
@@ -2998,6 +3004,9 @@ static bool map_sep_mailbox(AppleModernMachine *s, Error **errp)
         s->sep_mbox = DEVICE(apple_sep_sim_new("SEP", size, APPLE_A7IOP_V6,
                              s->sep_dart ? s->sep_dma_as :
                                            &address_space_memory));
+        if (s->sep_preboot) {
+            qdev_prop_set_uint32(s->sep_mbox, "preboot", s->sep_preboot);
+        }
     } else {
         s->sep_mbox = qdev_new(TYPE_APPLE_A7IOP);
         apple_a7iop_init(APPLE_A7IOP(s->sep_mbox), "SEP", size,
@@ -5375,6 +5384,15 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "sep-mailbox", get_sep_mailbox,
                                    set_sep_mailbox);
     object_class_property_add_bool(oc, "sep-sim", get_sep_sim, set_sep_sim);
+    object_class_property_add(oc, "sep-preboot", "uint32",
+                              get_display_geometry, set_display_geometry,
+                              NULL, (void *)offsetof(AppleModernMachine,
+                                                     sep_preboot));
+    object_class_property_set_description(oc, "sep-preboot",
+        "sep-sim only, 0..3: the simulated SEP announces itself as already "
+        "booted at reset (1 alive after a BOOTSTRAP status, 2 alive after an "
+        "ACTIVE status, 3 ACTIVE status only) instead of waiting for the "
+        "bootstrap dialogue; declared emulator behaviour, default 0");
     object_class_property_add_bool(oc, "sep-dart", get_sep_dart, set_sep_dart);
     object_class_property_add_bool(oc, "modern-pmgr", get_modern_pmgr,
                                    set_modern_pmgr);

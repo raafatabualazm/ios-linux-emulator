@@ -1405,7 +1405,7 @@ static void apple_sep_sim_reset_hold(Object *obj, ResetType type)
         }
     }
 
-    s->status = SEP_STATUS_BOOTSTRAP;
+    s->status = s->preboot >= 2 ? SEP_STATUS_ACTIVE : SEP_STATUS_BOOTSTRAP;
 
     msg = g_new0(AppleA7IOPMessage, 1);
     sep_msg = (SEPMessage *)msg->data;
@@ -1413,11 +1413,26 @@ static void apple_sep_sim_reset_hold(Object *obj, ResetType type)
     sep_msg->op = BOOTSTRAP_OP_ANNOUNCE_STATUS;
     sep_msg->data = s->status;
     apple_a7iop_send_ap(a7iop, msg);
+
+    if (s->preboot == 1 || s->preboot == 2) {
+        /*
+         * A SEP that an earlier boot stage already started: it has announced
+         * its ROM status once; the sepOS now announces itself alive and lists
+         * its endpoints. The AP's AppleSEPManager accepts NOTIFY_ALIVE while
+         * its recorded status is BOOTSTRAP or ACTIVE, so the bootstrap steps
+         * (TZ0, IMG4, ART) are never needed. Declared emulator behaviour.
+         */
+        s->status = SEP_STATUS_ACTIVE;
+        apple_sep_sim_send_message(s, EP_CONTROL, 0, CONTROL_OP_NOTIFY_ALIVE,
+                                   0, 0);
+        apple_sep_sim_advertise_eps(s);
+    }
 }
 
 static const Property apple_sep_sim_properties[] = {
     DEFINE_PROP_BOOL("sks-fail-closed", AppleSEPSimState, sks_fail_closed,
                      false),
+    DEFINE_PROP_UINT32("preboot", AppleSEPSimState, preboot, 0),
 };
 
 static void apple_sep_sim_class_init(ObjectClass *klass, const void *data)

@@ -65,6 +65,14 @@ struct AppleSEPSimState {
     bool sks_modern;
     /* When true, unimplemented SKS opcodes stop the VM instead of silent drop. */
     bool sks_fail_closed;
+    /*
+     * Opt-in "already booted" SEP, declared emulator behaviour, default 0:
+     *   1: announce the ROM status (BOOTSTRAP), then NOTIFY_ALIVE and the
+     *      endpoint list at reset, with no bootstrap dialogue;
+     *   2: as 1, but the first status announcement already says ACTIVE;
+     *   3: announce ACTIVE only (no NOTIFY_ALIVE, no endpoints): observation.
+     */
+    uint32_t preboot;
     uint32_t status;
     /* Read-only host diagnostics; never contain message payloads or keys. */
     uint64_t diagnostic_dispatches;
