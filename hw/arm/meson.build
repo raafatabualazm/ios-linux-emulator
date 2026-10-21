@@ -85,5 +85,9 @@ arm_common_ss.add(files('boot.c'))
 
 subdir('apple-silicon')
 
+# Explicitly incomplete, isolated SEP firmware development machine.
+arm_common_ss.add(when: ['CONFIG_TCG', 'TARGET_AARCH64'],
+                  if_true: files('apple-sep-lab.c'))
+
 hw_arch += {'arm': arm_ss}
 hw_common_arch += {'arm': arm_common_ss}
