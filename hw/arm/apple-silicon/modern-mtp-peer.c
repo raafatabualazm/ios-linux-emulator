@@ -35,6 +35,8 @@
 #define MT_SURFACE_W 10000
 #define MT_SURFACE_H 7500
 #define MT_FRAME_NS (16 * SCALE_MS)
+#define MT_HIST 16               /* contact samples kept for the lift-off velocity */
+#define MT_LIFT_WINDOW_MS 100    /* lift-off velocity is averaged over this window */
 
 /*
  * The HID report descriptor the real MTP firmware serves for the multi-touch
@@ -116,6 +118,8 @@ struct AppleModernMtpPeer {
     uint32_t mt_last_ms;         /* last timestamp used; strictly increasing */
     int mt_x, mt_y;              /* last position reported, sensor units */
     uint32_t mt_pos_ms;          /* timestamp that position was reported at */
+    struct { uint32_t ms; int x, y; } mt_hist[MT_HIST];   /* recent contact samples */
+    unsigned mt_hist_n;
     uint64_t touch_frames;
     bool initdone_sent;          /* the one-time "InitDone" status report */
     /* Scripted gesture (x-touch): tap or swipe, paced on the virtual clock. */
@@ -364,8 +368,8 @@ static void peer_arm(void *opaque, uint32_t thresh)
  * rejects 0 and backward time). Velocity is the displacement since the previous
  * frame in the report's unit, 1/8 mm/s.
  */
-static void peer_send_mt(AppleModernMtpPeer *p, uint8_t stage, int x, int y,
-                         int64_t delay_ns)
+static void peer_send_mt_v(AppleModernMtpPeer *p, uint8_t stage, int x, int y,
+                           int64_t delay_ns, const int64_t *velocity)
 {
     uint8_t rep[APPLE_MODERN_MT_FRAME_LEN];
     uint8_t out[APPLE_MODERN_SCM_MAX_MSG];
@@ -381,16 +385,65 @@ static void peer_send_mt(AppleModernMtpPeer *p, uint8_t stage, int x, int y,
         vx = apple_modern_mt_velocity(x - p->mt_x, ms - p->mt_pos_ms);
         vy = apple_modern_mt_velocity(y - p->mt_y, ms - p->mt_pos_ms);
     }
+    if (velocity) {
+        vx = velocity[0];
+        vy = velocity[1];
+    }
     p->mt_last_ms = ms;
     p->mt_pos_ms = ms;
     p->mt_x = x;
     p->mt_y = y;
+    if (stage == APPLE_MODERN_MT_STAGE_MAKE_TOUCH) {
+        p->mt_hist_n = 0;
+    }
+    if (stage <= APPLE_MODERN_MT_STAGE_TOUCHING) {
+        unsigned slot = p->mt_hist_n++ % MT_HIST;
+
+        p->mt_hist[slot].ms = ms;
+        p->mt_hist[slot].x = x;
+        p->mt_hist[slot].y = y;
+    }
 
     apple_modern_mt_frame(rep, p->mt_frame++, ms, stage, x, y, vx, vy);
     n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 1, rep,
                                 sizeof(rep), true, 0, 0);
     p->touch_frames++;
     peer_queue(p, out, n, delay_ns);
+}
+
+static void peer_send_mt(AppleModernMtpPeer *p, uint8_t stage, int x, int y,
+                         int64_t delay_ns)
+{
+    peer_send_mt_v(p, stage, x, y, delay_ns, NULL);
+}
+
+/*
+ * Lift-off for a finger driven by a pointer: the pointer position changes in
+ * steps at whatever rate the host delivers events, so the last frame can be
+ * stationary even though the drag was fast. A flick is judged by the velocity at
+ * release, so report the average velocity over the last MT_LIFT_WINDOW_MS of
+ * the contact, as touch controllers do.
+ */
+static void peer_lift_off(AppleModernMtpPeer *p, int x, int y)
+{
+    int64_t now_ms = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / SCALE_MS + 1;
+    int64_t v[2] = { 0, 0 };
+    unsigned n = MIN(p->mt_hist_n, (unsigned)MT_HIST);
+
+    for (unsigned i = 0; i < n; i++) {
+        /* oldest sample inside the window, scanning from the newest */
+        unsigned slot = (p->mt_hist_n - 1 - i) % MT_HIST;
+        int64_t age = now_ms - p->mt_hist[slot].ms;
+
+        if (age > MT_LIFT_WINDOW_MS) {
+            break;
+        }
+        if (age > 0) {
+            v[0] = apple_modern_mt_velocity(x - p->mt_hist[slot].x, age);
+            v[1] = apple_modern_mt_velocity(y - p->mt_hist[slot].y, age);
+        }
+    }
+    peer_send_mt_v(p, APPLE_MODERN_MT_STAGE_BREAK_TOUCH, x, y, 0, v);
 }
 
 /* Pointer position in sensor units: x to the right, y up from the bottom edge. */
@@ -568,7 +621,7 @@ static void peer_input_sync(DeviceState *dev)
     } else if (!p->touching && p->contact) {
         p->contact = false;
         timer_del(p->touch_timer);
-        peer_send_mt(p, APPLE_MODERN_MT_STAGE_BREAK_TOUCH, x, y, 0);
+        peer_lift_off(p, x, y);
         peer_send_mt(p, APPLE_MODERN_MT_STAGE_LINGER_IN_RANGE, x, y, MT_FRAME_NS);
         peer_send_mt(p, APPLE_MODERN_MT_STAGE_OUT_OF_RANGE, x, y, 2 * MT_FRAME_NS);
     }
