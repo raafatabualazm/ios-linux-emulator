@@ -9,6 +9,7 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
+#include "ui/input.h"
 #include "hw/arm/apple-silicon/modern-mtp-peer.h"
 
 #define PEER_QUEUE 16
@@ -98,6 +99,13 @@ struct AppleModernMtpPeer {
     PeerMsg *queue[PEER_QUEUE];
     unsigned queued;
     bool ready_sent;
+    /* Pointer-to-touch bridge: a primary-button drag is one finger. */
+    QemuInputHandlerState *input;
+    bool digitizer_frames;       /* encode reports for the generic descriptor */
+    bool frame_format_warned;
+    int abs_x, abs_y;            /* last pointer position, 0..INPUT_EVENT_ABS_MAX */
+    bool touching, touch_was_down;
+    uint64_t touch_frames;
     const uint8_t *hid_desc;     /* descriptor served for interface 1 */
     size_t hid_desc_len;
     unsigned frames_logged;
@@ -360,6 +368,94 @@ static void peer_arm(void *opaque, uint32_t thresh)
     }
 }
 
+/*
+ * Pointer events (VNC, QMP input-send-event, a tablet) become one finger: ABS X/Y
+ * move it and the left button is touch down / up. One input batch (a sync) yields
+ * one frame, so a drag produces a frame per pointer sample.
+ */
+static void peer_send_touch(AppleModernMtpPeer *p)
+{
+    uint8_t out[APPLE_MODERN_SCM_MAX_MSG];
+    uint8_t body[8];
+    size_t n, blen = 0;
+
+    if (!p->ready_sent) {
+        return;
+    }
+    if (!p->digitizer_frames) {
+        if (!p->frame_format_warned) {
+            p->frame_format_warned = true;
+            warn_report("apple-modern: mtp-peer has pointer input but no encoder for "
+                        "the firmware descriptor's opaque multitouch frame yet; "
+                        "use mtp-peer-descriptor=digitizer to exercise the path");
+        }
+        return;
+    }
+    {
+        /* Matches the generic descriptor: tip + contact id, then X and Y (0..2047). */
+        unsigned x = (uint64_t)p->abs_x * 2047 / INPUT_EVENT_ABS_MAX;
+        unsigned y = (uint64_t)p->abs_y * 2047 / INPUT_EVENT_ABS_MAX;
+
+        body[blen++] = p->touching ? 1 : 0;
+        stw_le_p(body + blen, x);
+        blen += 2;
+        stw_le_p(body + blen, y);
+        blen += 2;
+    }
+    n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 1, body, blen,
+                                true, 0, 0);
+    p->touch_frames++;
+    peer_queue(p, out, n, 0);
+}
+
+static AppleModernMtpPeer *peer_of(DeviceState *dev)
+{
+    return APPLE_MODERN_DOCKCHANNEL(dev)->peer_opaque;
+}
+
+static void peer_input_event(DeviceState *dev, QemuConsole *src, InputEvent *evt)
+{
+    AppleModernMtpPeer *p = peer_of(dev);
+    InputMoveEvent *move;
+    InputBtnEvent *btn;
+
+    switch (evt->type) {
+    case INPUT_EVENT_KIND_ABS:
+        move = evt->u.abs.data;
+        if (move->axis == INPUT_AXIS_X) {
+            p->abs_x = move->value;
+        } else if (move->axis == INPUT_AXIS_Y) {
+            p->abs_y = move->value;
+        }
+        break;
+    case INPUT_EVENT_KIND_BTN:
+        btn = evt->u.btn.data;
+        if (btn->button == INPUT_BUTTON_LEFT) {
+            p->touching = btn->down;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void peer_input_sync(DeviceState *dev)
+{
+    AppleModernMtpPeer *p = peer_of(dev);
+
+    if (p->touching || p->touch_was_down) {
+        peer_send_touch(p);
+    }
+    p->touch_was_down = p->touching;
+}
+
+static const QemuInputHandler peer_input_handler = {
+    .name = "apple-modern MTP touch",
+    .mask = INPUT_EVENT_MASK_BTN | INPUT_EVENT_MASK_ABS,
+    .event = peer_input_event,
+    .sync = peer_input_sync,
+};
+
 AppleModernMtpPeer *apple_modern_mtp_peer_new(AppleModernDockChannelState *dc,
                                               const char *descriptor)
 {
@@ -376,5 +472,8 @@ AppleModernMtpPeer *apple_modern_mtp_peer_new(AppleModernDockChannelState *dc,
     p->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, peer_timer, p);
     apple_modern_dockchannel_set_peer(dc, peer_tx, p);
     apple_modern_dockchannel_set_arm_cb(dc, peer_arm, p);
+    p->digitizer_frames = descriptor && !strcmp(descriptor, "digitizer");
+    p->input = qemu_input_handler_register(DEVICE(dc), &peer_input_handler);
+    qemu_input_handler_activate(p->input);
     return p;
 }
