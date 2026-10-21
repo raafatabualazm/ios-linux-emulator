@@ -14,7 +14,7 @@
 
 #define MAX_ADT_BYTES ((UINT64_C(16) << 20) + APPLE_MODERN_DT_SLACK)
 #define MAX_NORMAL_PROPS 48
-_Static_assert(APPLE_MODERN_MAX_REGIONS + 15 <= MAX_NORMAL_PROPS,
+_Static_assert(APPLE_MODERN_MAX_REGIONS + 16 <= MAX_NORMAL_PROPS,
                "normal metadata property budget");
 
 #ifdef APPLE_MODERN_LAYOUT_STANDALONE
@@ -55,6 +55,7 @@ typedef struct Tree {
     uint32_t aic_iack_offset;
     bool chosen_sepfw_absent;
     bool chosen_gpu_iouat_zero;
+    uint32_t chosen_chip_id;
     /*
      * dart-id generation. dart_pending and dart_value describe only the node
      * whose properties are being emitted: walk() sets them after reading the
@@ -208,7 +209,8 @@ static bool normal_property(const Tree *tree, const char *path,
                (tree->chosen_sepfw_absent &&
                 !strcmp(name, "sepfw-load-at-boot")) ||
                (tree->chosen_gpu_iouat_zero &&
-                !strcmp(name, "gpu-iouat"));
+                !strcmp(name, "gpu-iouat")) ||
+               (tree->chosen_chip_id && !strcmp(name, "chip-id"));
     }
     if (!strcmp(path, "/chosen/memory-map")) {
         for (size_t i = 0; i < tree->normal_count; i++) {
@@ -266,6 +268,12 @@ static bool emit_normal(Tree *tree, const char *path, Error **errp)
         if (tree->chosen_gpu_iouat_zero) {
             put32(bytes, 0);
             if (!property(tree, "gpu-iouat", bytes, 4, errp)) {
+                return false;
+            }
+        }
+        if (tree->chosen_chip_id) {
+            put32(bytes, tree->chosen_chip_id);
+            if (!property(tree, "chip-id", bytes, 4, errp)) {
                 return false;
             }
         }
@@ -416,7 +424,7 @@ static bool walk(Tree *tree, const char *parent, unsigned depth, Error **errp)
         cursor += size;
     }
     if (tree->output) {
-        size_t added = chosen ? (size_t)2 + tree->chosen_sepfw_absent + tree->chosen_gpu_iouat_zero :
+        size_t added = chosen ? (size_t)2 + tree->chosen_sepfw_absent + tree->chosen_gpu_iouat_zero + (tree->chosen_chip_id ? 1 : 0) :
                        map ? tree->normal_count : vram ? 1 : aic ? 1 : 0;
         added += override_nodes_at(tree, path);
         added += tree->dart_pending;
@@ -560,6 +568,8 @@ static void prepare_normal(Tree *tree, const AppleModernBootLayout *layout)
     for (size_t i = 0; i < sizeof(unused) / sizeof(unused[0]); i++) {
         add_normal(tree, unused[i], UINT64_MAX, UINT64_MAX);
     }
+    /* SEPFW is in layout->regions[] when sep-sim requested it; prepare_normal
+     * already emits every region name into /chosen/memory-map. */
     if (!layout->ramdisk_size) {
         add_normal(tree, "RAMDisk", UINT64_MAX, UINT64_MAX);
     }
@@ -795,6 +805,36 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     }
     mem_size = input->has_mte ? prepared.layout.dram_size / 32 * 31 :
                                prepared.layout.dram_size;
+    if (input->sep_fw_carveout_size) {
+        /*
+         * SEPFW as a normal boot-data region (t8030 pattern), extending
+         * topOfKernelData. Not an unmanaged memSize tail: that caused
+         * frame_release:rw_guard_release_shared nested panics on v6.
+         * Pages are already zero in guest RAM; sep-sim does not parse them.
+         */
+        uint64_t sep_size = (input->sep_fw_carveout_size +
+                             APPLE_MODERN_PAGE_SIZE - 1) &
+                            ~(APPLE_MODERN_PAGE_SIZE - 1);
+        uint64_t tokd = prepared.layout.top_of_kernel_data;
+
+        if (!sep_size ||
+            tokd - prepared.layout.dram_base > mem_size - sep_size) {
+            return fail(errp, "SEPFW boot-data region exceeds memSize");
+        }
+        if (prepared.layout.region_count >= APPLE_MODERN_MAX_REGIONS) {
+            return fail(errp, "SEPFW exceeds boot region capacity");
+        }
+        prepared.layout.sep_fw_carveout_physical = tokd;
+        prepared.layout.sep_fw_carveout_size = sep_size;
+        {
+            AppleModernBootRegion *r =
+                &prepared.layout.regions[prepared.layout.region_count++];
+            snprintf(r->name, sizeof(r->name), "SEPFW");
+            r->physical_address = tokd;
+            r->size = sep_size;
+        }
+        prepared.layout.top_of_kernel_data = tokd + sep_size;
+    }
     if (prepared.layout.framebuffer_size) {
         /*
          * Normal iBoot framebuffer handoff: reserve the final managed DRAM
@@ -880,6 +920,7 @@ bool apple_modern_boot_metadata_build(const AppleModernBootMetadataInput *input,
     tree.aic_iack_offset = input->aic_iack_offset;
     tree.chosen_sepfw_absent = input->chosen_sepfw_absent;
     tree.chosen_gpu_iouat_zero = input->chosen_gpu_iouat_zero;
+    tree.chosen_chip_id = input->chosen_chip_id;
     tree.assign_dart_ids = input->assign_dart_ids;
     tree.overrides = input->overrides;
     tree.override_count = input->override_count;

@@ -82,6 +82,13 @@ typedef struct AppleModernBootMetadataInput {
      * without breaking the framebuffer's own alignment check.
      */
     uint64_t gfx_carveout_size;
+    /*
+     * Optional SEPFW carveout (bytes); zero disables. Same shrink-memSize
+     * placement as gfx_carveout. sep-sim sets this so AppleSEPManager's
+     * fromPreload finds /chosen/memory-map SEPFW and Booter can drive the
+     * mailbox. Must be a multiple of APPLE_MODERN_FRAMEBUFFER_ALIGNMENT.
+     */
+    uint64_t sep_fw_carveout_size;
     /* Without a framebuffer reservation this retains the explicit ABI values.
      * Otherwise zero selects the derived text-console geometry; a nonzero
      * explicit description must exactly match that reserved framebuffer.
@@ -112,6 +119,12 @@ typedef struct AppleModernBootMetadataInput {
      * (see modern-adt-sgx.h).  Loader-owned /chosen; default off.
      */
     bool chosen_gpu_iouat_zero;
+    /*
+     * Publish /chosen "chip-id" = this u32 when nonzero. The served Darwin
+     * tree carries chip-id=0; AppleSEPBooter::SEPROMPanicBuffer REQUIREs a
+     * nonzero chip-id from chosen. T8140 / iPhone17,3 uses 0x8140.
+     */
+    uint32_t chosen_chip_id;
     /*
      * Optional property overrides. Every node must exist exactly once and the
      * (path, name) pairs must be unique. Nodes the loader already rewrites

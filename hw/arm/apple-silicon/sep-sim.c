@@ -199,6 +199,8 @@ enum {
     CONTROL_OP_SET_DMA_IN_SIZE = 31,
     CONTROL_OP_SET_DMA_OUT_SIZE = 32,
     CONTROL_OP_ERASE_INSTALL = 37,
+    /* iOS 27: AppleSEPControl::cmsgGET_ENTROPY_FOR_XNU_PRNG, sent when the AP logs "FIPS reseed started". */
+    CONTROL_OP_GET_ENTROPY_FOR_XNU_PRNG = 54,
     CONTROL_OP_L4_PANIC = 38,
     CONTROL_OP_SEP_OS_PANIC = 39,
 };
@@ -338,6 +340,76 @@ enum {
     BOOTSTRAP_OP_PANIC = 255,
 };
 
+static void apple_sep_sim_write_txm_channel(AppleSEPSimState *s, const char *when)
+{
+    size_t len = MIN(s->txm_sc_size, 0x4000);
+    g_autofree uint8_t *buf = NULL;
+    size_t hex_len = s->txm_sc_hex ? strlen(s->txm_sc_hex) / 2 : 0;
+
+    if (!s->txm_sc_base || !len || (!s->txm_sc_fill && !hex_len)) {
+        return;
+    }
+    buf = g_malloc0(len);
+    if (s->txm_sc_fill) {
+        memset(buf, s->txm_sc_fill & 0xff, len);
+    }
+    for (size_t i = 0; i < hex_len && i < len; i++) {
+        unsigned v = 0;
+        if (sscanf(s->txm_sc_hex + 2 * i, "%2x", &v) == 1) {
+            buf[i] = v;
+        }
+    }
+    if (apple_sep_sim_ool_write(s, s->txm_sc_base, buf, len,
+                                "TXM secure channel write")) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "TXM-SEP channel write (%s): %zu bytes (fill 0x%x, header %zu bytes)\n",
+                      when, len, s->txm_sc_fill, hex_len);
+    }
+}
+
+/*
+ * Observation only: read the TXM-owned secure channel page through the SEP DART and log what is in it. XNU asks TXM for
+ * that page (txm_secure_channel_shared_page), AppleSEPManager maps it at txm-secure-channel-base for the SEP, and TXM reads
+ * SEP-provided device state from it. What TXM itself leaves in the page tells us the layout it expects.
+ */
+static void apple_sep_sim_probe_txm_channel(AppleSEPSimState *s, const char *when)
+{
+    size_t len = MIN(s->txm_sc_size, 0x4000);
+    g_autofree uint8_t *buf = NULL;
+    size_t nonzero = 0, first = 0, last = 0;
+    char head[3 * 96 + 1];
+
+    if (!s->txm_sc_base || !len || s->txm_sc_probes >= 6) {
+        return;
+    }
+    s->txm_sc_probes++;
+    buf = g_malloc0(len);
+    if (!apple_sep_sim_ool_read(s, s->txm_sc_base, buf, len,
+                                "TXM secure channel probe")) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "TXM-SEP channel probe (%s): read of 0x%" PRIx64
+                      " failed\n", when, s->txm_sc_base);
+        return;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i]) {
+            if (!nonzero) {
+                first = i;
+            }
+            last = i;
+            nonzero++;
+        }
+    }
+    for (size_t i = 0; i < 96 && i < len; i++) {
+        snprintf(head + 3 * i, 4, "%02x ", buf[(nonzero ? first & ~15 : 0) + i]);
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "TXM-SEP channel probe (%s): iova 0x%" PRIx64 " size 0x%zx, "
+                  "%zu non-zero bytes (first at 0x%zx, last at 0x%zx); from 0x%zx: %s\n",
+                  when, s->txm_sc_base, len, nonzero, first, last,
+                  nonzero ? first & ~(size_t)15 : (size_t)0, head);
+}
+
 static void apple_sep_sim_set_ool_in_size(AppleSEPSimState *s, uint8_t ep,
                                           uint32_t size)
 {
@@ -445,8 +517,21 @@ static void apple_sep_sim_handle_control_msg(AppleSEPSimState *s,
         break;
     case CONTROL_OP_GET_SECURITY_MODE:
         qemu_log_mask(LOG_GUEST_ERROR, "EP_CONTROL: GET_SECURITY_MODE\n");
+        apple_sep_sim_write_txm_channel(s, "at GET_SECURITY_MODE");
+        apple_sep_sim_probe_txm_channel(s, "at GET_SECURITY_MODE");
         apple_sep_sim_control_send_ack(s, msg, 0, 3);
         break;
+    case CONTROL_OP_GET_ENTROPY_FOR_XNU_PRNG: {
+        /* One entropy word per request, returned in the ACK's data field. */
+        uint32_t word = 0;
+
+        qemu_guest_getrandom(&word, sizeof(word), NULL);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "EP_CONTROL: GET_ENTROPY_FOR_XNU_PRNG (tag %u)\n",
+                      msg->tag);
+        apple_sep_sim_control_send_ack(s, msg, 0, word);
+        break;
+    }
     case CONTROL_OP_SELF_TEST:
         qemu_log_mask(LOG_GUEST_ERROR, "EP_CONTROL: SELF_TEST\n");
         apple_sep_sim_control_send_ack(s, msg, 0, 0);
@@ -692,6 +777,8 @@ static void apple_sep_sim_handle_bootstrap_msg(AppleSEPSimState *s,
                                    0);
 
         apple_sep_sim_advertise_eps(s);
+        apple_sep_sim_write_txm_channel(s, "after IMG4");
+        apple_sep_sim_probe_txm_channel(s, "after IMG4");
         break;
     }
     case BOOTSTRAP_OP_OPCODE_16:
@@ -1433,6 +1520,10 @@ static const Property apple_sep_sim_properties[] = {
     DEFINE_PROP_BOOL("sks-fail-closed", AppleSEPSimState, sks_fail_closed,
                      false),
     DEFINE_PROP_UINT32("preboot", AppleSEPSimState, preboot, 0),
+    DEFINE_PROP_UINT64("txm-sc-base", AppleSEPSimState, txm_sc_base, 0),
+    DEFINE_PROP_UINT64("txm-sc-size", AppleSEPSimState, txm_sc_size, 0),
+    DEFINE_PROP_STRING("txm-sc-hex", AppleSEPSimState, txm_sc_hex),
+    DEFINE_PROP_UINT32("txm-sc-fill", AppleSEPSimState, txm_sc_fill, 0),
 };
 
 static void apple_sep_sim_class_init(ObjectClass *klass, const void *data)

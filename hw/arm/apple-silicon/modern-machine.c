@@ -166,7 +166,12 @@ struct AppleModernMachine {
     bool sep_mailbox;
     bool sep_sim;
     uint32_t sep_preboot;
+    uint32_t sep_chip_id;
+    bool sep_chip_id_set;
+    char *sep_txm_sc_hex;
+    uint32_t sep_txm_sc_fill;
     bool sep_dart;
+    char *sep_fw_filename;
     bool modern_pmgr;
     bool modern_mcc_dramcfg;
     uint32_t mcc_dramcfg_reset;
@@ -280,6 +285,7 @@ struct AppleModernMachine {
     DeviceState *gfx_mbox;
     /* gfx-asc reg[1], the ASCWrap core register. See map_gfx_core(). */
     MemoryRegion gfx_core_mr;
+    MemoryRegion sep_core_mr;
     /* Opt-in GPU/UAT carveout (unmanaged DRAM tail). See map_gfx_core()'s
      * sibling note and gfx_carveout_size in modern-boot-metadata.h. */
     bool gfx_carveout;
@@ -2916,6 +2922,70 @@ static bool map_sep_dart(AppleModernMachine *s, Error **errp)
  * hw/misc/apple-silicon/a7iop/regs-v6.c for the measured offset inventory and
  * for what remains a declared choice.
  */
+
+/*
+ * SEP reg[1]: ASCWrap CORE window (size 0x60000 on this board; win0 - 0x5B0000).
+ *
+ * Same attested gate as gfx-asc / dcp: AppleASCWrapV6 reads 64 bits at offset 0
+ * of this window and REQUIRE-panics "ASC firmware must be loaded by iBoot"
+ * (AppleASCWrapCommon.cpp, gate at 0xfffffff00856e31c) when bit 0 is clear.
+ * /arm-io/sep carries cpu-ctrl-filtered, which skips CPU_CTRL/idle, but the
+ * firmware-loaded check is still reachable from the shared initialize path.
+ * Unmapped, bit 0 reads 0 through the arm-io catch-all. DECLARE bit 0 = 1 so
+ * the wrapper starts; nothing is actually placed (sep-sim answers the mailbox
+ * protocol without sepOS).
+ */
+#define APPLE_MODERN_SEP_CORE_LOADED 1
+
+static uint64_t sep_core_read(void *opaque, hwaddr offset, unsigned size)
+{
+    uint64_t value = (offset == 0) ? APPLE_MODERN_SEP_CORE_LOADED : 0;
+
+    qemu_log_mask(LOG_UNIMP, "SEP-CORE read  +0x%02" PRIx64 " size %u -> 0x%"
+                  PRIx64 "\n", (uint64_t)offset, size, value);
+    return value;
+}
+
+static void sep_core_write(void *opaque, hwaddr offset, uint64_t value,
+                           unsigned size)
+{
+    qemu_log_mask(LOG_UNIMP, "SEP-CORE write +0x%02" PRIx64 " size %u value 0x%"
+                  PRIx64 "\n", (uint64_t)offset, size, value);
+}
+
+static const MemoryRegionOps sep_core_ops = {
+    .read = sep_core_read,
+    .write = sep_core_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .impl = { .min_access_size = 1, .max_access_size = 8 },
+};
+
+static bool map_sep_core(AppleModernMachine *s, const AppleModernBlob *reg,
+                         Error **errp)
+{
+    AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+    uint64_t offset = ldq_le_p(reg->data + 16);
+    uint64_t size = ldq_le_p(reg->data + 24);
+    uint64_t base;
+
+    if (!size || size > 0x100000) {
+        error_setg(errp, "modern SEP core window is out of range");
+        return false;
+    }
+    if (!arm_io_translate(dtree, offset, size, &base, errp)) {
+        return false;
+    }
+    memory_region_init_io(&s->sep_core_mr, NULL, &sep_core_ops, s,
+                          "apple-modern.sep-core", size);
+    memory_region_add_subregion(get_system_memory(), base, &s->sep_core_mr);
+    warn_report("apple-modern: SEP core window at 0x%" PRIx64 " size 0x%"
+                PRIx64 ", bit 0 of +0 DECLARED 1 so AppleASCWrapV6 does not "
+                "panic \"ASC firmware must be loaded by iBoot\"; no firmware "
+                "is actually placed", base, size);
+    return true;
+}
+
 static bool map_sep_mailbox(AppleModernMachine *s, Error **errp)
 {
     AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
@@ -3007,6 +3077,28 @@ static bool map_sep_mailbox(AppleModernMachine *s, Error **errp)
         if (s->sep_preboot) {
             qdev_prop_set_uint32(s->sep_mbox, "preboot", s->sep_preboot);
         }
+        {
+            AppleModernBlob sc_base, sc_size;
+
+            /* ADT: where the SEP sees the TXM-owned secure channel page. */
+            if (apple_modern_adt_property(dtree, "/arm-io/dart-sep",
+                                          "txm-secure-channel-base", &sc_base,
+                                          NULL) && sc_base.size == 8 &&
+                apple_modern_adt_property(dtree, "/arm-io/dart-sep",
+                                          "txm-secure-channel-size", &sc_size,
+                                          NULL) && sc_size.size == 8) {
+                qdev_prop_set_uint64(s->sep_mbox, "txm-sc-base",
+                                     ldq_le_p(sc_base.data));
+                qdev_prop_set_uint64(s->sep_mbox, "txm-sc-size",
+                                     ldq_le_p(sc_size.data));
+                if (s->sep_txm_sc_hex) {
+                    qdev_prop_set_string(s->sep_mbox, "txm-sc-hex", s->sep_txm_sc_hex);
+                }
+                if (s->sep_txm_sc_fill) {
+                    qdev_prop_set_uint32(s->sep_mbox, "txm-sc-fill", s->sep_txm_sc_fill);
+                }
+            }
+        }
     } else {
         s->sep_mbox = qdev_new(TYPE_APPLE_A7IOP);
         apple_a7iop_init(APPLE_A7IOP(s->sep_mbox), "SEP", size,
@@ -3044,6 +3136,14 @@ static bool map_sep_mailbox(AppleModernMachine *s, Error **errp)
      */
     sysbus_realize_and_unref(SYS_BUS_DEVICE(s->sep_mbox), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->sep_mbox), 0, base);
+    /*
+     * reg[1] is the ASCWrap core register window; bit 0 is the
+     * "firmware loaded by iBoot" gate. Without it AppleASCWrapV6SEP can
+     * REQUIRE-panic before AppleSEPManager ever sees a nub.
+     */
+    if (reg.size >= 32 && !map_sep_core(s, &reg, errp)) {
+        return false;
+    }
     error_free(local);
     warn_report("apple-modern: SEP %s at 0x%" PRIx64 " size 0x%" PRIx64
                 ", AIC inputs %u/%u/%u/%u (opt-in; the v6 register map is our "
@@ -3962,6 +4062,25 @@ static void modern_init(MachineState *machine)
     metadata_input.gfx_carveout_size = s->gfx_carveout ?
                                            APPLE_MODERN_FRAMEBUFFER_ALIGNMENT * 2 : 0;
     /*
+     * SEPFW carveout for sep-sim. AppleSEPFirmware::fromPreload REQUIREs
+     * /chosen/memory-map SEPFW (VA 0xfffffff0096108c8); without it Booter
+     * never touches the mailbox (v5/diag: all sep-sim MMIO counters stay 0
+     * after the reset ANNOUNCE). sepfw-absent deliberately skips this: the
+     * failfast path wants sepfw-load-at-boot=0 and no Booter dialogue.
+     * Size matches t8030's SEPFW_MAPPING_SIZE (16 MiB). Placed as a normal
+     * boot-data region extending topOfKernelData (not an unmanaged tail).
+     */
+    if (s->sep_sim && !s->sepfw_absent) {
+        metadata_input.sep_fw_carveout_size = 16 * MiB;
+        /*
+         * Served ADT has /chosen chip-id = 0. SEPROMPanicBuffer REQUIREs a
+         * nonzero chip-id (SEPROMPanicBuffer.cpp:32:
+         * entry = chosen->getProperty("chip-id"); _chip_id = *bytes).
+         * T8140 / d47ap (iPhone17,3) chip-id is 0x8140.
+         */
+        metadata_input.chosen_chip_id = s->sep_chip_id_set ? s->sep_chip_id : 0x8140;
+    }
+    /*
      * Publish the acknowledge offset even when modern-aic is off: XNU's
      * AppleInterruptControllerV3 requires the property regardless of whether
      * we model the controller, and panics without it. Zero is refused here
@@ -4034,6 +4153,14 @@ static void modern_init(MachineState *machine)
             overrides[override_count++] = flags[i];
         }
     }
+    /*
+     * Do NOT set pre-loaded/running on iop-sep-nub for sep-sim.
+     * Attested (v6b/v6c): with those flags Booter is skipped (iBoot already
+     * "started" SEP) but sep-sim only emits CONTROL_OP_NOTIFY_ALIVE after
+     * BOOT_IMG4, so "SEP/OS is alive" never happens and mailbox MMIO stays 0.
+     * SMC/DCP need the flags because their QEMU peers complete the RTKit
+     * handshake themselves; sep-sim needs the AP Booter dialogue instead.
+     */
     if (s->adt_compat_restore) {
         Error *groups_error = NULL;
         size_t before = override_count;
@@ -4300,6 +4427,57 @@ static void modern_init(MachineState *machine)
                     "gfx-handoff-base at this range)",
                     s->metadata.layout.gfx_carveout_size,
                     s->metadata.layout.gfx_carveout_physical);
+    }
+    if (s->metadata.layout.sep_fw_carveout_size) {
+        warn_report("apple-modern: SEPFW boot-data region 0x%" PRIx64 " bytes "
+                    "at 0x%" PRIx64 " published as /chosen/memory-map SEPFW "
+                    "(sep-sim; extends topOfKernelData — not an "
+                    "unmanaged memSize tail)",
+                    s->metadata.layout.sep_fw_carveout_size,
+                    s->metadata.layout.sep_fw_carveout_physical);
+        if (s->sep_fw_filename) {
+            gchar *data = NULL;
+            gsize len = 0;
+
+            if (!g_file_get_contents(s->sep_fw_filename, &data, &len, NULL)) {
+                error_report("apple-modern: sep-fw: cannot read '%s'",
+                             s->sep_fw_filename);
+                exit(EXIT_FAILURE);
+            }
+            if (!len || len > s->metadata.layout.sep_fw_carveout_size) {
+                error_report("apple-modern: sep-fw '%s' size %zu does not fit "
+                             "carveout 0x%" PRIx64,
+                             s->sep_fw_filename, (size_t)len,
+                             s->metadata.layout.sep_fw_carveout_size);
+                g_free(data);
+                exit(EXIT_FAILURE);
+            }
+            cpu_physical_memory_write(
+                s->metadata.layout.sep_fw_carveout_physical, data, len);
+            g_free(data);
+            warn_report("apple-modern: sep-fw loaded %zu bytes from '%s' into "
+                        "SEPFW carveout",
+                        (size_t)len, s->sep_fw_filename);
+        } else {
+            warn_report("apple-modern: sep-fw not set — SEPFW carveout remains "
+                        "zeros; pass sep-fw=/path/to/sepos.bin");
+        }
+    }
+    if (s->sep_sim && !s->sepfw_absent) {
+        AppleModernBlob sep_compat = { 0 };
+        AppleModernBlob dtree = { s->metadata.dtree, s->metadata.dtree_size };
+
+        if (apple_modern_adt_property(dtree, "/arm-io/sep", "compatible",
+                                      &sep_compat, NULL)) {
+            warn_report("apple-modern: /arm-io/sep compatible present (%zu bytes) "
+                        "for sep-sim; iop-sep-nub has NO pre-loaded/running "
+                        "(Booter must drive TZ0/IMG4 → NOTIFY_ALIVE)",
+                        (size_t)sep_compat.size);
+        } else {
+            error_report("apple-modern: sep-sim needs /arm-io/sep compatible "
+                         "(pass adt-compat-restore=...+sep)");
+            exit(EXIT_FAILURE);
+        }
     }
     if (s->boot_display && s->dcp_iop &&
         !strcmp(s->dcp_iop, APPLE_MODERN_DCP_IOP_NAME_V6_RESUMED)) {
@@ -5018,6 +5196,19 @@ ASSET_PROPERTY(ramdisk, ASSET_RAMDISK)
 ASSET_PROPERTY(cryptex_trustcache, ASSET_CRYPTEX_TC)
 #undef ASSET_PROPERTY
 
+static char *get_sep_fw_filename(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->sep_fw_filename);
+}
+static void set_sep_fw_filename(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    if (check_mutable(s, errp)) {
+        g_free(s->sep_fw_filename);
+        s->sep_fw_filename = g_strdup(value);
+    }
+}
+
 #define BOOL_PROPERTY(name, field) \
     static bool get_##name(Object *obj, Error **errp) \
     { return APPLE_MODERN_MACHINE(obj)->field; } \
@@ -5108,6 +5299,43 @@ BOOL_PROPERTY(disp0_pipe, disp0_pipe)
 BOOL_PROPERTY(prepare_only, prepare_only)
 BOOL_PROPERTY(mte, mte)
 #undef BOOL_PROPERTY
+
+static char *get_sep_txm_sc_hex(Object *obj, Error **errp)
+{
+    return g_strdup(APPLE_MODERN_MACHINE(obj)->sep_txm_sc_hex);
+}
+
+static void set_sep_txm_sc_hex(Object *obj, const char *value, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+
+    if (check_mutable(s, errp)) {
+        g_free(s->sep_txm_sc_hex);
+        s->sep_txm_sc_hex = g_strdup(value);
+    }
+}
+
+static void get_sep_chip_id(Object *obj, Visitor *visitor, const char *name,
+                            void *opaque, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    uint32_t value = s->sep_chip_id_set ? s->sep_chip_id : 0x8140;
+
+    visit_type_uint32(visitor, name, &value, errp);
+}
+
+static void set_sep_chip_id(Object *obj, Visitor *visitor, const char *name,
+                            void *opaque, Error **errp)
+{
+    AppleModernMachine *s = APPLE_MODERN_MACHINE(obj);
+    uint32_t value;
+
+    if (!check_mutable(s, errp) || !visit_type_uint32(visitor, name, &value, errp)) {
+        return;
+    }
+    s->sep_chip_id = value;
+    s->sep_chip_id_set = true;
+}
 
 static void get_display_geometry(Object *obj, Visitor *visitor, const char *name,
                                  void *opaque, Error **errp)
@@ -5384,6 +5612,20 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "sep-mailbox", get_sep_mailbox,
                                    set_sep_mailbox);
     object_class_property_add_bool(oc, "sep-sim", get_sep_sim, set_sep_sim);
+    object_class_property_add_str(oc, "sep-txm-sc-hex", get_sep_txm_sc_hex, set_sep_txm_sc_hex);
+    object_class_property_set_description(oc, "sep-txm-sc-hex",
+        "sep-sim diagnostic: hex bytes the simulated SEP writes at offset 0 of the TXM secure channel page");
+    object_class_property_add(oc, "sep-txm-sc-fill", "uint32",
+                              get_display_geometry, set_display_geometry,
+                              NULL, (void *)offsetof(AppleModernMachine, sep_txm_sc_fill));
+    object_class_property_set_description(oc, "sep-txm-sc-fill",
+        "sep-sim diagnostic: 0x100|byte fills the TXM secure channel page with that byte before the header (0 = off)");
+    object_class_property_add(oc, "sep-chip-id", "uint32",
+                              get_sep_chip_id, set_sep_chip_id,
+                              NULL, NULL);
+    object_class_property_set_description(oc, "sep-chip-id",
+        "sep-sim only: /chosen chip-id served to the guest (default 0x8140, which AppleSEPBooter requires; 0 leaves the "
+        "distribution tree's 0). Diagnostic: lets TXM see an unknown platform");
     object_class_property_add(oc, "sep-preboot", "uint32",
                               get_display_geometry, set_display_geometry,
                               NULL, (void *)offsetof(AppleModernMachine,
@@ -5394,6 +5636,10 @@ static void modern_class_init(ObjectClass *oc, const void *data)
         "ACTIVE status, 3 ACTIVE status only) instead of waiting for the "
         "bootstrap dialogue; declared emulator behaviour, default 0");
     object_class_property_add_bool(oc, "sep-dart", get_sep_dart, set_sep_dart);
+    object_class_property_add_str(oc, "sep-fw", get_sep_fw_filename,
+                                  set_sep_fw_filename);
+    object_class_property_set_description(oc, "sep-fw",
+        "Host path to SEP firmware bytes copied into the SEPFW carveout when sep-sim is on");
     object_class_property_add_bool(oc, "modern-pmgr", get_modern_pmgr,
                                    set_modern_pmgr);
     object_class_property_add_bool(oc, "modern-mcc-dramcfg", get_modern_mcc_dramcfg,

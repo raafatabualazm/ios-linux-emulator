@@ -73,6 +73,21 @@ struct AppleSEPSimState {
      *   3: announce ACTIVE only (no NOTIFY_ALIVE, no endpoints): observation.
      */
     uint32_t preboot;
+    /*
+     * TXM-owned secure channel page as the ADT describes it on the SEP DART
+     * (txm-secure-channel-base / -size): the IOVA and length at which the SEP
+     * sees the page TXM reads SEP-provided device state from. Zero disables
+     * the diagnostic probe below. Read-only observation of what TXM leaves there.
+     */
+    uint64_t txm_sc_base;
+    uint64_t txm_sc_size;
+    unsigned txm_sc_probes;
+    /*
+     * Diagnostic writer for the same page, for black-box experiments on what TXM accepts: txm_sc_hex is a hex string
+     * written at page offset 0, txm_sc_fill (0x100 | byte value, or 0 for none) fills the rest first. Both default off.
+     */
+    char *txm_sc_hex;
+    uint32_t txm_sc_fill;
     uint32_t status;
     /* Read-only host diagnostics; never contain message payloads or keys. */
     uint64_t diagnostic_dispatches;
