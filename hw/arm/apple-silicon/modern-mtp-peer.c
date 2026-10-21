@@ -35,6 +35,7 @@
 #define MT_SURFACE_W 10000
 #define MT_SURFACE_H 7500
 #define MT_FRAME_NS (16 * SCALE_MS)
+#define MT_MIN_SPACING_NS (8 * SCALE_MS)   /* a real controller reports at 60 to 120 Hz */
 #define MT_HIST 16               /* contact samples kept for the lift-off velocity */
 #define MT_LIFT_WINDOW_MS 100    /* lift-off velocity is averaged over this window */
 
@@ -118,6 +119,7 @@ struct AppleModernMtpPeer {
     uint32_t mt_last_ms;         /* last timestamp used; strictly increasing */
     int mt_x, mt_y;              /* last position reported, sensor units */
     uint32_t mt_pos_ms;          /* timestamp that position was reported at */
+    int64_t mt_last_due;         /* virtual ns the latest frame is due at */
     struct { uint32_t ms; int x, y; } mt_hist[MT_HIST];   /* recent contact samples */
     unsigned mt_hist_n;
     uint64_t touch_frames;
@@ -373,11 +375,23 @@ static void peer_send_mt_v(AppleModernMtpPeer *p, uint8_t stage, int x, int y,
 {
     uint8_t rep[APPLE_MODERN_MT_FRAME_LEN];
     uint8_t out[APPLE_MODERN_SCM_MAX_MSG];
-    int64_t due = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + delay_ns;
-    uint32_t ms = due / SCALE_MS + 1;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t due = now + delay_ns;
+    uint32_t ms;
     int64_t vx = 0, vy = 0;
     size_t n;
 
+    /*
+     * Frames are never closer than MT_MIN_SPACING_NS: a pointer release can land
+     * a millisecond after the last periodic frame, and the touch stack's
+     * debounce treats frames that close together as unstable.
+     */
+    if (due < p->mt_last_due + MT_MIN_SPACING_NS) {
+        due = p->mt_last_due + MT_MIN_SPACING_NS;
+    }
+    delay_ns = due - now;
+    p->mt_last_due = due;
+    ms = due / SCALE_MS + 1;
     if (ms <= p->mt_last_ms) {
         ms = p->mt_last_ms + 1;
     }
