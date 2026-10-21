@@ -34,6 +34,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'modern-dcp-asc.c',
     'modern-smc.c',
     'modern-dockchannel.c',
+    'modern-mtp-codec.c',
     'modern-mtp-peer.c',
     'modern-dcp-iop.c',
     'modern-pmgr-storage.c',

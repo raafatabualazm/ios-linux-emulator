@@ -22,22 +22,9 @@
 #define HW_ARM_APPLE_SILICON_MODERN_MTP_PEER_H
 
 #include "hw/arm/apple-silicon/modern-dockchannel.h"
-
-#define APPLE_MODERN_SCM_TYPE_CONTROL 0x11
-#define APPLE_MODERN_SCM_TYPE_REPORT  0x12
-#define APPLE_MODERN_SCM_HDR_LEN      8
-#define APPLE_MODERN_SCM_SUB_LEN      8
-#define APPLE_MODERN_SCM_MAX_MSG      0x1000
+#include "hw/arm/apple-silicon/modern-mtp-codec.h"
 
 typedef struct AppleModernMtpPeer AppleModernMtpPeer;
-
-/* Encode one message into out (at least APPLE_MODERN_SCM_MAX_MSG bytes); returns its length. */
-size_t apple_modern_scm_encode(uint8_t *out, uint8_t type, uint8_t transfer_id,
-                               uint8_t iface, const uint8_t *payload,
-                               size_t payload_len, bool with_subheader,
-                               uint8_t flags, uint32_t retcode);
-/* Checksum of the 4-byte-multiple body that precedes the checksum word. */
-uint32_t apple_modern_scm_checksum(const uint8_t *body, size_t len);
 
 /* Attach a peer to dc and start it; the machine owns the result for its lifetime. */
 /* descriptor: "digitizer" serves a generic Digitizer/Touch Screen descriptor, anything else the firmware's own. */

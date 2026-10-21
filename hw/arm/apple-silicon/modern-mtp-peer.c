@@ -35,14 +35,6 @@
 #define MT_SURFACE_W 10000
 #define MT_SURFACE_H 7500
 #define MT_FRAME_NS (16 * SCALE_MS)
-#define MT_REPORT_ID 0x44
-#define MT_HDR_LEN 28
-#define MT_PATH_LEN 20
-#define MT_STAGE_MAKE 3
-#define MT_STAGE_TOUCHING 4
-#define MT_STAGE_BREAK 5
-#define MT_STAGE_LINGER 6
-#define MT_STAGE_OUT 7
 
 /*
  * The HID report descriptor the real MTP firmware serves for the multi-touch
@@ -138,47 +130,6 @@ struct AppleModernMtpPeer {
     unsigned frames_logged;
     uint64_t ap_frames, dev_frames;
 };
-
-uint32_t apple_modern_scm_checksum(const uint8_t *body, size_t len)
-{
-    uint32_t sum = 0;
-
-    for (size_t i = 0; i + 4 <= len; i += 4) {
-        sum += ldl_le_p(body + i);
-    }
-    return ~sum;
-}
-
-size_t apple_modern_scm_encode(uint8_t *out, uint8_t type, uint8_t transfer_id,
-                               uint8_t iface, const uint8_t *payload,
-                               size_t payload_len, bool with_subheader,
-                               uint8_t flags, uint32_t retcode)
-{
-    size_t length = 0, body;
-
-    if (with_subheader) {
-        length = (APPLE_MODERN_SCM_SUB_LEN + payload_len + 3) & ~(size_t)3;
-        length = MAX(length, (size_t)APPLE_MODERN_SCM_SUB_LEN);
-    }
-    body = APPLE_MODERN_SCM_HDR_LEN + length;
-    g_assert(body + 4 <= APPLE_MODERN_SCM_MAX_MSG);
-    memset(out, 0, body + 4);
-    out[0] = APPLE_MODERN_SCM_HDR_LEN;
-    out[1] = type;
-    stw_le_p(out + 2, length);
-    out[4] = transfer_id;
-    out[5] = iface;
-    if (with_subheader) {
-        out[8] = flags;
-        stw_le_p(out + 10, payload_len);
-        stl_le_p(out + 12, retcode);
-        if (payload_len) {
-            memcpy(out + 16, payload, payload_len);
-        }
-    }
-    stl_le_p(out + body, apple_modern_scm_checksum(out, body));
-    return body + 4;
-}
 
 static void peer_arm_timer(AppleModernMtpPeer *p)
 {
@@ -391,32 +342,15 @@ static void peer_arm(void *opaque, uint32_t thresh)
 {
     AppleModernMtpPeer *p = opaque;
     uint8_t out[APPLE_MODERN_SCM_MAX_MSG];
-    uint8_t pkt[22 + 4 + 64 + 6];
-    size_t n, k = 0;
+    uint8_t pkt[APPLE_MODERN_MT_INIT_MAX];
+    size_t n, k;
 
     if (p->init_sent) {
         return;
     }
     p->init_sent = true;
-    g_assert(p->hid_desc_len <= 64);
-    memset(pkt, 0, sizeof(pkt));
-    pkt[k++] = 0xf0;
-    stw_le_p(pkt + k, 1);
-    k += 2;
-    pkt[k++] = 1;
-    memcpy(pkt + k, "multi-touch", 11);
-    k += 16;
-    stw_le_p(pkt + k, 0);                         /* more packets: none */
-    k += 2;
-    stw_le_p(pkt + k, 0);                         /* section 0: HID descriptor */
-    stw_le_p(pkt + k + 2, p->hid_desc_len);
-    k += 4;
-    memcpy(pkt + k, p->hid_desc, p->hid_desc_len);
-    k += p->hid_desc_len;
-    stw_le_p(pkt + k, 4);                         /* section 4: ready status */
-    stw_le_p(pkt + k + 2, 2);
-    stw_le_p(pkt + k + 4, 0);
-    k += 6;
+    k = apple_modern_mt_init_packet(pkt, 1, "multi-touch", p->hid_desc,
+                                    p->hid_desc_len);
     n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 0, pkt, k,
                                 true, 0, 0);
     peer_queue(p, out, n, PEER_READY_DELAY_NS);
@@ -427,14 +361,13 @@ static void peer_arm(void *opaque, uint32_t thresh)
  * when the frame is due on the virtual clock; its timestamp is that instant in
  * milliseconds, forced to be non-zero and strictly increasing (the library
  * rejects 0 and backward time). Velocity is the displacement since the previous
- * frame in 1/8 mm/s: dx[0.01 mm] * 80 / dt[ms].
+ * frame in the report's unit, 1/8 mm/s.
  */
 static void peer_send_mt(AppleModernMtpPeer *p, uint8_t stage, int x, int y,
                          int64_t delay_ns)
 {
-    uint8_t rep[MT_HDR_LEN + MT_PATH_LEN] = { 0 };
+    uint8_t rep[APPLE_MODERN_MT_FRAME_LEN];
     uint8_t out[APPLE_MODERN_SCM_MAX_MSG];
-    uint8_t *path = rep + MT_HDR_LEN;
     int64_t due = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + delay_ns;
     uint32_t ms = due / SCALE_MS + 1;
     int64_t vx = 0, vy = 0;
@@ -443,35 +376,16 @@ static void peer_send_mt(AppleModernMtpPeer *p, uint8_t stage, int x, int y,
     if (ms <= p->mt_last_ms) {
         ms = p->mt_last_ms + 1;
     }
-    if (stage != MT_STAGE_MAKE && ms > p->mt_pos_ms) {
-        vx = (int64_t)(x - p->mt_x) * 80 / (int64_t)(ms - p->mt_pos_ms);
-        vy = (int64_t)(y - p->mt_y) * 80 / (int64_t)(ms - p->mt_pos_ms);
+    if (stage != APPLE_MODERN_MT_STAGE_MAKE_TOUCH && ms > p->mt_pos_ms) {
+        vx = apple_modern_mt_velocity(x - p->mt_x, ms - p->mt_pos_ms);
+        vy = apple_modern_mt_velocity(y - p->mt_y, ms - p->mt_pos_ms);
     }
     p->mt_last_ms = ms;
     p->mt_pos_ms = ms;
     p->mt_x = x;
     p->mt_y = y;
 
-    rep[0] = MT_REPORT_ID;
-    rep[1] = p->mt_frame++;
-    rep[2] = MT_HDR_LEN;
-    rep[3] = 0;                         /* header version */
-    stl_le_p(rep + 4, ms);
-    rep[16] = 1;                        /* path count */
-    rep[17] = MT_PATH_LEN;              /* path stride */
-    path[0] = 1;                        /* path id */
-    path[1] = stage;
-    path[2] = 1;                        /* finger id */
-    path[3] = 1;                        /* hand id */
-    stw_le_p(path + 4, x);
-    stw_le_p(path + 6, y);
-    stw_le_p(path + 8, (uint16_t)CLAMP(vx, INT16_MIN, INT16_MAX));
-    stw_le_p(path + 10, (uint16_t)CLAMP(vy, INT16_MIN, INT16_MAX));
-    stw_le_p(path + 12, 660);           /* major radius, 0.01 mm */
-    stw_le_p(path + 14, 580);           /* minor radius */
-    stw_le_p(path + 16, 19317);         /* angle, units of pi/32768 */
-    stw_le_p(path + 18, 100);           /* zTotal, /256 */
-
+    apple_modern_mt_frame(rep, p->mt_frame++, ms, stage, x, y, vx, vy);
     n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 1, rep,
                                 sizeof(rep), true, 0, 0);
     p->touch_frames++;
@@ -495,7 +409,7 @@ static void peer_touch_tick(void *opaque)
         return;
     }
     peer_pointer_sensor(p, &x, &y);
-    peer_send_mt(p, MT_STAGE_TOUCHING, x, y, 0);
+    peer_send_mt(p, APPLE_MODERN_MT_STAGE_TOUCHING, x, y, 0);
     timer_mod(p->touch_timer,
               qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + MT_FRAME_NS);
 }
@@ -528,9 +442,9 @@ static void peer_gesture_tick(void *opaque)
         p->abs_x = p->gesture_x1;
         p->abs_y = p->gesture_y1;
         peer_pointer_sensor(p, &x, &y);
-        peer_send_mt(p, MT_STAGE_BREAK, x, y, 0);
-        peer_send_mt(p, MT_STAGE_LINGER, x, y, MT_FRAME_NS);
-        peer_send_mt(p, MT_STAGE_OUT, x, y, 2 * MT_FRAME_NS);
+        peer_send_mt(p, APPLE_MODERN_MT_STAGE_BREAK_TOUCH, x, y, 0);
+        peer_send_mt(p, APPLE_MODERN_MT_STAGE_LINGER_IN_RANGE, x, y, MT_FRAME_NS);
+        peer_send_mt(p, APPLE_MODERN_MT_STAGE_OUT_OF_RANGE, x, y, 2 * MT_FRAME_NS);
         p->gesture_on = false;
         p->contact = false;
         return;
@@ -540,7 +454,7 @@ static void peer_gesture_tick(void *opaque)
     p->abs_x = ax;
     p->abs_y = ay;
     peer_pointer_sensor(p, &x, &y);
-    peer_send_mt(p, k == 0 ? MT_STAGE_MAKE : MT_STAGE_TOUCHING, x, y, 0);
+    peer_send_mt(p, k == 0 ? APPLE_MODERN_MT_STAGE_MAKE_TOUCH : APPLE_MODERN_MT_STAGE_TOUCHING, x, y, 0);
     p->gesture_tick++;
     timer_mod(p->gesture_timer, p->gesture_t0 + (int64_t)p->gesture_tick * MT_FRAME_NS);
 }
@@ -643,15 +557,15 @@ static void peer_input_sync(DeviceState *dev)
     peer_pointer_sensor(p, &x, &y);
     if (p->touching && !p->contact) {
         p->contact = true;
-        peer_send_mt(p, MT_STAGE_MAKE, x, y, 0);
+        peer_send_mt(p, APPLE_MODERN_MT_STAGE_MAKE_TOUCH, x, y, 0);
         timer_mod(p->touch_timer,
                   qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + MT_FRAME_NS);
     } else if (!p->touching && p->contact) {
         p->contact = false;
         timer_del(p->touch_timer);
-        peer_send_mt(p, MT_STAGE_BREAK, x, y, 0);
-        peer_send_mt(p, MT_STAGE_LINGER, x, y, MT_FRAME_NS);
-        peer_send_mt(p, MT_STAGE_OUT, x, y, 2 * MT_FRAME_NS);
+        peer_send_mt(p, APPLE_MODERN_MT_STAGE_BREAK_TOUCH, x, y, 0);
+        peer_send_mt(p, APPLE_MODERN_MT_STAGE_LINGER_IN_RANGE, x, y, MT_FRAME_NS);
+        peer_send_mt(p, APPLE_MODERN_MT_STAGE_OUT_OF_RANGE, x, y, 2 * MT_FRAME_NS);
     }
 }
 
