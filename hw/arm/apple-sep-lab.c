@@ -16,6 +16,8 @@
 #include "qemu/module.h"
 #include "qemu/units.h"
 #include "hw/boards.h"
+#include "hw/irq.h"
+#include "hw/qdev-core.h"
 #include "hw/loader.h"
 #include "migration/blocker.h"
 #include "system/address-spaces.h"
@@ -88,8 +90,11 @@ struct AppleSEPLabState {
     bool seprom;
     MemoryRegion carveout;      /* SEP DRAM the kernel allocates page tables in */
     MemoryRegion kram;          /* SEP kernel RAM region at 0x1e40000000 (page tables) */
+    qemu_irq sep_irq;           /* the SEP cpu's IRQ input (ARM_CPU_IRQ), host-pulseable */
     MemoryRegion cfg0800;       /* memory-config regs 0x2a0800xxx as RAM        */
     MemoryRegion cfg0c40;       /* memory-config regs 0x2a0c40xxx as RAM        */
+    MemoryRegion fuse;          /* SEP security-fuse shadow at 0x2e42c8000      */
+    MemoryRegion sepmmio;       /* broad SEP MMIO swath 0x2a2000000 as pokeable RAM */
     Error *migration_blocker;
 };
 
@@ -316,6 +321,29 @@ static void sep_lab_init(MachineState *machine)
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, 0x2a0c40000ULL,
                                             &s->cfg0c40, 0);
+        /* SEP security-fuse shadow. sepOS's secfuse init (image 0x8d80) maps
+         * PA 0x2e42c8000 (16 KiB) and asserts (secfuse.c:52, panic thunk
+         * 0xa23c) that fuse words [0] and [1] each equal one of two hardcoded
+         * sentinels built at image 0x8d38: 0xa55ac33c or 0xa050c030. Back it as
+         * RAM and seed the sentinels so sepOS proceeds; remaining fuse fields
+         * are discovered by iteration (gdb pokes this RAM). */
+        memory_region_init_ram(&s->fuse, NULL, "sep-fuse", 0x10000,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, 0x2e42c8000ULL,
+                                            &s->fuse, 0);
+        {
+            uint32_t *fz = (uint32_t *)memory_region_get_ram_ptr(&s->fuse);
+            fz[0] = 0xa55ac33c;
+            fz[1] = 0xa55ac33c;
+        }
+        /* Broad SEP MMIO swath backed as RAM so the platform register blocks
+         * sepOS's sep64 init reads (e.g. the memory-config block at 0x2a2400000,
+         * mapped +0x4810.. returning a region base/size with a 0xfe type tag)
+         * can be seeded and iterated with gdb without a rebuild per register. */
+        memory_region_init_ram(&s->sepmmio, NULL, "sep-mmio", 0x1000000,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, 0x2a2000000ULL,
+                                            &s->sepmmio, 0);
         memory_region_init_ram(&s->kram, NULL, "sep-kram", SEP_KRAM_SIZE,
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, SEP_KRAM_BASE,
@@ -351,10 +379,19 @@ static void sep_lab_init(MachineState *machine)
     if (s->discover) {
         object_property_set_bool(OBJECT(s->cpu), "apple-modern-sep", true,
                                  &error_fatal);
+        /* Apple's SEP runs on a 24 MHz timebase. sepOS's timer init (image
+         * 0x8e58) reads CNTFRQ_EL0 and panics (timer.c:19, thunk 0xa24c) unless
+         * it is exactly 24000000; the platform/SEPROM programs it before sepOS
+         * runs, so model it on the lab CPU. */
+        object_property_set_int(OBJECT(s->cpu), "cntfrq", 24000000,
+                                &error_fatal);
     }
     object_property_set_link(OBJECT(s->cpu), "memory",
                              OBJECT(&s->private_memory), &error_fatal);
     qdev_realize(DEVICE(s->cpu), NULL, &error_fatal);
+    /* The SEP cpu's IRQ input, so a mailbox doorbell (or the x-irq test trigger)
+     * can wake sepOS from its WFE mailbox-wait. */
+    s->sep_irq = qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_IRQ);
     qemu_register_reset(sep_lab_reset, s);
     rom_add_blob_fixed("sep-lab.raw-image", image, image_size, 0);
     error_setg(&s->migration_blocker,
@@ -406,6 +443,24 @@ static bool sep_lab_get_discover(Object *obj, Error **errp)
 static void sep_lab_set_discover(Object *obj, bool value, Error **errp)
 {
     APPLE_SEP_LAB(obj)->discover = value;
+}
+
+/* Host-only IRQ trigger (QMP qom-set x-irq=1/0): raise/lower the SEP cpu's IRQ
+ * line to wake sepOS from its WFE mailbox-wait. NOT a SEP wire operation; a
+ * reconnaissance aid until the real ASC-v6 mailbox drives this line. */
+static char *sep_lab_get_irq(Object *obj, Error **errp)
+{
+    return g_strdup("");
+}
+
+static void sep_lab_set_irq(Object *obj, const char *value, Error **errp)
+{
+    AppleSEPLabState *s = APPLE_SEP_LAB(obj);
+    if (!s->sep_irq) {
+        error_setg(errp, "x-irq is available only after machine init");
+        return;
+    }
+    qemu_set_irq(s->sep_irq, value && value[0] && value[0] != '0');
 }
 
 static bool sep_lab_get_seprom(Object *obj, Error **errp)
@@ -488,6 +543,11 @@ static void sep_lab_class_init(ObjectClass *oc, const void *data)
                                   sep_lab_set_ap_probe);
     object_class_property_set_description(oc, "x-ap-probe",
         "Host-only debugger read of an AP window; NOT a SEP wire operation");
+    object_class_property_add_str(oc, "x-irq", sep_lab_get_irq,
+                                  sep_lab_set_irq);
+    object_class_property_set_description(oc, "x-irq",
+        "Host-only: set 1/0 to raise/lower the SEP cpu IRQ (wake the WFE); not a "
+        "SEP wire op. Placeholder until the ASC-v6 mailbox drives this line.");
     object_class_property_add_bool(oc, "discover", sep_lab_get_discover,
                                    sep_lab_set_discover);
     object_class_property_set_description(oc, "discover",
