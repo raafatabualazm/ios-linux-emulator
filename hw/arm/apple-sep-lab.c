@@ -213,12 +213,53 @@ static const MemoryRegionOps sep_lab_ops = {
     },
 };
 
+
+/* Auto-seed the lab-proven SEPROM handoff so a seprom=on boot needs no gdb
+ * pokes for BPSE / cfg / fuse / region / boot-role. Same contract as
+ * modern-sep-core's sep_core_seed_handoff. Synthetic identity. */
+static void sep_lab_seed_handoff(AppleSEPLabState *s)
+{
+    uint32_t *sram, *cfg0800, *cfg0c40, *sepmmio;
+
+    if (!s->seprom) {
+        return;
+    }
+    sram = memory_region_get_ram_ptr(&s->sram);
+    {
+        uint32_t *bpse = (uint32_t *)((uint8_t *)sram +
+                                      (0x2a0210000ULL - 0x2a0200000ULL));
+        bpse[0] = 0x53455042;
+        bpse[2] = 1;
+        bpse[0x70 / 4] = 0x528000;
+    }
+    cfg0800 = memory_region_get_ram_ptr(&s->cfg0800);
+    cfg0800[0x408 / 4] = 0x2a3fff;
+    cfg0800[0x410 / 4] = 0;
+    cfg0800[0x418 / 4] = 0;
+    cfg0c40 = memory_region_get_ram_ptr(&s->cfg0c40);
+    cfg0c40[0x180 / 4] = 4;
+    cfg0c40[0x1a0 / 4] = 0x4000;
+    /* Fuse already seeded at init; re-seed in case of soft reset wipe. */
+    {
+        uint32_t *fz = (uint32_t *)memory_region_get_ram_ptr(&s->fuse);
+        fz[0] = 0xa55ac33c;
+        fz[1] = 0xa55ac33c;
+    }
+    sepmmio = memory_region_get_ram_ptr(&s->sepmmio);
+    sepmmio[0x404810 / 4] = 0x040000fe;
+    sepmmio[0x404814 / 4] = 0x10000000;
+    /* boot-role = BPSE|1 (cold build path); ready bit stays 1. */
+    s->cpu->env.apple_modern_sep_store[14] = 0x2a0210000ULL | 1ULL;
+    s->cpu->env.apple_modern_sep_store[13] = 1ULL;
+}
+
 static void sep_lab_reset(void *opaque)
 {
     AppleSEPLabState *s = opaque;
 
     cpu_reset(CPU(s->cpu));
     cpu_set_pc(CPU(s->cpu), s->entry);
+    sep_lab_seed_handoff(s);
     s->faulted = false;
     s->reset_generation++;
     sep_lab_trace_reset(s);
