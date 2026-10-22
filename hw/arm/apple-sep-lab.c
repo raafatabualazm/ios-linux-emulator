@@ -15,6 +15,7 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
+#include "qemu/timer.h"
 #include "hw/boards.h"
 #include "hw/irq.h"
 #include "hw/qdev-core.h"
@@ -99,8 +100,34 @@ struct AppleSEPLabState {
                                  * tagged record blob SEPROM loads (sep64 0x8f70) */
     MemoryRegion trap;          /* DEBUG: MMIO trap over image page @0x1e40074000 */
     uint8_t trapbuf[0x4000];    /* DEBUG: shadow of that image page              */
+    /*
+     * SEP-private timer + KIC claim window (default off; property sep-timer=on,
+     * requires seprom). Reversed from sepOS j410 24A437:
+     *   timer @PA 0x2a0e40000 (kernel VA [0x20b28]):
+     *     +0x00 CTRL   0x101 = enable|irq-enable (idle loop 0xd3fc), 0 = stop
+     *     +0x08 STAT   W1C; kernel writes 3 to ack (0x10650)
+     *     +0x18 COUNT  one-shot reload in 24 MHz ticks (0x249f00 = 100 ms)
+     *   KIC @PA 0x2a2400000 (kernel VA [0x20b68]); IRQ entry 0x7150 reads
+     *     +0x818 EVENT: [9:0] irq, [18:16] type. type 7 + bit0 set + bit3 clear
+     *     dispatches the kernel timer tick 0xd458 (0x7198/0x719c/0x71cc).
+     *     Read claims the event (lowers the cpu IRQ). Everything else in the
+     *     KIC page stays on the sepmmio RAM swath.
+     */
+    bool sep_timer;
+    MemoryRegion timer_mr;
+    MemoryRegion kic_mr;
+    QEMUTimer *timer;
+    uint32_t t_ctrl, t_stat, t_count;
+    bool t_pending;
+    uint64_t t_fires, t_claims;
     Error *migration_blocker;
 };
+
+#define SEP_TIMER_PA   0x2a0e40000ULL
+#define SEP_KIC_EVT_PA 0x2a2400800ULL   /* window covers KIC +0x800..+0x8ff */
+#define SEP_TIMER_HZ   24000000ULL
+#define SEP_KIC_TIMER_EVENT 0x00070001u /* type 7, bit0 valid, bit3 clear */
+static void sep_lab_init_timer(AppleSEPLabState *s);
 
 /* SEP DRAM carveout for seprom mode (point the memory-config regs here). */
 #define SEP_CARVEOUT_BASE 0x2a4000000ULL
@@ -601,6 +628,7 @@ static void sep_lab_init(MachineState *machine)
     /* The SEP cpu's IRQ input, so a mailbox doorbell (or the x-irq test trigger)
      * can wake sepOS from its WFE mailbox-wait. */
     s->sep_irq = qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_IRQ);
+    sep_lab_init_timer(s);
     qemu_register_reset(sep_lab_reset, s);
     rom_add_blob_fixed("sep-lab.raw-image", image, image_size, 0);
     error_setg(&s->migration_blocker,
@@ -670,6 +698,146 @@ static void sep_lab_set_irq(Object *obj, const char *value, Error **errp)
         return;
     }
     qemu_set_irq(s->sep_irq, value && value[0] && value[0] != '0');
+}
+
+
+static void sep_timer_update_irq(AppleSEPLabState *s)
+{
+    qemu_set_irq(s->sep_irq, s->t_pending);
+}
+
+static void sep_timer_fire(void *opaque)
+{
+    AppleSEPLabState *s = opaque;
+    if (!(s->t_ctrl & 1)) {
+        return;
+    }
+    s->t_stat |= 1;
+    s->t_pending = true;
+    s->t_fires++;
+    if (s->t_fires <= 8 || !(s->t_fires % 100)) {
+        error_report("SEP timer: fire #%" PRIu64 " (ctrl=0x%x count=0x%x)",
+                     s->t_fires, s->t_ctrl, s->t_count);
+    }
+    sep_timer_update_irq(s);
+}
+
+static void sep_timer_arm(AppleSEPLabState *s)
+{
+    uint64_t ticks = s->t_count ? s->t_count : 1;
+    int64_t ns = muldiv64(ticks, NANOSECONDS_PER_SECOND, SEP_TIMER_HZ);
+    timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ns);
+}
+
+static uint64_t sep_timer_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+    switch (off) {
+    case 0x00: return s->t_ctrl;
+    case 0x08: return s->t_stat;
+    case 0x18: return s->t_count;
+    default:   return 0;
+    }
+}
+
+static void sep_timer_write(void *opaque, hwaddr off, uint64_t val,
+                            unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+    switch (off) {
+    case 0x00:
+        s->t_ctrl = val;
+        if (val & 1) {
+            sep_timer_arm(s);
+        } else {
+            timer_del(s->timer);
+        }
+        break;
+    case 0x08:
+        s->t_stat &= ~(uint32_t)val;
+        if (!(s->t_stat & 1)) {
+            s->t_pending = false;
+            sep_timer_update_irq(s);
+        }
+        break;
+    case 0x18:
+        s->t_count = val;
+        break;
+    default:
+        error_report("SEP timer: unmodelled write +0x%" HWADDR_PRIx
+                     " = 0x%" PRIx64, off, val);
+        break;
+    }
+}
+
+static const MemoryRegionOps sep_timer_ops = {
+    .read = sep_timer_read,
+    .write = sep_timer_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static uint64_t sep_kic_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+    if (off == 0x18) {          /* KIC +0x818 EVENT (claim) */
+        if (s->t_pending) {
+            s->t_pending = false;
+            s->t_claims++;
+            sep_timer_update_irq(s);
+            return SEP_KIC_TIMER_EVENT;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static void sep_kic_write(void *opaque, hwaddr off, uint64_t val,
+                          unsigned size)
+{
+    error_report("SEP KIC: write +0x%" HWADDR_PRIx " = 0x%" PRIx64,
+                 off + 0x800, val);
+}
+
+static const MemoryRegionOps sep_kic_ops = {
+    .read = sep_kic_read,
+    .write = sep_kic_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static void sep_lab_init_timer(AppleSEPLabState *s)
+{
+    if (!s->sep_timer) {
+        return;
+    }
+    if (!s->seprom) {
+        error_report("SEP lab: sep-timer=on requires seprom=on; ignored");
+        return;
+    }
+    memory_region_init_io(&s->timer_mr, NULL, &sep_timer_ops, s,
+                          "sep-timer", 0x1000);
+    memory_region_add_subregion_overlap(&s->private_memory, SEP_TIMER_PA,
+                                        &s->timer_mr, 20);
+    memory_region_init_io(&s->kic_mr, NULL, &sep_kic_ops, s,
+                          "sep-kic-event", 0x100);
+    memory_region_add_subregion_overlap(&s->private_memory, SEP_KIC_EVT_PA,
+                                        &s->kic_mr, 20);
+    s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sep_timer_fire, s);
+    error_report("SEP lab: sep-timer on (timer 0x%llx, KIC event 0x%llx)",
+                 SEP_TIMER_PA, SEP_KIC_EVT_PA + 0x18);
+}
+
+static bool sep_lab_get_sep_timer(Object *obj, Error **errp)
+{
+    return APPLE_SEP_LAB(obj)->sep_timer;
+}
+
+static void sep_lab_set_sep_timer(Object *obj, bool value, Error **errp)
+{
+    APPLE_SEP_LAB(obj)->sep_timer = value;
 }
 
 static bool sep_lab_get_seprom(Object *obj, Error **errp)
@@ -763,6 +931,11 @@ static void sep_lab_class_init(ObjectClass *oc, const void *data)
         "Reconnaissance mode (default off): model SEP IMPDEF sysregs, back the "
         "SEP SRAM, and log unknown MMIO (returning 0) instead of faulting, so "
         "one boot traces the SEP's register map. Fabricates no protocol reply.");
+    object_class_property_add_bool(oc, "sep-timer", sep_lab_get_sep_timer,
+                                   sep_lab_set_sep_timer);
+    object_class_property_set_description(oc, "sep-timer",
+        "Lab-only (needs seprom=on): model the SEP-private timer at "
+        "0x2a0e40000 and the KIC +0x818 event claim, wired to the SEP IRQ");
     object_class_property_add_bool(oc, "seprom", sep_lab_get_seprom,
                                    sep_lab_set_seprom);
     object_class_property_set_description(oc, "seprom",
