@@ -89,7 +89,8 @@ struct AppleSEPLabState {
      */
     bool seprom;
     MemoryRegion carveout;      /* SEP DRAM the kernel allocates page tables in */
-    MemoryRegion kram;          /* SEP kernel RAM region at 0x1e40000000 (page tables) */
+    MemoryRegion dram;          /* SEP DRAM window at 0x1e00000000 (2 GiB) */
+    MemoryRegion pfour;         /* slice of the 0x10000000000 window (16 MiB) */
     qemu_irq sep_irq;           /* the SEP cpu's IRQ input (ARM_CPU_IRQ), host-pulseable */
     MemoryRegion cfg0800;       /* memory-config regs 0x2a0800xxx as RAM        */
     MemoryRegion cfg0c40;       /* memory-config regs 0x2a0c40xxx as RAM        */
@@ -98,14 +99,53 @@ struct AppleSEPLabState {
     Error *migration_blocker;
 };
 
-/* SEP DRAM carveout for seprom mode (point the memory-config regs here). */
+/* SEP DRAM carveout for seprom mode (legacy poke target; the computed
+ * handoff no longer points the memory-config regs here). */
 #define SEP_CARVEOUT_BASE 0x2a4000000ULL
-/* SEP kernel RAM region: sepOS's build path allocates its page tables here
- * (desc->base 0x1e40024000, from a base hardcoded in the image at 0x6b10,
- * discovered live). MMU is off during the build, so these are physical. */
+/* SEP kernel RAM: sepOS runs from PA 0x1e40000000 (its own map points
+ * VA 0xffffffff00000000 there; base hardcoded in the image at 0x6b10).
+ * The computed handoff places a 1 GiB allocation region at 0x1e00000000
+ * containing the kernel, so back the whole 2 GiB window 0x1e00000000.. */
 #define SEP_KRAM_BASE 0x1e40000000ULL
+#define SEP_DRAM_BASE 0x1e00000000ULL
+#define SEP_DRAM_SIZE 0x80000000ULL    /* 2 GiB, sparsely touched */
 #define SEP_KRAM_SIZE 0x10000000ULL  /* 256 MiB */
 #define SEP_CARVEOUT_SIZE 0x10000000ULL  /* 256 MiB */
+/* The 0x10000000000 window: the kernel always registers a static 4 GiB
+ * region at 0x10000000000 (kernel-main 0x8c24) and sep64's platform block
+ * must describe a region contained in the LAST table entry. Back a slice. */
+#define SEP_PFOUR_BASE 0x10000000000ULL
+#define SEP_PFOUR_SIZE 0x1000000ULL   /* 16 MiB */
+
+/*
+ * SEPROM-equivalent handoff, computed (2026-10-22, static RE of the boot
+ * path; see BOOT-RE.md). Everything below is derived from the sepOS image's
+ * own parser (0x6b10) and kernel-main (0x87c4) so the two agree:
+ *
+ *  BPSE blob (0x4000 bytes at SRAM 0x2a0210000) = image[0..0x4000) with
+ *    [+0x00] = 'BPSE' (u32), [+0x08] = 1 (u32, boot-args version),
+ *    [+0x70] = 0x528000 (u32, memory size; must equal template [+0x1188]).
+ *  Memory-config registers (backed cfg RAM):
+ *    [0x2a0800408] = 0x83fff   -> carveout base B = (v<<12)+0x1000 = 0x84000000
+ *    [0x2a0800410] = [0x2a0800418] = 0x7000 (equal -> parser simple path)
+ *    [0x2a0c4180]  = 8   (reserved 16 KiB pages, count < size)
+ *    [0x2a0c41a0]  = 4088 (16 KiB pages; (size-count) % 10 == 0)
+ *  Parser-derived regions (image formulas):
+ *    region0 = { 0x1e00000000, (B - size*0x4000 - 0x20000)/2 = 0x40000000 }
+ *    free    = (4088-8)*0x4000 = 0x3fc0000; x22 = (free/10)*4 = 0x1980000
+ *    region3 = { 0x1e60000000 + 0x1980000, 0x7000*0x4000 = 0x1c000000 }
+ *  Platform block (sep64 arch reads it via PA 0x2a2400000 + 0x4810):
+ *    u64 = (base>>12)<<32 | (size>>12)<<16 | 0xfe, base 0x10000000000
+ *    size 0x400000 -> 0x10000000040000fe (inside the static 4 GiB region,
+ *    which is the reference the containment check sep64.c:493 uses).
+ *  Boot-role sysreg s3_7_c15_c2_6 = 0x2a0210001 (BPSE pointer | present),
+ *  driving sepOS onto the self-bootstrapping build path (role odd & > 1).
+ */
+#define SEP_BPSE_BASE   0x2a0210000ULL
+#define SEP_HANDOFF_B   0x84000000ULL
+#define SEP_HANDOFF_SIZE_PAGES 4088
+#define SEP_HANDOFF_COUNT      8
+#define SEP_HANDOFF_R410       0x7000
 
 /* SEP SRAM (stack/data) discovered at boot: SP := 0x2a0220000 (image pc 0x404c).
  * Kept well below the first SEP MMIO block (0x2a0800000) so it shadows none. */
@@ -197,8 +237,7 @@ static MemTxResult sep_lab_write(void *opaque, hwaddr addr, uint64_t data,
     return sep_lab_fault(r, addr, size, true);
 }
 
-static const MemoryRegionOps sep_lab_ops = {
-    .read_with_attrs = sep_lab_read,
+static const MemoryRegionOps sep_lab_ops = {    .read_with_attrs = sep_lab_read,
     .write_with_attrs = sep_lab_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
@@ -219,6 +258,16 @@ static void sep_lab_reset(void *opaque)
 
     cpu_reset(CPU(s->cpu));
     cpu_set_pc(CPU(s->cpu), s->entry);
+    /*
+     * SEPROM's boot-role handoff: s3_7_c15_c2_6 holds a pointer to the
+     * "BPSE" boot-args struct with bit0 = present; role odd & > 1 selects
+     * sepOS's self-bootstrapping build path. Store index 14 is that
+     * register (target/arm/modern-sysregs.c, read-as-written). Seeded
+     * after cpu_reset so the register's resetvalue does not clear it.
+     */
+    if (s->seprom) {
+        s->cpu->env.apple_modern_sep_store[14] = SEP_BPSE_BASE | 1;
+    }
     s->faulted = false;
     s->reset_generation++;
     sep_lab_trace_reset(s);
@@ -344,16 +393,88 @@ static void sep_lab_init(MachineState *machine)
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, 0x2a2000000ULL,
                                             &s->sepmmio, 0);
-        memory_region_init_ram(&s->kram, NULL, "sep-kram", SEP_KRAM_SIZE,
+        /* Full SEP DRAM window the computed handoff describes (1 GiB region0
+         * at 0x1e00000000 + region3 near 0x1e61980000, both containing the
+         * kernel at 0x1e40000000). Sparse; only touched pages cost host RAM. */
+        memory_region_init_ram(&s->dram, NULL, "sep-dram", SEP_DRAM_SIZE,
                                &error_fatal);
-        memory_region_add_subregion_overlap(&s->private_memory, SEP_KRAM_BASE,
-                                            &s->kram, 0);
-        /* Run sepOS from the SEP RAM carveout, as SEPROM loads it: the kernel's
-         * own map points VA 0xffffffff00000000 -> PA 0x1e40000000, so the image
-         * must be there (not PA 0). The image's 0x24000..end is zero BSS, which
-         * is exactly where the page-table pool (0x1e40024000) is allocated, so
-         * the tables overwrite only zero BSS. Reset directly into the carveout. */
-        memcpy(memory_region_get_ram_ptr(&s->kram), image, image_size);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_DRAM_BASE,
+                                            &s->dram, 0);
+        /* Slice of the static 4 GiB region at 0x10000000000 the kernel
+         * registers; the sep64 platform block describes a sub-region here. */
+        memory_region_init_ram(&s->pfour, NULL, "sep-pfour", SEP_PFOUR_SIZE,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_PFOUR_BASE,
+                                            &s->pfour, 0);
+        {
+            /* SEPROM-equivalent handoff, all values derived above. */
+            uint8_t *cfg0800 = memory_region_get_ram_ptr(&s->cfg0800);
+            uint8_t *cfg0c40 = memory_region_get_ram_ptr(&s->cfg0c40);
+            uint8_t *mmio = memory_region_get_ram_ptr(&s->sepmmio);
+            uint8_t *sram = memory_region_get_ram_ptr(&s->sram);
+            uint8_t *bpse = sram + (SEP_BPSE_BASE - SEP_SRAM_BASE);
+
+            /* BPSE boot-args blob: template = image[0..0x4000), patched. */
+            memcpy(bpse, image, 0x4000);
+            *(uint32_t *)(bpse + 0x00) = 0x53455042;         /* "BPSE" */
+            *(uint32_t *)(bpse + 0x08) = 1;                  /* version */
+            *(uint32_t *)(bpse + 0x70) = image_size;         /* mem size */
+            *(uint32_t *)(bpse + 0x78) = 0;                  /* extra size */
+
+            /* Memory-config registers. */
+            *(uint32_t *)(cfg0800 + 0x408) = (SEP_HANDOFF_B >> 12) - 1;
+            *(uint32_t *)(cfg0800 + 0x410) = SEP_HANDOFF_R410;
+            *(uint32_t *)(cfg0800 + 0x418) = SEP_HANDOFF_R410;
+            *(uint32_t *)(cfg0c40 + 0x180) = SEP_HANDOFF_COUNT;
+            *(uint32_t *)(cfg0c40 + 0x1a0) = SEP_HANDOFF_SIZE_PAGES;
+
+            /* sep64 platform region descriptor at 0x2a2400000 + 0x4810:
+             * base 0x10000000000 (inside the static 4 GiB table entry),
+             * size 0x400000, low-byte tag 0xfe. */
+            *(uint64_t *)(mmio + (0x2a2404810ULL - 0x2a2000000ULL)) =
+                (uint64_t)(SEP_PFOUR_BASE >> 12) << 32 |
+                (uint64_t)(0x400000 >> 12) << 16 | 0xfe;
+
+            /*
+             * Platform config table inside that region (sep64 walks it at
+             * image 0x8fbc): 0x10-byte entries {u32 tag, u32 size, u64 off}
+             * with off >= 0x4000, off+size <= region size; tags SNOC, EROC,
+             * TUPC, CINP (size >= 0x101), CART, terminator "llun". Sub-blob
+             * contents are still being reversed; zero-filled for now.
+             */
+            {
+                uint8_t *pf = memory_region_get_ram_ptr(&s->pfour);
+                const struct {
+                    char tag[4];
+                    uint32_t size;
+                    uint64_t off;
+                } plat_cfg[] = {
+                    { { 'S', 'N', 'O', 'C' }, 0x100, 0x4000 },
+                    { { 'E', 'R', 'O', 'C' }, 0x100, 0x4100 },
+                    { { 'T', 'U', 'P', 'C' }, 0x100, 0x4200 },
+                    { { 'C', 'I', 'N', 'P' }, 0x200, 0x4400 },
+                    { { 'C', 'A', 'R', 'T' }, 0x100, 0x4600 },
+                    { { 'l', 'l', 'u', 'n' }, 0, 0 },
+                };
+                for (unsigned i = 0; i < ARRAY_SIZE(plat_cfg); i++) {
+                    uint32_t tag = plat_cfg[i].tag[0] |
+                                   plat_cfg[i].tag[1] << 8 |
+                                   plat_cfg[i].tag[2] << 16 |
+                                   (uint32_t)plat_cfg[i].tag[3] << 24;
+                    uint64_t *e = (uint64_t *)(pf + i * 0x10);
+                    e[0] = tag | ((uint64_t)plat_cfg[i].size << 32);
+                    e[1] = plat_cfg[i].off;
+                }
+            }
+        }
+        /* Run sepOS from the SEP DRAM as SEPROM loads it: the kernel's
+         * own map points VA 0xffffffff00000000 -> PA 0x1e40000000, so the
+         * image must be there (not PA 0). The image's 0x24000..end is zero
+         * BSS, which is exactly where the page-table pool (0x1e40024000) is
+         * allocated, so the tables overwrite only zero BSS. Reset directly
+         * into the carveout. */
+        memcpy(memory_region_get_ram_ptr(&s->dram) +
+                   (SEP_KRAM_BASE - SEP_DRAM_BASE), image, image_size);
         s->entry = SEP_KRAM_BASE;
     }
 
@@ -557,10 +678,11 @@ static void sep_lab_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "seprom", sep_lab_get_seprom,
                                    sep_lab_set_seprom);
     object_class_property_set_description(oc, "seprom",
-        "SEPROM-handoff reconnaissance (default off; implies discover): also "
-        "back the SEP DRAM carveout and the memory-config register pages as RAM "
-        "so the boot handoff (HW regs, BPSE boot-args, boot-role pointer) can be "
-        "poked with gdb and iterated to drive sepOS onto its build path.");
+        "SEPROM-equivalent handoff (default off; implies discover): back the "
+        "SEP DRAM window and seed the full computed boot handoff (BPSE "
+        "boot-args blob, memory-config registers, sep64 platform block, fuse "
+        "sentinels, boot-role register) so sepOS self-bootstraps with no gdb "
+        "pokes.");
 }
 
 static void sep_lab_finalize(Object *obj)
