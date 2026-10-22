@@ -370,6 +370,51 @@ static void sep_lab_reset(void *opaque)
     sep_lab_trace_reset(s);
 }
 
+
+/* Default-off, env-gated in-memory image patcher (SEP_PATCH). Patches ONLY the
+ * kram copy of the loaded image (never the file on disk) so documented debug
+ * assertions can be neutered to see how far sepOS boots. Format:
+ *   SEP_PATCH="0x10350=0x14000005,0xVA=0xWORD,..."  (32-bit LE words)
+ * A VA may be a raw file offset (0x10350) or a high kernel VA
+ * (0xffffffff00010350); both resolve to the same kram offset. */
+static void sep_lab_apply_patches(AppleSEPLabState *s, gsize image_size)
+{
+    const char *spec = getenv("SEP_PATCH");
+    uint8_t *kram;
+    g_auto(GStrv) items = NULL;
+    int i;
+
+    if (!s->seprom || !spec || !*spec) {
+        return;
+    }
+    kram = memory_region_get_ram_ptr(&s->kram);
+    items = g_strsplit(spec, ",", -1);
+    for (i = 0; items[i]; i++) {
+        char *eq = strchr(items[i], '=');
+        uint64_t va, off;
+        uint64_t word64;
+        if (!eq) {
+            continue;
+        }
+        *eq = '\0';
+        if (qemu_strtou64(g_strstrip(items[i]), NULL, 0, &va) < 0 ||
+            qemu_strtou64(g_strstrip(eq + 1), NULL, 0, &word64) < 0) {
+            error_report("SEP_PATCH: bad entry '%s'", items[i]);
+            continue;
+        }
+        off = (va >= SEP_KRAM_BASE) ? (va - SEP_KRAM_BASE) : (va & 0xffffffffULL);
+        if (off + 4 > image_size) {
+            error_report("SEP_PATCH: offset 0x%" PRIx64 " out of image", off);
+            continue;
+        }
+        {
+            uint32_t word = (uint32_t)word64;
+            memcpy(kram + off, &word, 4);
+            error_report("SEP_PATCH: [0x%" PRIx64 "] = 0x%08x", off, word);
+        }
+    }
+}
+
 static void sep_lab_init(MachineState *machine)
 {
     AppleSEPLabState *s = APPLE_SEP_LAB(machine);
@@ -501,6 +546,7 @@ static void sep_lab_init(MachineState *machine)
          * the tables overwrite only zero BSS. Reset directly into the carveout. */
         memcpy(memory_region_get_ram_ptr(&s->kram), image, image_size);
         s->entry = SEP_KRAM_BASE;
+        sep_lab_apply_patches(s, image_size);
         /* Handoff memory region the sep64 region encode points at. The real
          * SEPROM maps SEP DRAM here and writes the tagged record directory the
          * kernel parses at image 0x8f70; back it as RAM so the loader
