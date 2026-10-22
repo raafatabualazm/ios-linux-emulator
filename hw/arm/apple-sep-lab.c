@@ -27,6 +27,9 @@
 #include "system/runstate.h"
 #include "system/tcg.h"
 #include "target/arm/cpu.h"
+#include "target/arm/internals.h"
+#include "exec/cputlb.h"
+#include "exec/cpu-common.h"
 #include "qom/object.h"
 
 #define TYPE_APPLE_SEP_LAB MACHINE_TYPE_NAME("apple-sep-lab")
@@ -126,6 +129,15 @@ struct AppleSEPLabState {
     uint32_t t_ctrl, t_stat, t_count;
     bool t_pending;
     uint64_t t_fires, t_claims;
+    /*
+     * sep-stack-fix (default off; needs seprom): fill missing 16K EL0 stack
+     * pages (synthetic layout leaves a Trans_L3 hole under SP). Pre-maps on
+     * EL0 entry and on EL0 data-abort. Phys pages from top of kram.
+     */
+    bool stack_fix;
+    uint64_t stack_fix_next_pa;
+    unsigned stack_fix_fills;
+    MemoryRegion dram_lo; /* sep-stack-fix: back memcfg window low slice */
     Error *migration_blocker;
 };
 
@@ -214,6 +226,7 @@ static const MemoryRegionOps sep_pmgr_ops = {
 };
 
 static void sep_lab_init_timer(AppleSEPLabState *s);
+static void sep_lab_init_stack_fix(AppleSEPLabState *s);
 
 /* SEP DRAM carveout for seprom mode (point the memory-config regs here). */
 #define SEP_CARVEOUT_BASE 0x2a4000000ULL
@@ -222,6 +235,10 @@ static void sep_lab_init_timer(AppleSEPLabState *s);
  * discovered live). MMU is off during the build, so these are physical. */
 #define SEP_KRAM_BASE 0x1e40000000ULL
 #define SEP_KRAM_SIZE 0x10000000ULL  /* 256 MiB */
+/* Memcfg 0x9001f advertises [0x1e00000000, 0x1e40000000). Only kram was
+ * backed; sep-stack-fix backs a low slice so FMST/untyped frames are real. */
+#define SEP_DRAM_LO_BASE 0x1e00000000ULL
+#define SEP_DRAM_LO_SIZE 0x4000000ULL  /* 64 MiB */
 #define SEP_CARVEOUT_SIZE 0x10000000ULL  /* 256 MiB */
 
 /* SEP SRAM (stack/data) discovered at boot: SP := 0x2a0220000 (image pc 0x404c).
@@ -504,7 +521,12 @@ static void sep_lab_seed_handoff(AppleSEPLabState *s)
          * at 0xea1c asserts on a NULL handle. 16K-aligned; 0x4000 is
          * the minimum the FMST create at 0xd87c accepts.
          */
-        bpse[0x78 / 4] = 0x4000;
+        /*
+         * With sep-stack-fix the memcfg DRAM lo window is backed, so a
+         * larger FMST carve can be populated. 0x10000 keeps PMGR reachable
+         * (0x20000+ skipped PMGR without DRAM lo). Default remains 0x4000.
+         */
+        bpse[0x78 / 4] = s->stack_fix ? 0x10000 : 0x4000;
         /*
          * Insecure-RNG seed pair read by the roottask's
          * _liblibc_seed_insecure_rand ("s1 || s2" assert). Fixed,
@@ -618,6 +640,9 @@ static void sep_lab_seed_handoff(AppleSEPLabState *s)
 static void sep_lab_reset(void *opaque)
 {
     AppleSEPLabState *s = opaque;
+
+    s->stack_fix_fills = 0;
+    s->stack_fix_next_pa = 0;
 
     cpu_reset(CPU(s->cpu));
     cpu_set_pc(CPU(s->cpu), s->entry);
@@ -893,6 +918,7 @@ static void sep_lab_init(MachineState *machine)
      * can wake sepOS from its WFE mailbox-wait. */
     s->sep_irq = qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_IRQ);
     sep_lab_init_timer(s);
+    sep_lab_init_stack_fix(s);
     qemu_register_reset(sep_lab_reset, s);
     rom_add_blob_fixed("sep-lab.raw-image", image, image_size, 0);
     error_setg(&s->migration_blocker,
@@ -1076,6 +1102,221 @@ static const MemoryRegionOps sep_kic_ops = {
     .impl = { .min_access_size = 4, .max_access_size = 4 },
 };
 
+
+/* ---- sep-stack-fix: synthetic EL0 stack Trans_L3 filler (default off) ---- */
+
+static uint64_t sep_lab_ttbr0_l2_pte(AddressSpace *as, uint64_t ttbr0,
+                                    uint64_t va, hwaddr *pte_pa_out)
+{
+    MemTxResult tx;
+    uint64_t l1_pa = ttbr0 & ~0xfffULL;
+    uint64_t i1 = (va >> 25) & 0x7ff;
+    uint64_t i2 = (va >> 14) & 0x7ff;
+    uint64_t l1e, l2_pa, l2e;
+
+    l1e = address_space_ldq_le(as, l1_pa + 8 * i1, MEMTXATTRS_UNSPECIFIED, &tx);
+    if (tx != MEMTX_OK || (l1e & 0x3) != 0x3) {
+        return 0;
+    }
+    l2_pa = l1e & 0xfffffffff000ULL;
+    if (pte_pa_out) {
+        *pte_pa_out = l2_pa + 8 * i2;
+    }
+    l2e = address_space_ldq_le(as, l2_pa + 8 * i2, MEMTXATTRS_UNSPECIFIED, &tx);
+    return (tx == MEMTX_OK) ? l2e : 0;
+}
+
+static bool sep_lab_fill_one_page(AppleSEPLabState *s, AddressSpace *as,
+                                 uint64_t ttbr0, uint64_t page,
+                                 uint64_t template_pte)
+{
+    hwaddr pte_pa = 0;
+    uint64_t pte, new_pte;
+    uint8_t zero[0x4000];
+    MemTxResult tx;
+
+    if (s->stack_fix_fills >= 8) {
+        return false;
+    }
+    pte = sep_lab_ttbr0_l2_pte(as, ttbr0, page, &pte_pa);
+    if (pte & 1) {
+        return false;
+    }
+    if ((template_pte & 0x3) != 0x3 || !pte_pa) {
+        return false;
+    }
+    if (!s->stack_fix_next_pa) {
+        s->stack_fix_next_pa =
+            (SEP_KRAM_BASE + SEP_KRAM_SIZE - 0x100000) & ~0x3fffULL;
+    }
+    if (s->stack_fix_next_pa < SEP_KRAM_BASE + 0x800000) {
+        error_report("SEP lab: sep-stack-fix phys pool exhausted");
+        return false;
+    }
+    s->stack_fix_next_pa -= 0x4000;
+    memset(zero, 0, sizeof(zero));
+    address_space_write(as, s->stack_fix_next_pa, MEMTXATTRS_UNSPECIFIED,
+                        zero, sizeof(zero));
+    /* Clone output-addr from pool; force AF + AP=01 (EL1/EL0 RW) so the
+     * page is usable as an EL0 stack. Keep AttrIndx/SH from template. */
+    new_pte = (template_pte & ~0xffffffffc000ULL) |
+              (s->stack_fix_next_pa & 0xffffffffc000ULL);
+    new_pte |= (1ULL << 10);              /* AF */
+    new_pte = (new_pte & ~0xc0ULL) | 0x40; /* AP = 01 */
+    address_space_stq_le(as, pte_pa, new_pte, MEMTXATTRS_UNSPECIFIED, &tx);
+    if (tx != MEMTX_OK) {
+        return false;
+    }
+    s->stack_fix_fills++;
+    error_report("SEP lab: sep-stack-fix fill #%u VA 0x%llx -> PA 0x%llx",
+                 s->stack_fix_fills,
+                 (unsigned long long)page,
+                 (unsigned long long)s->stack_fix_next_pa);
+    return true;
+}
+
+static bool sep_lab_map_stack_page(AppleSEPLabState *s, ARMCPU *cpu,
+                                     uint64_t va_page)
+{
+    AddressSpace *as;
+    uint64_t ttbr0, template = 0, e;
+    int i;
+
+    if (va_page < 0x4000 || va_page > 0x8000000ULL) {
+        return false;
+    }
+    as = cpu_get_address_space(CPU(cpu), ARMASIdx_NS);
+    ttbr0 = cpu->env.cp15.ttbr0_el[1];
+    if (!ttbr0) {
+        return false;
+    }
+    e = sep_lab_ttbr0_l2_pte(as, ttbr0, va_page, NULL);
+    if (e & 1) {
+        return false; /* already mapped — do not touch perms */
+    }
+    for (i = 1; i <= 2; i++) {
+        uint64_t cand = sep_lab_ttbr0_l2_pte(as, ttbr0,
+                                             va_page + (uint64_t)i * 0x4000,
+                                             NULL);
+        if ((cand & 0x3) == 0x3) {
+            template = cand;
+            break;
+        }
+        cand = sep_lab_ttbr0_l2_pte(as, ttbr0,
+                                   va_page - (uint64_t)i * 0x4000, NULL);
+        if ((cand & 0x3) == 0x3) {
+            template = cand;
+            break;
+        }
+    }
+    if (!template) {
+        return false;
+    }
+    if (sep_lab_fill_one_page(s, as, ttbr0, va_page, template)) {
+        tlb_flush(CPU(cpu));
+        return true;
+    }
+    return false;
+}
+
+static void sep_lab_stack_fix_hook(ARMCPU *cpu, void *opaque)
+{
+    AppleSEPLabState *s = opaque;
+    uint64_t sp, page;
+
+    if (!s->stack_fix || !s->seprom || arm_current_el(&cpu->env) != 0) {
+        return;
+    }
+    sp = cpu->env.xregs[31] ? cpu->env.xregs[31] : cpu->env.sp_el[0];
+    page = sp & ~0x3fffULL;
+    /* SP page only — AP=00 neighbors stay as guest guards. */
+    sep_lab_map_stack_page(s, cpu, page);
+}
+
+static void sep_lab_stack_fix_pre_hook(ARMCPU *cpu, void *opaque)
+{
+    AppleSEPLabState *s = opaque;
+    CPUARMState *env = &cpu->env;
+    CPUState *cs = CPU(cpu);
+    uint64_t esr, far, sp, far_page, sp_page;
+    unsigned dfsc;
+    bool fixed = false;
+
+    if (!s->stack_fix || !s->seprom || arm_current_el(env) != 0) {
+        return;
+    }
+    if (cs->exception_index != EXCP_DATA_ABORT) {
+        return;
+    }
+    esr = env->exception.syndrome;
+    if (((esr >> 26) & 0x3f) != 0x24 && ((esr >> 26) & 0x3f) != 0x25) {
+        return;
+    }
+    dfsc = esr & 0x3f;
+    if (dfsc != 0x07) {
+        if (dfsc == 0x0f) {
+            far = env->exception.vaddress;
+            sp = env->xregs[31] ? env->xregs[31] : env->sp_el[0];
+            error_report("SEP lab: sep-stack-fix frontier Perm_L3 "
+                         "FAR=0x%llx SP=0x%llx PC=0x%llx x0=0x%llx x2=0x%llx",
+                         (unsigned long long)far, (unsigned long long)sp,
+                         (unsigned long long)env->pc,
+                         (unsigned long long)env->xregs[0],
+                         (unsigned long long)env->xregs[2]);
+        }
+        return; /* guards / Perm stay guest-visible */
+    }
+    far = env->exception.vaddress;
+    sp = env->xregs[31] ? env->xregs[31] : env->sp_el[0];
+    far_page = far & ~0x3fffULL;
+    sp_page = sp & ~0x3fffULL;
+    /* FAR must sit on/next-to SP page (stack-shaped abort). */
+    if (far_page != sp_page &&
+        far_page + 0x4000 != sp_page &&
+        sp_page + 0x4000 != far_page) {
+        return;
+    }
+    fixed = sep_lab_map_stack_page(s, cpu, far_page);
+    if (sp_page != far_page) {
+        fixed = sep_lab_map_stack_page(s, cpu, sp_page) || fixed;
+    }
+    if (fixed) {
+        error_report("SEP lab: sep-stack-fix retry FAR=0x%llx SP=0x%llx PC=0x%llx",
+                     (unsigned long long)far, (unsigned long long)sp,
+                     (unsigned long long)env->pc);
+        cs->exception_index = -1;
+        cpu_loop_exit(cs);
+    }
+}
+
+static void sep_lab_init_stack_fix(AppleSEPLabState *s)
+{
+    if (!s->stack_fix) {
+        return;
+    }
+    if (!s->seprom) {
+        error_report("SEP lab: sep-stack-fix=on requires seprom=on; ignored");
+        s->stack_fix = false;
+        return;
+    }
+    /*
+     * Back the low end of the memcfg DRAM window. Without this, cfg 0x9001f
+     * claims [0x1e00000000, 0x1e40000000) but only kram@0x1e40000000 is RAM;
+     * FMST/untyped retypes into the hole produce sparse/AP=00 stacks and the
+     * post-PMGR Trans_L3 at SP.
+     */
+    memory_region_init_ram(&s->dram_lo, NULL, "sep-dram-lo",
+                           SEP_DRAM_LO_SIZE, &error_fatal);
+    memory_region_add_subregion_overlap(&s->private_memory, SEP_DRAM_LO_BASE,
+                                        &s->dram_lo, 0);
+    arm_register_el_change_hook(s->cpu, sep_lab_stack_fix_hook, s);
+    arm_register_pre_el_change_hook(s->cpu, sep_lab_stack_fix_pre_hook, s);
+    error_report("SEP lab: sep-stack-fix on (DRAM lo 0x%llx/0x%llx + "
+                 "FMST 64KiB + EL0 SP Trans_L3 filler)",
+                 (unsigned long long)SEP_DRAM_LO_BASE,
+                 (unsigned long long)SEP_DRAM_LO_SIZE);
+}
+
 static void sep_lab_init_timer(AppleSEPLabState *s)
 {
     if (!s->sep_timer) {
@@ -1119,6 +1360,16 @@ static bool sep_lab_get_seprom(Object *obj, Error **errp)
 static void sep_lab_set_seprom(Object *obj, bool value, Error **errp)
 {
     APPLE_SEP_LAB(obj)->seprom = value;
+}
+
+static bool sep_lab_get_stack_fix(Object *obj, Error **errp)
+{
+    return APPLE_SEP_LAB(obj)->stack_fix;
+}
+
+static void sep_lab_set_stack_fix(Object *obj, bool value, Error **errp)
+{
+    APPLE_SEP_LAB(obj)->stack_fix = value;
 }
 
 static char *sep_lab_get_ap_probe(Object *obj, Error **errp)
@@ -1214,6 +1465,12 @@ static void sep_lab_class_init(ObjectClass *oc, const void *data)
         "back the SEP DRAM carveout and the memory-config register pages as RAM "
         "so the boot handoff (HW regs, BPSE boot-args, boot-role pointer) can be "
         "poked with gdb and iterated to drive sepOS onto its build path.");
+    object_class_property_add_bool(oc, "sep-stack-fix", sep_lab_get_stack_fix,
+                                   sep_lab_set_stack_fix);
+    object_class_property_set_description(oc, "sep-stack-fix",
+        "Lab-only (needs seprom=on, default off): back memcfg DRAM lo "
+        "(0x1e00000000/64MiB), grow FMST carve to 64KiB, and fill missing "
+        "EL0 SP 16K pages on Trans_L3 (synthetic stack hole after PMGR).");
 }
 
 static void sep_lab_finalize(Object *obj)
