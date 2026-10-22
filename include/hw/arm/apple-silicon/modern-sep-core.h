@@ -70,9 +70,14 @@ typedef struct AppleModernSEPCore {
  * /arm-io/sep reg) inside the SEP core's private address space at
  * SEP_CORE_MBOX_BASE, and wire its "SEP-iop" mailbox SEP_CPU_IRQ gpio to the
  * SEP core ARM_CPU_IRQ. Pure transport: no message handler, no SKS/crypto.
- * SEP_CORE_MBOX_BASE is a DECLARED placement, not measured from sepOS.
+ * SEP_CORE_MBOX_BASE is the sepOS platform block at 0x2a2400000/0x6c000:
+ * kernel 0x7cf8 waits for +0x4110 bit17 clear, then reads the one-shot
+ * shmbuf descriptor at +0x4810 (low byte 0xfe). Not proven as a live ASC
+ * doorbell yet. Loader __phys_range also lists KIC at 0x2a0c40000/0x40000
+ * (kernel writes +0x4008/+0x4010). 0x2a1000000 is EXCL (AKPLCXE) sentinel
+ * only — seed [+0]=[+8]=0xa55ac33c; never a mailbox.
  */
-#define SEP_CORE_MBOX_BASE 0x2a1000000ULL
+#define SEP_CORE_MBOX_BASE 0x2a2400000ULL
 struct AppleA7IOP;
 bool apple_modern_sep_core_attach_mailbox(AppleModernSEPCore *core,
                                           struct AppleA7IOP *a7iop,

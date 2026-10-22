@@ -92,9 +92,14 @@ struct AppleSEPLabState {
     MemoryRegion carveout;      /* SEP DRAM the kernel allocates page tables in */
     MemoryRegion kram;          /* SEP kernel RAM region at 0x1e40000000 (page tables) */
     qemu_irq sep_irq;           /* the SEP cpu's IRQ input (ARM_CPU_IRQ), host-pulseable */
-    MemoryRegion cfg0800;       /* memory-config regs 0x2a0800xxx as RAM        */
-    MemoryRegion cfg0c40;       /* memory-config regs 0x2a0c40xxx as RAM        */
+    MemoryRegion cfg0800;       /* PMGR/cfg window 0x2a0800000 size 0x80000    */
+    MemoryRegion cfg0c40;       /* KIC/config 0x2a0c40000 / 0x40000 as RAM      */
     MemoryRegion fuse;          /* SEP security-fuse shadow at 0x2e42c8000      */
+    MemoryRegion excl;          /* EXCL sentinel block at 0x2a1000000 (16 KiB)  */
+    MemoryRegion akp_sab;       /* AKPESAB 0x2a0940000 / 16 KiB                */
+    MemoryRegion akp_mmt;       /* AKP MMT  0x2a0a08000 / 16 KiB                */
+    MemoryRegion akp_hi;        /* 0x2a0b00000..0x2a0c40000 (SSEAESAB; gap OK)  */
+    MemoryRegion plat;          /* sparse platform pages (dd80/e4xxxx extras)  */
     MemoryRegion sepmmio;       /* broad SEP MMIO swath 0x2a2000000 as pokeable RAM */
     MemoryRegion region;        /* handoff memory region (PA 0x10000000000): the
                                  * tagged record blob SEPROM loads (sep64 0x8f70) */
@@ -116,6 +121,7 @@ struct AppleSEPLabState {
     bool sep_timer;
     MemoryRegion timer_mr;
     MemoryRegion kic_mr;
+    uint32_t *pmgr_regs;        /* backing for cfg0800/PMGR window             */
     QEMUTimer *timer;
     uint32_t t_ctrl, t_stat, t_count;
     bool t_pending;
@@ -127,6 +133,86 @@ struct AppleSEPLabState {
 #define SEP_KIC_EVT_PA 0x2a2400800ULL   /* window covers KIC +0x800..+0x8ff */
 #define SEP_TIMER_HZ   24000000ULL
 #define SEP_KIC_TIMER_EVENT 0x00070001u /* type 7, bit0 valid, bit3 clear */
+/*
+ * First-app PMGR window (j410 app @file 0x74000; device table name SSEASMBT).
+ * VA→PA 0x2a0800000 size 0x80000. Kick +0x2c000=0xf, +0x2c008=0x800000.
+ * Poll (app 0x7d3f0): write V (±bit31), wait ubfx(read,4,4)==(V&0xf).
+ * Mode writes (only nibble ± bit31) echo status in [7:4]; handoff words
+ * like cfg[+0x408]=0x9001f read back raw. Gated with seprom=on (default off).
+ */
+#define SEP_PMGR_PA     0x2a0800000ULL
+#define SEP_PMGR_SIZE   0x80000ULL
+/* EXCL (AKPLCXE / FourCC 0x4558434c): sender=3 checks +0 and +8 == 0xa55ac33c
+ * (app 0x8db50..0x8db88). 16 KiB window; NOT the ASC mailbox. */
+#define SEP_EXCL_PA     0x2a1000000ULL
+#define SEP_EXCL_SIZE   0x4000ULL
+#define SEP_SENTINEL    0xa55ac33cu
+/* Platform block 0x2a2400000/0x6c000: boot descriptor (+0x4110/4810) and
+ * timer-event claim at +0x818. Loader also lists KIC at 0x2a0c40000/0x40000. */
+#define SEP_ASC_PA      0x2a2400000ULL
+#define SEP_KIC_PA      0x2a0c40000ULL
+#define SEP_KIC_SIZE    0x40000ULL
+
+static uint64_t sep_pmgr_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+    uint32_t v, out;
+    static uint32_t pmgr_rlog;
+
+    if (off + size > SEP_PMGR_SIZE) {
+        return 0;
+    }
+    v = s->pmgr_regs[off / 4];
+    /* Mode/power regs: status nibble [7:4] mirrors request [3:0]. Preserve
+     * bit31 if set. Do not touch full words like memcfg 0x9001f. */
+    if ((v & ~0x8000000fu) == 0) {
+        uint32_t n = v & 0xfu;
+        out = (v & 0x80000000u) | (n << 4) | n;
+    } else {
+        out = v;
+    }
+    if (pmgr_rlog < 24 && (off == 0x2c000 || off == 0x2c008 ||
+                           off == 0x8000 || off == 0x40010)) {
+        pmgr_rlog++;
+        error_report("SEP pmgr: read +0x%" HWADDR_PRIx " raw=0x%x -> 0x%x",
+                     off, v, out);
+    }
+    return out;
+}
+
+static void sep_pmgr_write(void *opaque, hwaddr off, uint64_t val,
+                           unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+    static uint32_t pmgr_log_left = 64;
+
+    if (off + size > SEP_PMGR_SIZE) {
+        return;
+    }
+    {
+        uint32_t v = (uint32_t)val;
+        if ((v & ~0x8000000fu) == 0) {
+            uint32_t n = v & 0xfu;
+            v = (v & 0x80000000u) | (n << 4) | n;
+        }
+        s->pmgr_regs[off / 4] = v;
+    }
+    if (pmgr_log_left && (off >= 0x10000 || (off & ~0xfffull) == 0x8000)) {
+        pmgr_log_left--;
+        error_report("SEP pmgr: write +0x%" HWADDR_PRIx " = 0x%" PRIx64
+                     " pc=0x%" PRIx64,
+                     off, val, (uint64_t)s->cpu->env.pc);
+    }
+}
+
+static const MemoryRegionOps sep_pmgr_ops = {
+    .read = sep_pmgr_read,
+    .write = sep_pmgr_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
 static void sep_lab_init_timer(AppleSEPLabState *s);
 
 /* SEP DRAM carveout for seprom mode (point the memory-config regs here). */
@@ -181,6 +267,23 @@ static MemTxResult sep_lab_discover(SEPLabRegion *r, hwaddr addr,
                 (uint64_t)s->cpu->env.pc);
         if ((s->discover_logged & 0x3ff) == 0) {
             fflush(s->trace);
+        }
+        {
+            hwaddr abs = r->base + addr;
+            if (abs >= SEP_EXCL_PA && abs < SEP_EXCL_PA + SEP_EXCL_SIZE) {
+                error_report("SEP excl: %s +0x%" HWADDR_PRIx
+                             " size %u (should be RAM-seeded)",
+                             write ? "W" : "R", abs - SEP_EXCL_PA, size);
+            } else if (abs >= SEP_ASC_PA && abs < SEP_ASC_PA + 0x6c000ULL) {
+                static uint32_t asc_log_left = 48;
+                if (asc_log_left) {
+                    asc_log_left--;
+                    error_report("SEP asc: %s +0x%" HWADDR_PRIx
+                                 " size %u val=0x%" PRIx64 " pc=0x%" PRIx64,
+                                 write ? "W" : "R", abs - SEP_ASC_PA, size,
+                                 write ? val : 0, (uint64_t)s->cpu->env.pc);
+                }
+            }
         }
     }
     return MEMTX_OK;
@@ -412,7 +515,7 @@ static void sep_lab_seed_handoff(AppleSEPLabState *s)
         bpse[0x88 / 4] = 0x41425321;
         bpse[0x8c / 4] = 0x00000002;
     }
-    cfg0800 = memory_region_get_ram_ptr(&s->cfg0800);
+    cfg0800 = s->pmgr_regs; /* buffer behind sep_pmgr_ops */
     /*
      * DRAM-window sizing word: 0x9001f makes the roottask's SEP DRAM window
      * exactly [0x1e00000000, 0x1e40000000), which passes its region-table
@@ -422,17 +525,90 @@ static void sep_lab_seed_handoff(AppleSEPLabState *s)
     cfg0800[0x410 / 4] = 0;
     cfg0800[0x418 / 4] = 0;
     cfg0c40 = memory_region_get_ram_ptr(&s->cfg0c40);
+    /*
+     * Memcfg words the DRAM window math uses. Lab-proven 4 / 0x4000 (ZCode
+     * uses 8 / 4088 on their handoff — keep ours; size window is 0x40000 so
+     * kernel-main's +0x190/+0x330/+0x4008/+0x4010 writes land in RAM).
+     */
     cfg0c40[0x180 / 4] = 4;
     cfg0c40[0x1a0 / 4] = 0x4000;
     /* Fuse already seeded at init; re-seed in case of soft reset wipe. */
     {
         uint32_t *fz = (uint32_t *)memory_region_get_ram_ptr(&s->fuse);
-        fz[0] = 0xa55ac33c;
-        fz[1] = 0xa55ac33c;
+        unsigned i;
+
+        fz[0] = SEP_SENTINEL;
+        fz[1] = SEP_SENTINEL;
+        /* Antigravity / sender=3: also +0x9b0..+0x9cc */
+        for (i = 0x9b0 / 4; i <= 0x9cc / 4; i++) {
+            fz[i] = SEP_SENTINEL;
+        }
+        /* AKPUCES / TRNG window at fuse_base+0x14000 (=0x2e42dc000). */
+        {
+            uint32_t *uces = &fz[0x14000 / 4];
+            uces[0x00 / 4] = SEP_SENTINEL;
+            uces[0x08 / 4] = SEP_SENTINEL;
+            uces[0x20 / 4] = SEP_SENTINEL;
+            uces[0x30 / 4] = SEP_SENTINEL;
+        }
+    }
+    /* EXCL block: app 0x8db50 requires [+0]==[+8]==0xa55ac33c. */
+    {
+        uint32_t *ex = (uint32_t *)memory_region_get_ram_ptr(&s->excl);
+        ex[0] = SEP_SENTINEL;
+        ex[2] = SEP_SENTINEL; /* +8 */
+    }
+    /* AKPESAB + high AKP windows (not 0x2a0a00000). */
+    {
+        uint32_t *sab = (uint32_t *)memory_region_get_ram_ptr(&s->akp_sab);
+        uint32_t *hi = (uint32_t *)memory_region_get_ram_ptr(&s->akp_hi);
+
+        sab[0] = SEP_SENTINEL;
+        sab[2] = SEP_SENTINEL;
+        {
+            uint32_t *mmt = (uint32_t *)memory_region_get_ram_ptr(&s->akp_mmt);
+            mmt[0] = SEP_SENTINEL;
+            mmt[2] = SEP_SENTINEL;
+        }
+        /* SSEAESAB at 0x2a0b00000 (start of akp_hi). */
+        hi[0] = SEP_SENTINEL;
+        hi[2] = SEP_SENTINEL;
+        hi[(0x2a0b8007cULL - 0x2a0b00000ULL) / 4] = SEP_SENTINEL;
+        hi[(0x2a0bc1800ULL - 0x2a0b00000ULL) / 4] = 0x3;
+    }
+    /* Platform sentinels (plat RAM base 0x2a0d80000, size 0x100000). */
+    {
+        uint32_t *plat = (uint32_t *)memory_region_get_ram_ptr(&s->plat);
+        uint32_t *tbase;
+
+        plat[(0x2a0dd8008ULL - 0x2a0d80000ULL) / 4] = SEP_SENTINEL;
+        plat[(0x2a0dc0010ULL - 0x2a0d80000ULL) / 4] = 0x101;
+        /* 0x2a0bc1800 is below plat base — seed via discover RAM? skip; rare. */
+        tbase = &plat[(0x2a0e40000ULL - 0x2a0d80000ULL) / 4];
+        /* +0x400/+0x410 shadowed by timer IO; timer_read returns sentinel.
+         * Higher offsets are visible through this RAM (prio 0). */
+        tbase[0x8000 / 4] = 0x40000;
+        tbase[0xc000 / 4] = 0x5;
+        tbase[0x10008 / 4] = 0x5;
+        tbase[0x10010 / 4] = 0x4;
     }
     sepmmio = memory_region_get_ram_ptr(&s->sepmmio);
+    /*
+     * ASC-v6 A2I_RECV at 0x2a2404810 (boot/shmbuf msg, low byte 0xfe).
+     * Same seed the kernel's 0x7cf8 path decodes into region base/size.
+     */
+    /*
+     * Platform/shmbuf descriptor at 0x2a2400000 (sep64 0x7cf8):
+     *   spin while bit17 of +0x4110 is SET (zero-filled RAM passes);
+     *   then u64 at +0x4810 = (base>>12)<<32 | (size>>12)<<16 | 0xfe,
+     *        u64 at +0x4818 = flags (0 ok).
+     * Not a live ASC doorbell yet — one-shot boot descriptor.
+     */
+    sepmmio[0x404110 / 4] = 0; /* bit17 clear */
     sepmmio[0x404810 / 4] = 0x040000fe;
     sepmmio[0x404814 / 4] = 0x10000000;
+    sepmmio[0x404818 / 4] = 0;
+    sepmmio[0x40481c / 4] = 0;
     /* boot-role = BPSE|1 (cold build path); ready bit stays 1. */
     s->cpu->env.apple_modern_sep_store[14] = 0x2a0210000ULL | 1ULL;
     s->cpu->env.apple_modern_sep_store[13] = 1ULL;
@@ -585,21 +761,55 @@ static void sep_lab_init(MachineState *machine)
                                SEP_CARVEOUT_SIZE, &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory,
                                             SEP_CARVEOUT_BASE, &s->carveout, 0);
-        memory_region_init_ram(&s->cfg0800, NULL, "sep-cfg0800", 0x10000,
-                               &error_fatal);
-        memory_region_add_subregion_overlap(&s->private_memory, 0x2a0800000ULL,
+        /*
+         * cfg0800 was 64 KiB RAM for handoff pokes. First app maps 0x80000
+         * at the same PA as PMGR (SSEASMBT). One buffer-backed IO region.
+         */
+        s->pmgr_regs = g_new0(uint32_t, SEP_PMGR_SIZE / 4);
+        memory_region_init_io(&s->cfg0800, NULL, &sep_pmgr_ops, s,
+                              "sep-cfg0800", SEP_PMGR_SIZE);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_PMGR_PA,
                                             &s->cfg0800, 0);
-        memory_region_init_ram(&s->cfg0c40, NULL, "sep-cfg0c40", 0x10000,
+        /* EXCL sentinel window (AKPLCXE); not a mailbox. */
+        memory_region_init_ram(&s->excl, NULL, "sep-excl", SEP_EXCL_SIZE,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_EXCL_PA,
+                                            &s->excl, 0);
+        /* AKPESAB only — must NOT cover 0x2a0a00000 (early status is W1C/0). */
+        memory_region_init_ram(&s->akp_sab, NULL, "sep-akp-sab", 0x4000,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, 0x2a0940000ULL,
+                                            &s->akp_sab, 0);
+        memory_region_init_ram(&s->akp_mmt, NULL, "sep-akp-mmt", 0x4000,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, 0x2a0a08000ULL,
+                                            &s->akp_mmt, 0);
+        /* Ends at 0x2a0c40000 — must not shadow cfg0c40. */
+        memory_region_init_ram(&s->akp_hi, NULL, "sep-akp-hi", 0x140000,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, 0x2a0b00000ULL,
+                                            &s->akp_hi, 0);
+        /* Platform pages 0x2a0d80000..0x2a0e80000 (sentinels + timer tail). */
+        memory_region_init_ram(&s->plat, NULL, "sep-plat", 0x100000,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, 0x2a0d80000ULL,
+                                            &s->plat, 0);
+        /* Loader __phys_range: KIC 0x2a0c40000 / 0x40000 (flags 4). */
+        memory_region_init_ram(&s->cfg0c40, NULL, "sep-cfg0c40", 0x40000,
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, 0x2a0c40000ULL,
-                                            &s->cfg0c40, 0);
+                                            &s->cfg0c40, 1);
         /* SEP security-fuse shadow. sepOS's secfuse init (image 0x8d80) maps
          * PA 0x2e42c8000 (16 KiB) and asserts (secfuse.c:52, panic thunk
          * 0xa23c) that fuse words [0] and [1] each equal one of two hardcoded
          * sentinels built at image 0x8d38: 0xa55ac33c or 0xa050c030. Back it as
          * RAM and seed the sentinels so sepOS proceeds; remaining fuse fields
          * are discovered by iteration (gdb pokes this RAM). */
-        memory_region_init_ram(&s->fuse, NULL, "sep-fuse", 0x10000,
+        /*
+         * Fuse shadow 0x2e42c8000; expand through AKPUCES (TRNG) at
+         * 0x2e42dc000 size 0x8000 so sender/TRNG sentinel reads hit RAM.
+         */
+        memory_region_init_ram(&s->fuse, NULL, "sep-fuse", 0x20000,
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, 0x2e42c8000ULL,
                                             &s->fuse, 0);
@@ -790,6 +1000,10 @@ static uint64_t sep_timer_read(void *opaque, hwaddr off, unsigned size)
     case 0x00: return s->t_ctrl;
     case 0x08: return s->t_stat;
     case 0x18: return s->t_count;
+    case 0x400:
+    case 0x410:
+        /* Magic words checked by child servers (Antigravity / image). */
+        return SEP_SENTINEL;
     default:   return 0;
     }
 }
@@ -880,8 +1094,11 @@ static void sep_lab_init_timer(AppleSEPLabState *s)
     memory_region_add_subregion_overlap(&s->private_memory, SEP_KIC_EVT_PA,
                                         &s->kic_mr, 20);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sep_timer_fire, s);
-    error_report("SEP lab: sep-timer on (timer 0x%llx, KIC event 0x%llx)",
-                 SEP_TIMER_PA, SEP_KIC_EVT_PA + 0x18);
+    error_report("SEP lab: sep-timer on (timer 0x%llx; plat 0x%llx; "
+                 "kic 0x%llx/0x%llx; pmgr 0x%llx/0x%llx; excl 0x%llx)",
+                 SEP_TIMER_PA, SEP_ASC_PA,
+                 SEP_KIC_PA, SEP_KIC_SIZE,
+                 SEP_PMGR_PA, SEP_PMGR_SIZE, SEP_EXCL_PA);
 }
 
 static bool sep_lab_get_sep_timer(Object *obj, Error **errp)
