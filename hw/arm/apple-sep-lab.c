@@ -87,6 +87,7 @@ struct AppleSEPLabState {
      */
     bool seprom;
     MemoryRegion carveout;      /* SEP DRAM the kernel allocates page tables in */
+    MemoryRegion kram;          /* SEP kernel RAM region at 0x1e40000000 (page tables) */
     MemoryRegion cfg0800;       /* memory-config regs 0x2a0800xxx as RAM        */
     MemoryRegion cfg0c40;       /* memory-config regs 0x2a0c40xxx as RAM        */
     Error *migration_blocker;
@@ -94,6 +95,11 @@ struct AppleSEPLabState {
 
 /* SEP DRAM carveout for seprom mode (point the memory-config regs here). */
 #define SEP_CARVEOUT_BASE 0x2a4000000ULL
+/* SEP kernel RAM region: sepOS's build path allocates its page tables here
+ * (desc->base 0x1e40024000, from a base hardcoded in the image at 0x6b10,
+ * discovered live). MMU is off during the build, so these are physical. */
+#define SEP_KRAM_BASE 0x1e40000000ULL
+#define SEP_KRAM_SIZE 0x10000000ULL  /* 256 MiB */
 #define SEP_CARVEOUT_SIZE 0x10000000ULL  /* 256 MiB */
 
 /* SEP SRAM (stack/data) discovered at boot: SP := 0x2a0220000 (image pc 0x404c).
@@ -310,6 +316,10 @@ static void sep_lab_init(MachineState *machine)
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, 0x2a0c40000ULL,
                                             &s->cfg0c40, 0);
+        memory_region_init_ram(&s->kram, NULL, "sep-kram", SEP_KRAM_SIZE,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_KRAM_BASE,
+                                            &s->kram, 0);
     }
 
     /* AP regions are not silently reused as the SEP's private MMIO map. */
