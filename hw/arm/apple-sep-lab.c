@@ -97,6 +97,8 @@ struct AppleSEPLabState {
     MemoryRegion sepmmio;       /* broad SEP MMIO swath 0x2a2000000 as pokeable RAM */
     MemoryRegion region;        /* handoff memory region (PA 0x10000000000): the
                                  * tagged record blob SEPROM loads (sep64 0x8f70) */
+    MemoryRegion trap;          /* DEBUG: MMIO trap over image page @0x1e40074000 */
+    uint8_t trapbuf[0x4000];    /* DEBUG: shadow of that image page              */
     Error *migration_blocker;
 };
 
@@ -222,6 +224,67 @@ static const MemoryRegionOps sep_lab_ops = {
     },
 };
 
+
+
+/* TEMPORARY local-only debug hook (env SEP_TRAP_74430): overlay an MMIO trap
+ * over the image page at PA 0x1e40074000 so every write is seen with the
+ * writing PC + a short frame-pointer backtrace. Used to find who writes the
+ * cap word at 0x74430 (obj_debug.c:38). Not a SEP feature; gated off by env. */
+#define SEP_TRAP_PA   0x1e40528000ULL  /* roottask app-image copy (pool) */
+#define SEP_TRAP_OFF  0x430   /* copy+0x420 __DATA LC; +0x10 = +0x430 */
+
+static uint64_t sep_trap_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+    uint64_t v = 0;
+    if (off + size <= sizeof(s->trapbuf)) {
+        memcpy(&v, s->trapbuf + off, size);
+    }
+    return v;
+}
+
+static void sep_trap_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+    if (off + size <= sizeof(s->trapbuf)) {
+        memcpy(s->trapbuf + off, &val, size);
+    }
+    if (off <= SEP_TRAP_OFF && off + size > SEP_TRAP_OFF) {
+        CPUARMState *env = &s->cpu->env;
+        uint64_t fp = env->xregs[29];
+        int i;
+        fprintf(s->trace,
+                "{\"event\":\"trap74430\",\"pc\":\"0x%" PRIx64 "\",\"lr\":\"0x%"
+                PRIx64 "\",\"off\":\"0x%" HWADDR_PRIx "\",\"size\":%u,\"value\":"
+                "\"0x%" PRIx64 "\",\"word74430\":\"0x%x\",\"fp\":\"0x%" PRIx64
+                "\"}\n",
+                (uint64_t)env->pc, (uint64_t)env->xregs[30], off, size, val,
+                *(uint32_t *)(s->trapbuf + SEP_TRAP_OFF), fp);
+        for (i = 0; i < 10 && fp; i++) {
+            uint64_t frame[2] = { 0, 0 };
+            if (cpu_memory_rw_debug(CPU(s->cpu), fp, (uint8_t *)frame,
+                                    sizeof(frame), false) != 0) {
+                break;
+            }
+            fprintf(s->trace, "{\"event\":\"trap74430.frame\",\"i\":%d,\"fp\":"
+                    "\"0x%" PRIx64 "\",\"ret\":\"0x%" PRIx64 "\"}\n",
+                    i, (uint64_t)frame[0], (uint64_t)frame[1]);
+            if (frame[0] <= fp) {
+                break;
+            }
+            fp = frame[0];
+        }
+        fflush(s->trace);
+    }
+}
+
+static const MemoryRegionOps sep_trap_ops = {
+    .read = sep_trap_read,
+    .write = sep_trap_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
+    .impl = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
+};
 
 /* SEPROM-equivalent record loader: lay down the tagged record directory the
  * sep64 parser (image 0x8f70) walks over the handoff region. Each 16-byte
@@ -446,6 +509,15 @@ static void sep_lab_init(MachineState *machine)
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, SEP_REGION_BASE,
                                             &s->region, 0);
+        if (getenv("SEP_TRAP_74430")) {
+            memset(s->trapbuf, 0, sizeof(s->trapbuf)); /* pool starts zeroed */
+            memory_region_init_io(&s->trap, OBJECT(s), &sep_trap_ops, s,
+                                  "sep-trap-74430", sizeof(s->trapbuf));
+            memory_region_add_subregion_overlap(&s->private_memory, SEP_TRAP_PA,
+                                                &s->trap, 1);
+            error_report("SEP lab DEBUG: trap over 0x%llx active",
+                         (unsigned long long)SEP_TRAP_PA);
+        }
     }
 
     /* AP regions are not silently reused as the SEP's private MMIO map. */
