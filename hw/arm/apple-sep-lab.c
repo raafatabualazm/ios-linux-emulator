@@ -337,12 +337,44 @@ static void sep_lab_write_region_blob(AppleSEPLabState *s)
     reg = memory_region_get_ram_ptr(&s->region);
     memset(reg, 0, SEP_REGION_SIZE);
     rec = (void *)reg;
-    /* Ascending, non-overlapping, each contained in the 0x400000 region. */
+    /*
+     * One directory, two parsers (kernel 0x8f70, roottask 0xd990; the kernel
+     * hands the same region to the roottask via bootinfo +0x11b0/+0x11b8 at
+     * 0x90a4). Record = {u32 tag, u32 size, u64 offset-from-region-base}.
+     * Both require ascending, non-overlapping, region-contained records;
+     * the kernel needs offset >= 0x4000 and ignores unknown tags (0x901c);
+     * the roottask needs 16K-aligned offset+size (0xda6c/0xda74), maps only
+     * FLAG/PNIC/TXMB and its 4-entry table at 0x174cc (0xfbe8), and asserts
+     * (0xdb88 -> 0xf200) that the first payload it maps lies >= n*16 bytes
+     * from the base, i.e. the directory fits ahead of the first record.
+     * PNIC must be exactly 0x8000 for the roottask (0xd9cc); the kernel takes
+     * it as its panic buffer (0x9050). Size 0 terminates both walks.
+     */
     rec[0] = (typeof(rec[0])){ TAG_CPUT, 0x4000,  0x004000 };
     rec[1] = (typeof(rec[1])){ TAG_CONS, 0x4000,  0x008000 };
     rec[2] = (typeof(rec[2])){ TAG_CORE, 0x4000,  0x00c000 };
     rec[3] = (typeof(rec[3])){ TAG_TRAC, 0x4000,  0x010000 };
-    /* rec[4] left zero: count 0 terminates the parser walk. */
+    rec[4] = (typeof(rec[4])){ 0x504e4943 /* PNIC */, 0x8000, 0x014000 };
+    /* FLAG: roottask maps it; payload must list SEPO with flags bit0
+     * so the TXMB default create at 0xdc30 runs (0xdbf0/0xdc2c). */
+    rec[5] = (typeof(rec[5])){ 0x464c4147 /* FLAG */, 0x4000, 0x01c000 };
+    rec[6] = (typeof(rec[6])){ 0x414c504f, 0x4000,  0x020000 };
+    rec[7] = (typeof(rec[7])){ 0x53495049, 0x4000,  0x024000 };
+    rec[8] = (typeof(rec[8])){ 0x53434f54, 0x4000,  0x028000 };
+    rec[9] = (typeof(rec[9])){ 0x4e4f544f, 0x4000,  0x02c000 };
+    /* rec[10] left zero: size 0 terminates both walks. 10*16 << 0x4000. */
+    /*
+     * FLAG payload at region+0x1c000 (roottask 0xdbcc..0xdc2c):
+     *   u32 count; then count x {u32 tag, u32 flags}.
+     * Must contain tag SEPO (0x5345504f) with flags bit0 set, or the
+     * TXMB default create at 0xdc30 is skipped.
+     */
+    {
+        uint32_t *flag = (uint32_t *)(reg + 0x1c000);
+        flag[0] = 1;              /* count */
+        flag[1] = 0x5345504f;     /* "SEPO" */
+        flag[2] = 1;              /* flags: bit0 */
+    }
 }
 
 /* Auto-seed the lab-proven SEPROM handoff so a seprom=on boot needs no gdb
@@ -362,9 +394,31 @@ static void sep_lab_seed_handoff(AppleSEPLabState *s)
         bpse[0] = 0x53455042;
         bpse[2] = 1;
         bpse[0x70 / 4] = 0x528000;
+        /*
+         * SEPB+0x78 = size of the post-image DRAM carve used by the
+         * roottask to build the FMST object (0xd7dc). Zero skips that
+         * path (0xd8e4), leaves [0x6e700]=0, and the later c52c grant
+         * at 0xea1c asserts on a NULL handle. 16K-aligned; 0x4000 is
+         * the minimum the FMST create at 0xd87c accepts.
+         */
+        bpse[0x78 / 4] = 0x4000;
+        /*
+         * Insecure-RNG seed pair read by the roottask's
+         * _liblibc_seed_insecure_rand ("s1 || s2" assert). Fixed,
+         * non-secret lab constants.
+         */
+        bpse[0x80 / 4] = 0x5345504c;
+        bpse[0x84 / 4] = 0x00000001;
+        bpse[0x88 / 4] = 0x41425321;
+        bpse[0x8c / 4] = 0x00000002;
     }
     cfg0800 = memory_region_get_ram_ptr(&s->cfg0800);
-    cfg0800[0x408 / 4] = 0x2a3fff;
+    /*
+     * DRAM-window sizing word: 0x9001f makes the roottask's SEP DRAM window
+     * exactly [0x1e00000000, 0x1e40000000), which passes its region-table
+     * consistency check at 0x10218 (0x2a3fff failed it).
+     */
+    cfg0800[0x408 / 4] = 0x9001f;
     cfg0800[0x410 / 4] = 0;
     cfg0800[0x418 / 4] = 0;
     cfg0c40 = memory_region_get_ram_ptr(&s->cfg0c40);
