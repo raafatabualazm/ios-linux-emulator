@@ -320,6 +320,13 @@ static void sep_lab_init(MachineState *machine)
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, SEP_KRAM_BASE,
                                             &s->kram, 0);
+        /* Run sepOS from the SEP RAM carveout, as SEPROM loads it: the kernel's
+         * own map points VA 0xffffffff00000000 -> PA 0x1e40000000, so the image
+         * must be there (not PA 0). The image's 0x24000..end is zero BSS, which
+         * is exactly where the page-table pool (0x1e40024000) is allocated, so
+         * the tables overwrite only zero BSS. Reset directly into the carveout. */
+        memcpy(memory_region_get_ram_ptr(&s->kram), image, image_size);
+        s->entry = SEP_KRAM_BASE;
     }
 
     /* AP regions are not silently reused as the SEP's private MMIO map. */
