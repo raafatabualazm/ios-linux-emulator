@@ -44,7 +44,9 @@ typedef struct AppleModernSEPCore {
     MemoryRegion fuse;        /* security-fuse shadow 0x2e42c8000             */
     MemoryRegion sepmmio;     /* pokeable SEP MMIO swath 0x2a2000000          */
     MemoryRegion mmio;        /* catch-all for remaining 0x2_xxxxxxxx         */
-    qemu_irq sep_irq;         /* SEP cpu ARM_CPU_IRQ (for future ASC-v6)      */
+    qemu_irq sep_irq;         /* SEP cpu ARM_CPU_IRQ (ASC-v6 SEP-iop doorbell) */
+    MemoryRegion mbox_alias;  /* SEP private view of the shared ASC-v6 (M3)    */
+    bool mailbox_attached;
     uint64_t ram_size;
     uint64_t entry;           /* reset PC = SEP_CORE_KRAM_BASE                */
     bool seprom_handoff;      /* true once handoff RAM/sysregs seeded         */
@@ -56,6 +58,20 @@ typedef struct AppleModernSEPCore {
  * gdb pokes. `cntfrq` from the AP is ignored; the SEP timebase is forced
  * to 24 MHz. Returns false with errp set on failure.
  */
+/*
+ * M3 skeleton (default off, sep-core-mailbox=on): expose the AP's ASC-v6
+ * wrapper (APPLE_A7IOP_V6, the same AppleA7IOP the AP maps at its ADT
+ * /arm-io/sep reg) inside the SEP core's private address space at
+ * SEP_CORE_MBOX_BASE, and wire its "SEP-iop" mailbox SEP_CPU_IRQ gpio to the
+ * SEP core ARM_CPU_IRQ. Pure transport: no message handler, no SKS/crypto.
+ * SEP_CORE_MBOX_BASE is a DECLARED placement, not measured from sepOS.
+ */
+#define SEP_CORE_MBOX_BASE 0x2a1000000ULL
+struct AppleA7IOP;
+bool apple_modern_sep_core_attach_mailbox(AppleModernSEPCore *core,
+                                          struct AppleA7IOP *a7iop,
+                                          Error **errp);
+
 bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
                                   const char *cpu_type, uint64_t cntfrq,
                                   const char *image_path, Error **errp);

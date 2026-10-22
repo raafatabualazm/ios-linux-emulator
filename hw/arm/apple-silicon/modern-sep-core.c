@@ -24,6 +24,8 @@
 #include "system/reset.h"
 #include "target/arm/cpu.h"
 #include "hw/arm/apple-silicon/modern-sep-core.h"
+#include "hw/misc/apple-silicon/a7iop/core.h"
+#include "hw/misc/apple-silicon/a7iop/base.h"
 
 /* Catch-all for the remaining 0x2_xxxxxxxx aperture after specific RAM pages
  * are overlaid at higher priority. Reads return 0; writes are logged. */
@@ -235,5 +237,30 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
                 cpu_type, image_path, (size_t)len,
                 (uint64_t)SEP_CORE_KRAM_BASE, (uint64_t)SEP_CORE_BPSE_ADDR,
                 (uint64_t)SEP_CORE_FUSE_BASE, (uint64_t)SEP_CORE_CNTFRQ);
+    return true;
+}
+
+bool apple_modern_sep_core_attach_mailbox(AppleModernSEPCore *core,
+                                          AppleA7IOP *a7iop, Error **errp)
+{
+    if (!core->cpu || !a7iop || !a7iop->iop_mailbox) {
+        error_setg(errp, "sep-core-mailbox needs sep-core=on and an ASC-v6 "
+                   "SEP wrapper (sep-mailbox=on)");
+        return false;
+    }
+    /* Same wrapper MMIO the AP sees (CTRL/SEND/RECV frames), SEP-side view. */
+    memory_region_init_alias(&core->mbox_alias, OBJECT(a7iop),
+                             "modern-sep.asc-v6", &a7iop->mmio, 0,
+                             memory_region_size(&a7iop->mmio));
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_MBOX_BASE,
+                                        &core->mbox_alias, 10);
+    /* SEP-iop doorbell -> SEP core IRQ (as sep.c wires it for t8030). */
+    qdev_connect_gpio_out_named(DEVICE(a7iop->iop_mailbox),
+                                APPLE_A7IOP_SEP_CPU_IRQ, 0, core->sep_irq);
+    core->mailbox_attached = true;
+    warn_report("apple-modern: sep-core-mailbox: ASC-v6 '%s' shared AP<->SEP; "
+                "SEP view at 0x%" PRIx64 " (declared), SEP-iop -> ARM_CPU_IRQ. "
+                "Transport only, no SKS/crypto replies", a7iop->role,
+                (uint64_t)SEP_CORE_MBOX_BASE);
     return true;
 }

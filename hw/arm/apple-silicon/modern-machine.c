@@ -170,6 +170,7 @@ struct AppleModernMachine {
     uint32_t sep_chip_id;
     bool sep_chip_id_set;
     bool sep_core;
+    bool sep_core_mailbox;
     char *sep_core_image;
     AppleModernSEPCore sep_core_state;
     char *sep_txm_sc_hex;
@@ -4916,6 +4917,14 @@ static void modern_init(MachineState *machine)
             error_report_err(sep_err);
             exit(EXIT_FAILURE);
         }
+        if (s->sep_core_mailbox &&
+            !apple_modern_sep_core_attach_mailbox(
+                &s->sep_core_state,
+                (s->sep_mbox && !s->sep_sim) ? APPLE_A7IOP(s->sep_mbox) : NULL,
+                &sep_err)) {
+            error_report_err(sep_err);
+            exit(EXIT_FAILURE);
+        }
     }
     for (unsigned i = 0; i < s->cpu_count; i++) {
         modern_wire_cpu_fiq(s, i);
@@ -5270,6 +5279,7 @@ BOOL_PROPERTY(sep_trace, sep_trace)
 BOOL_PROPERTY(sep_mailbox, sep_mailbox)
 BOOL_PROPERTY(sep_sim, sep_sim)
 BOOL_PROPERTY(sep_core, sep_core)
+BOOL_PROPERTY(sep_core_mailbox, sep_core_mailbox)
 BOOL_PROPERTY(sep_dart, sep_dart)
 BOOL_PROPERTY(modern_pmgr, modern_pmgr)
 BOOL_PROPERTY(modern_mcc_dramcfg, modern_mcc_dramcfg)
@@ -5645,6 +5655,12 @@ static void modern_class_init(ObjectClass *oc, const void *data)
         "run the real decrypted sepOS on a second Apple core in its own "
         "address space (needs sep-core-image=; default off; alternative to "
         "the sep-sim protocol faker)");
+    object_class_property_add_bool(oc, "sep-core-mailbox",
+                                   get_sep_core_mailbox, set_sep_core_mailbox);
+    object_class_property_set_description(oc, "sep-core-mailbox",
+        "M3 skeleton (default off): share the ASC-v6 SEP wrapper (needs "
+        "sep-mailbox=on, not sep-sim) with the sep-core CPU and wire SEP-iop "
+        "to its IRQ; transport only");
     object_class_property_add_str(oc, "sep-core-image", get_sep_core_image,
                                   set_sep_core_image);
     object_class_property_set_description(oc, "sep-core-image",
