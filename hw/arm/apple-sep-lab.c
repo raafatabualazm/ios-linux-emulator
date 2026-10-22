@@ -95,6 +95,8 @@ struct AppleSEPLabState {
     MemoryRegion cfg0c40;       /* memory-config regs 0x2a0c40xxx as RAM        */
     MemoryRegion fuse;          /* SEP security-fuse shadow at 0x2e42c8000      */
     MemoryRegion sepmmio;       /* broad SEP MMIO swath 0x2a2000000 as pokeable RAM */
+    MemoryRegion region;        /* handoff memory region (PA 0x10000000000): the
+                                 * tagged record blob SEPROM loads (sep64 0x8f70) */
     Error *migration_blocker;
 };
 
@@ -109,6 +111,13 @@ struct AppleSEPLabState {
 
 /* SEP SRAM (stack/data) discovered at boot: SP := 0x2a0220000 (image pc 0x404c).
  * Kept well below the first SEP MMIO block (0x2a0800000) so it shadows none. */
+/* Handoff region the 0x2a2404810 encode advertises (base 0x10000000000, size
+ * 0x400000 after the sep64 decode). SEPROM backs it with SEP DRAM and writes a
+ * tagged record directory (CONS/CORE/CPUT/TRAC/null) into it (sep64 parser at
+ * image 0x8f70). Back it as RAM so the loader can lay that blob down and the
+ * kernel's object walk reads real records instead of zeros. */
+#define SEP_REGION_BASE 0x10000000000ULL
+#define SEP_REGION_SIZE 0x1000000ULL  /* 16 MiB >= decoded 0x400000 */
 #define SEP_SRAM_BASE 0x2a0200000ULL
 #define SEP_SRAM_SIZE 0x400000ULL   /* 4 MiB */
 #define SEP_DISCOVER_LOG_CAP 200000
@@ -214,6 +223,38 @@ static const MemoryRegionOps sep_lab_ops = {
 };
 
 
+/* SEPROM-equivalent record loader: lay down the tagged record directory the
+ * sep64 parser (image 0x8f70) walks over the handoff region. Each 16-byte
+ * record is [tag:4][count:4][offset:8]; the parser requires offsets ascending
+ * and >= 0x4000, each [offset, offset+count) contained in the region size, and
+ * recognizes tags CONS/CORE/CPUT/TRAC/PNIC/null. A null (count 0) record ends
+ * the walk. The ranges partition the region into the kernel's initial
+ * constant/core/cap-untyped/trace sub-regions. Synthetic layout: a declared
+ * directory, not a measured Apple SEP memory map. */
+static void sep_lab_write_region_blob(AppleSEPLabState *s)
+{
+    uint8_t *reg;
+    struct { uint32_t tag; uint32_t count; uint64_t offset; } *rec;
+    /* FourCC little-endian words as the parser builds them (image 0x8f70+). */
+    const uint32_t TAG_CPUT = 0x43505554; /* "CPUT" */
+    const uint32_t TAG_TRAC = 0x54524143; /* "TRAC" */
+    const uint32_t TAG_CONS = 0x434f4e53; /* "CONS" */
+    const uint32_t TAG_CORE = 0x434f5245; /* "CORE" */
+
+    if (!s->seprom) {
+        return;
+    }
+    reg = memory_region_get_ram_ptr(&s->region);
+    memset(reg, 0, SEP_REGION_SIZE);
+    rec = (void *)reg;
+    /* Ascending, non-overlapping, each contained in the 0x400000 region. */
+    rec[0] = (typeof(rec[0])){ TAG_CPUT, 0x4000,  0x004000 };
+    rec[1] = (typeof(rec[1])){ TAG_CONS, 0x4000,  0x008000 };
+    rec[2] = (typeof(rec[2])){ TAG_CORE, 0x4000,  0x00c000 };
+    rec[3] = (typeof(rec[3])){ TAG_TRAC, 0x4000,  0x010000 };
+    /* rec[4] left zero: count 0 terminates the parser walk. */
+}
+
 /* Auto-seed the lab-proven SEPROM handoff so a seprom=on boot needs no gdb
  * pokes for BPSE / cfg / fuse / region / boot-role. Same contract as
  * modern-sep-core's sep_core_seed_handoff. Synthetic identity. */
@@ -251,6 +292,7 @@ static void sep_lab_seed_handoff(AppleSEPLabState *s)
     /* boot-role = BPSE|1 (cold build path); ready bit stays 1. */
     s->cpu->env.apple_modern_sep_store[14] = 0x2a0210000ULL | 1ULL;
     s->cpu->env.apple_modern_sep_store[13] = 1ULL;
+    sep_lab_write_region_blob(s);
 }
 
 static void sep_lab_reset(void *opaque)
@@ -396,6 +438,14 @@ static void sep_lab_init(MachineState *machine)
          * the tables overwrite only zero BSS. Reset directly into the carveout. */
         memcpy(memory_region_get_ram_ptr(&s->kram), image, image_size);
         s->entry = SEP_KRAM_BASE;
+        /* Handoff memory region the sep64 region encode points at. The real
+         * SEPROM maps SEP DRAM here and writes the tagged record directory the
+         * kernel parses at image 0x8f70; back it as RAM so the loader
+         * (sep_lab_seed_handoff) can lay that blob down. */
+        memory_region_init_ram(&s->region, NULL, "sep-region", SEP_REGION_SIZE,
+                               &error_fatal);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_REGION_BASE,
+                                            &s->region, 0);
     }
 
     /* AP regions are not silently reused as the SEP's private MMIO map. */

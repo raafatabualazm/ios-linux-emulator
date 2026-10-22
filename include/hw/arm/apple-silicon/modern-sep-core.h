@@ -30,6 +30,11 @@
 #define SEP_CORE_SEPMMIO_BASE   0x2a2000000ULL
 #define SEP_CORE_SEPMMIO_SIZE   0x1000000ULL    /* 16 MiB */
 #define SEP_CORE_CNTFRQ         24000000ULL
+/* Handoff memory region the sep64 encode advertises (base 0x10000000000,
+ * decoded size 0x400000). SEPROM backs it and writes the tagged record
+ * directory the kernel parses at image 0x8f70. */
+#define SEP_CORE_REGION_BASE    0x10000000000ULL
+#define SEP_CORE_REGION_SIZE    0x1000000ULL    /* 16 MiB >= decoded 0x400000 */
 
 typedef struct AppleModernSEPCore {
     ARMCPU *cpu;
@@ -43,6 +48,7 @@ typedef struct AppleModernSEPCore {
     MemoryRegion cfg0c40;     /* memory-config page 0x2a0c40000               */
     MemoryRegion fuse;        /* security-fuse shadow 0x2e42c8000             */
     MemoryRegion sepmmio;     /* pokeable SEP MMIO swath 0x2a2000000          */
+    MemoryRegion region;      /* handoff region 0x10000000000: tagged blob     */
     MemoryRegion mmio;        /* catch-all for remaining 0x2_xxxxxxxx         */
     qemu_irq sep_irq;         /* SEP cpu ARM_CPU_IRQ (ASC-v6 SEP-iop doorbell) */
     MemoryRegion mbox_alias;  /* SEP private view of the shared ASC-v6 (M3)    */

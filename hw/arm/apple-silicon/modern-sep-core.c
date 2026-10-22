@@ -113,6 +113,22 @@ static void sep_core_seed_handoff(AppleModernSEPCore *core)
     /* Ready bit (s3_6_c15_c12_4) must stay 1 across reset. */
     core->cpu->env.apple_modern_sep_store[13] = 1ULL;
 
+    /* SEPROM-equivalent record loader: tagged record directory the sep64 parser
+     * (image 0x8f70) walks. 16-byte records [tag:4][count:4][offset:8], offsets
+     * ascending and >= 0x4000, each range contained in the region; tags
+     * CONS/CORE/CPUT/TRAC recognized; a count-0 record ends the walk. Synthetic
+     * declared layout, not a measured Apple SEP memory map. */
+    {
+        uint8_t *reg = memory_region_get_ram_ptr(&core->region);
+        struct { uint32_t tag; uint32_t count; uint64_t offset; } *rec =
+            (void *)reg;
+        memset(reg, 0, SEP_CORE_REGION_SIZE);
+        rec[0] = (typeof(rec[0])){ 0x43505554, 0x4000, 0x004000 }; /* CPUT */
+        rec[1] = (typeof(rec[1])){ 0x434f4e53, 0x4000, 0x008000 }; /* CONS */
+        rec[2] = (typeof(rec[2])){ 0x434f5245, 0x4000, 0x00c000 }; /* CORE */
+        rec[3] = (typeof(rec[3])){ 0x54524143, 0x4000, 0x010000 }; /* TRAC */
+    }
+
     core->seprom_handoff = true;
 }
 
@@ -202,6 +218,13 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
                            SEP_CORE_SEPMMIO_SIZE, &error_fatal);
     memory_region_add_subregion_overlap(&core->container, SEP_CORE_SEPMMIO_BASE,
                                         &core->sepmmio, 0);
+
+    /* Handoff memory region the region encode points at; SEPROM lays the tagged
+     * record directory here (loaded by sep_core_seed_handoff). */
+    memory_region_init_ram(&core->region, NULL, "modern-sep.region",
+                           SEP_CORE_REGION_SIZE, &error_fatal);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_REGION_BASE,
+                                        &core->region, 0);
 
     address_space_init(&core->as, &core->container, "modern-sep");
 
