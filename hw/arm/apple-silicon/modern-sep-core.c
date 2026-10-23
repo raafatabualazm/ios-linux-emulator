@@ -18,6 +18,7 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "qemu/bswap.h"
+#include "qemu/guest-random.h"
 #include "qapi/error.h"
 #include "hw/qdev-properties.h"
 #include "hw/irq.h"
@@ -333,6 +334,98 @@ static uint64_t sep_kic_read(void *opaque, hwaddr off, unsigned size)
  * when sepOS programs its KIC (+0x80c), just before the poll.
  * SEP_CORE_BOOTDESC=off disables.
  */
+
+/*
+ * SEPROM bootstrap-endpoint shim. sep-core runs sepOS directly (the SEPROM
+ * stage is replaced by sep_core_seed_handoff + the ep 0xfe boot descriptor),
+ * so nothing answers AppleSEPBooter on ep 0xff. Model what the AP sees from
+ * a SEP that an earlier stage already booted: the ROM announces BOOTSTRAP
+ * status once (op 210), then sepOS itself sends its discovery adverts and
+ * CONTROL NOTIFY_ALIVE (observed: 0x...fd adverts, 0x000d0000). ROM-phase
+ * ops the Booter may still issue (ping/status/nonce/TZ0/IMG4/ART/TMM/patch,
+ * 1..7, 16, 36, 37) are answered here with the request+100 pattern used by
+ * sep-sim; every other ep 0xff op (post-boot sepOS services) and all other
+ * endpoints reach sepOS unchanged. Declared emulator behaviour.
+ */
+#define SEP_ROM_EP_BOOTSTRAP 0xff
+#define SEP_ROM_OP_ANNOUNCE_STATUS 210
+
+static void sep_rom_reply(AppleModernSEPCore *core, uint8_t tag, uint8_t op,
+                          uint8_t param, uint32_t data)
+{
+    AppleA7IOPMessage *msg = g_new0(AppleA7IOPMessage, 1);
+
+    msg->data[0] = SEP_ROM_EP_BOOTSTRAP;
+    msg->data[1] = tag;
+    msg->data[2] = op;
+    msg->data[3] = param;
+    stl_le_p(msg->data + 4, data);
+    apple_a7iop_send_ap(core->a7iop, msg);
+}
+
+static void sep_rom_announce(AppleModernSEPCore *core)
+{
+    if (!core->rom_shim || core->rom_announced || !core->a7iop) {
+        return;
+    }
+    core->rom_announced = true;
+    core->rom_status = 1; /* SEP_STATUS_BOOTSTRAP */
+    sep_rom_reply(core, 0, SEP_ROM_OP_ANNOUNCE_STATUS, 0, core->rom_status);
+    error_report("modern-sep-core: ROM shim: ep 0xff ANNOUNCE_STATUS %u → AP",
+                 core->rom_status);
+}
+
+static bool sep_rom_filter(void *opaque, AppleA7IOPMessage *msg)
+{
+    AppleModernSEPCore *core = opaque;
+    uint8_t ep = msg->data[0], tag = msg->data[1], op = msg->data[2];
+    uint8_t param = msg->data[3];
+    uint32_t data = 0, rnd = 0;
+
+    if (!core->rom_shim || ep != SEP_ROM_EP_BOOTSTRAP) {
+        return false;
+    }
+    switch (op) {
+    case 1: case 2: case 3: case 4: case 5: case 6: case 7:
+    case 16: case 36: case 37:
+        break;
+    default:
+        error_report("modern-sep-core: ROM shim: ep 0xff op %u → sepOS", op);
+        return false;
+    }
+    core->rom_ops++;
+    switch (op) {
+    case 2:
+        data = core->rom_status;
+        break;
+    case 3:
+        data = 0xa0;
+        param = 0;
+        break;
+    case 4:
+    case 16:
+        qemu_guest_getrandom_nofail(&rnd, sizeof(rnd));
+        data = rnd;
+        if (op == 16) {
+            param = 0;
+        }
+        break;
+    case 5:
+        core->rom_status = 2; /* SEP_STATUS_ACTIVE */
+        param = 0;
+        break;
+    default:
+        param = 0;
+        break;
+    }
+    error_report("modern-sep-core: ROM shim: ep 0xff tag %u op %u param %u "
+                 "→ reply op %u data 0x%x", tag, op, msg->data[3], op + 100,
+                 data);
+    sep_rom_reply(core, tag, op + 100, param, data);
+    g_free(msg);
+    return true;
+}
+
 static void sep_core_post_boot_desc(AppleModernSEPCore *core)
 {
     AppleA7IOPMessage *msg;
@@ -342,6 +435,7 @@ static void sep_core_post_boot_desc(AppleModernSEPCore *core)
         return;
     }
     core->boot_desc_sent = true;
+    sep_rom_announce(core);
     msg = g_new0(AppleA7IOPMessage, 1);
     stl_le_p(msg->data + 0x0, 0x040000feu);
     stl_le_p(msg->data + 0x4, (uint32_t)(SEP_CORE_REGION_BASE >> 12));
@@ -795,6 +889,8 @@ static void sep_core_reset(void *opaque)
     core->trng_pending = false;
     core->mbox_pending = false;
     core->boot_desc_sent = false;
+    core->rom_announced = false;
+    core->rom_status = 1;
     core->t_ctrl = 0;
     core->t_stat = 0;
     if (core->timer) {
@@ -1037,6 +1133,16 @@ bool apple_modern_sep_core_attach_mailbox(AppleModernSEPCore *core,
                                         &core->mbox_alias, 10);
     /* KIC claim (prio 20) already covers +0x800.. over this alias. */
     core->a7iop = a7iop;
+    {
+        const char *rs = getenv("SEP_CORE_ROMSHIM");
+
+        core->rom_shim = !(rs && !strcmp(rs, "off"));
+        core->rom_status = 1;
+        if (core->rom_shim) {
+            a7iop->iop_mailbox->send_filter = sep_rom_filter;
+            a7iop->iop_mailbox->send_filter_opaque = core;
+        }
+    }
     /* OR the a7iop line with our timer/TRNG sources (one CPU IRQ input). */
     qdev_connect_gpio_out_named(DEVICE(a7iop->iop_mailbox),
                                 APPLE_A7IOP_SEP_CPU_IRQ, 0,

@@ -223,6 +223,10 @@ static void apple_a7iop_mailbox_send(AppleA7IOPMailbox *s,
 {
     assert_nonnull(msg);
 
+    if (s->send_filter && s->send_filter(s->send_filter_opaque, msg)) {
+        return;
+    }
+
     QEMU_LOCK_GUARD(&s->lock);
 
     trace_apple_a7iop_mailbox_send(s->role, ldq_le_p(msg->data),

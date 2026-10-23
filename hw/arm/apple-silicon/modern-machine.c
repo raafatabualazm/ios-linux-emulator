@@ -4116,6 +4116,17 @@ static void modern_init(MachineState *machine)
         metadata_input.chosen_chip_id = s->sep_chip_id_set ? s->sep_chip_id : 0x8140;
     }
     /*
+     * Grok sep-core: AppleSEPManager::start creates its AppleSEPFirmware from
+     * /chosen/memory-map SEPFW (fromPreload); without that object
+     * _setPowerState skips _bootSEP and the AP never opens the SEP mailbox
+     * (observed: zero AP accesses to 0x282600000). Same 16 MiB carveout as
+     * sep-sim. SEP_CORE_SEPFW=off disables it for bisection.
+     */
+    if (s->sep_core && !s->sepfw_absent && !metadata_input.sep_fw_carveout_size &&
+        !(getenv("SEP_CORE_SEPFW") && !strcmp(getenv("SEP_CORE_SEPFW"), "off"))) {
+        metadata_input.sep_fw_carveout_size = 16 * MiB;
+    }
+    /*
      * Publish the acknowledge offset even when modern-aic is off: XNU's
      * AppleInterruptControllerV3 requires the property regardless of whether
      * we model the controller, and panics without it. Zero is refused here

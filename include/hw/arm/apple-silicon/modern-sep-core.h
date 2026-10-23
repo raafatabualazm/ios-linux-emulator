@@ -122,6 +122,11 @@ typedef struct AppleModernSEPCore {
     bool mbox_pending;
     bool mbox_line;             /* live a7iop SEP-iop IRQ level */
     bool boot_desc_sent;
+    /* SEPROM bootstrap-endpoint shim (SEP_CORE_ROMSHIM=off disables). */
+    bool rom_shim;
+    bool rom_announced;
+    uint32_t rom_status;
+    uint32_t rom_ops;
     uint32_t mbox_claims;
     struct AppleA7IOP *a7iop;
     uint64_t t_fires;

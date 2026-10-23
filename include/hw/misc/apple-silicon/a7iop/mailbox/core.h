@@ -96,6 +96,13 @@ struct AppleA7IOPMailbox {
     QemuMutex lock;
     MemoryRegion mmio;
     QEMUBH *handle_messages_bh;
+    /*
+     * Optional synchronous inbox filter (Grok sep-core ROM shim). Called
+     * before a frame is queued, without this mailbox's lock held. Returning
+     * true means the filter consumed (and freed) the frame.
+     */
+    bool (*send_filter)(void *opaque, AppleA7IOPMessage *msg);
+    void *send_filter_opaque;
     QTAILQ_HEAD(, AppleA7IOPMessage) inbox;
     QTAILQ_HEAD(, AppleA7IOPInterruptStatusMessage) interrupt_status;
     uint32_t count;
