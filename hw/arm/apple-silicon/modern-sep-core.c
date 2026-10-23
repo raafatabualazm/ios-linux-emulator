@@ -554,6 +554,7 @@ static void sep_core_apply_phase2(AppleModernSEPCore *core)
 {
     uint8_t *kram;
     uint32_t retab = 0xd65f0fffu;
+    uint32_t ret_plain = 0xd65f03c0u;
     uint32_t b_tramp;
     uint32_t tramp[6];
     uint32_t bl_imm;
@@ -575,7 +576,16 @@ static void sep_core_apply_phase2(AppleModernSEPCore *core)
         error_report("modern-sep-core: sep-phase2 start-all exit OOB");
         return;
     }
-    memcpy(kram + fo, &retab, 4);
+    /*
+     * Plain RET, not RETAB: start-all's epilogue already ran AUTIBSP
+     * (0x118514) and its brk-on-failure check, so LR is authenticated.
+     * A second RETAB authenticates a stripped pointer; on this SEP CPU
+     * (PAuth on, FEAT_FPAC) that traps at EL0 (ESR EC 0x1c, syn 0x72000001,
+     * PC slide+0x118524), SEPD dies, and its panic recursion ends in the
+     * EL0 Trans_L3 at ELR 0xb350 / kernel halt 0xc798. The trampoline's
+     * own RETAB is correct (it returns with create-fn's signed LR and SP).
+     */
+    memcpy(kram + fo, &ret_plain, 4);
 
     off = (int32_t)SEP_CORE_EP_START_ALL - (int32_t)(SEP_CORE_EP_TRAMP + 12);
     bl_imm = 0x94000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
