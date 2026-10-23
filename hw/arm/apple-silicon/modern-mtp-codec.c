@@ -136,6 +136,44 @@ size_t apple_modern_mt_frame(uint8_t *out, uint8_t counter, uint32_t ms,
     return APPLE_MODERN_MT_FRAME_LEN;
 }
 
+static uint16_t mt_s16_bits(int64_t v)
+{
+    return (uint16_t)(int16_t)(v > INT16_MAX ? INT16_MAX : v < INT16_MIN ? INT16_MIN : v);
+}
+
+size_t apple_modern_mt_frame_paths(uint8_t *out, uint8_t counter, uint32_t ms,
+                                   const AppleModernMtPath *paths, unsigned n)
+{
+    if (n == 0 || n > APPLE_MODERN_MT_MAX_PATHS) {
+        return 0;
+    }
+    memset(out, 0, APPLE_MODERN_MT_FRAME_LEN_N(n));
+    out[0] = APPLE_MODERN_MT_REPORT_ID;
+    out[1] = counter;
+    out[2] = APPLE_MODERN_MT_HDR_LEN;  /* the paths follow the header */
+    put32(out + 4, ms);
+    out[16] = (uint8_t)n;
+    out[17] = APPLE_MODERN_MT_PATH_LEN;  /* every path has the 20-byte core */
+    for (unsigned i = 0; i < n; i++) {
+        uint8_t *q = out + APPLE_MODERN_MT_HDR_LEN + i * APPLE_MODERN_MT_PATH_LEN;
+        const AppleModernMtPath *c = &paths[i];
+
+        q[0] = c->id;
+        q[1] = c->stage;
+        q[2] = c->id;                      /* one finger per path */
+        q[3] = 1;                          /* hand */
+        put16(q + 4, (uint16_t)c->x);
+        put16(q + 6, (uint16_t)c->y);
+        put16(q + 8, mt_s16_bits(c->vx));
+        put16(q + 10, mt_s16_bits(c->vy));
+        put16(q + 12, 660);                /* same contact ellipse as one finger */
+        put16(q + 14, 580);
+        put16(q + 16, 19317);
+        put16(q + 18, 100);
+    }
+    return APPLE_MODERN_MT_FRAME_LEN_N(n);
+}
+
 int64_t apple_modern_mt_velocity(int dpos, uint32_t dt_ms)
 {
     return dt_ms ? (int64_t)dpos * 80 / (int64_t)dt_ms : 0;

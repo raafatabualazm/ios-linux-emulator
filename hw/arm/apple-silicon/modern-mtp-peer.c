@@ -7,6 +7,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
 #include "qapi/error.h"
@@ -38,6 +39,42 @@
 #define MT_MIN_SPACING_NS (8 * SCALE_MS)   /* a real controller reports at 60 to 120 Hz */
 #define MT_HIST 16               /* contact samples kept for the lift-off velocity */
 #define MT_LIFT_WINDOW_MS 100    /* lift-off velocity is averaged over this window */
+
+/*
+ * One finger of the multi-contact engine. A contact is reported in every frame
+ * from MakeTouch until OutOfRange: MultitouchSupport moves a path that is
+ * missing from a frame to OutOfRange itself, so a finger that is still down must
+ * never be left out.
+ */
+#define MT_MAX_CONTACTS APPLE_MODERN_MT_MAX_PATHS
+
+enum {
+    MTC_FREE,                    /* not in use */
+    MTC_DOWN,                    /* next frame: MakeTouch */
+    MTC_TOUCHING,                /* next frame: Touching, or BreakTouch once lift is set */
+    MTC_LINGER,                  /* next frame: LingerInRange */
+    MTC_OUT,                     /* next frame: OutOfRange, then free */
+};
+
+#define PTR2_PINCH 1
+#define PTR2_PAN 2
+#define PTR2_SLOT (-2)           /* contact slot of the pointer's two fingers */
+#define PTR2_PAN_GAP_PX 80       /* the second finger of a pan, to the right of the pointer */
+
+typedef struct MtContact {
+    uint8_t phase;               /* MTC_* */
+    uint8_t id;                  /* path id while in use */
+    bool lift;                   /* lift-off requested */
+    bool placed;                 /* a position is known (multi-touch input sends it after begin) */
+    uint8_t axes;                /* input axes seen since begin: 1 = x, 2 = y */
+    int slot;                    /* QEMU multi-touch slot driving it, -1 when scripted or lifted */
+    int ax, ay;                  /* input position, 0..INPUT_EVENT_ABS_MAX */
+    int x, y;                    /* position, sensor units */
+    int rep_x, rep_y;            /* position in the previous frame */
+    uint32_t rep_ms;             /* timestamp of the previous frame */
+    struct { uint32_t ms; int x, y; } hist[MT_HIST];
+    unsigned hist_n;
+} MtContact;
 
 /*
  * The HID report descriptor the real MTP firmware serves for the multi-touch
@@ -132,6 +169,30 @@ struct AppleModernMtpPeer {
     int64_t gesture_hold;        /* ns the finger stays at the end point before lifting */
     int gesture_x0, gesture_y0, gesture_x1, gesture_y1;   /* ABS units */
     unsigned gesture_tick;
+    /*
+     * Multi-contact engine: every finger in one frame per MT_FRAME_NS. It is fed by
+     * QEMU multi-touch input (QMP input-send-event "mtt", a touch screen on a GTK
+     * display) and by the multi-finger x-touch gestures. The pointer bridge and the
+     * single-finger tap/swipe above are separate and unchanged; only one of the two
+     * owns the touch stream at a time.
+     */
+    MtContact mc[MT_MAX_CONTACTS];
+    QEMUTimer *multi_timer;
+    bool multi_on;               /* the engine owns the touch stream */
+    bool mtt_seen;               /* multi-touch input arrived since the last sync */
+    bool mtt_refused;            /* a multi-touch begin was refused (warned once) */
+    bool mg_on;                  /* a scripted multi-finger gesture is running */
+    unsigned mg_n, mg_tick;
+    int64_t mg_dur, mg_hold;     /* ns */
+    struct { int x0, y0, x1, y1, c; } mg_f[MT_MAX_CONTACTS];  /* sensor units, contact index */
+    /*
+     * Two fingers from a pointer (a VNC client has no multi-touch): a right-button
+     * drag pinches, the second finger mirrored about the panel centre; a
+     * middle-button drag pans with two fingers side by side.
+     */
+    bool btn_right, btn_middle;
+    int ptr2_mode;               /* 0 none, PTR2_PINCH or PTR2_PAN */
+    int ptr2_c[2];               /* contact indices while a mode is active */
     const uint8_t *hid_desc;     /* descriptor served for interface 1 */
     size_t hid_desc_len;
     unsigned frames_logged;
@@ -535,10 +596,445 @@ static void peer_gesture_tick(void *opaque)
     timer_mod(p->gesture_timer, p->gesture_t0 + (int64_t)p->gesture_tick * MT_FRAME_NS);
 }
 
+/* Input position (0..INPUT_EVENT_ABS_MAX) in sensor units, the mapping of peer_pointer_sensor. */
+static void peer_abs_to_sensor(int ax, int ay, int *x, int *y)
+{
+    *x = (uint64_t)CLAMP(ax, 0, INPUT_EVENT_ABS_MAX) * (MT_SURFACE_W - 1) / INPUT_EVENT_ABS_MAX;
+    *y = (MT_SURFACE_H - 1) -
+         (int)((uint64_t)CLAMP(ay, 0, INPUT_EVENT_ABS_MAX) * (MT_SURFACE_H - 1) / INPUT_EVENT_ABS_MAX);
+}
+
+static bool peer_multi_live(AppleModernMtpPeer *p)
+{
+    for (int i = 0; i < MT_MAX_CONTACTS; i++) {
+        if (p->mc[i].phase != MTC_FREE) {
+            return true;
+        }
+    }
+    return p->mg_on;
+}
+
+/* A free contact taking the lowest path id no contact in use has; -1 when all are in use. */
+static int peer_mc_alloc(AppleModernMtpPeer *p, int slot)
+{
+    uint32_t used = 0;
+    int k = -1;
+
+    for (int i = 0; i < MT_MAX_CONTACTS; i++) {
+        if (p->mc[i].phase != MTC_FREE) {
+            used |= 1u << p->mc[i].id;
+        } else if (k < 0) {
+            k = i;
+        }
+    }
+    if (k < 0) {
+        return -1;
+    }
+    memset(&p->mc[k], 0, sizeof(p->mc[k]));
+    p->mc[k].phase = MTC_DOWN;
+    p->mc[k].slot = slot;
+    for (unsigned id = 1; id < 32; id++) {
+        if (!(used & (1u << id))) {
+            p->mc[k].id = id;
+            break;
+        }
+    }
+    p->multi_on = true;
+    return k;
+}
+
+/* The contact a multi-touch slot drives: down or touching and not lifted. */
+static int peer_mc_of_slot(AppleModernMtpPeer *p, int slot)
+{
+    for (int i = 0; i < MT_MAX_CONTACTS; i++) {
+        MtContact *c = &p->mc[i];
+
+        if ((c->phase == MTC_DOWN || c->phase == MTC_TOUCHING) && !c->lift &&
+            c->slot == slot) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void peer_mc_sample(MtContact *c, uint32_t ms)
+{
+    unsigned s = c->hist_n++ % MT_HIST;
+
+    c->hist[s].ms = ms;
+    c->hist[s].x = c->x;
+    c->hist[s].y = c->y;
+}
+
+/* Lift-off velocity of one contact: the average over the last MT_LIFT_WINDOW_MS (see peer_lift_off). */
+static void peer_mc_lift_velocity(const MtContact *c, uint32_t ms, int64_t *vx, int64_t *vy)
+{
+    unsigned n = MIN(c->hist_n, (unsigned)MT_HIST);
+
+    *vx = *vy = 0;
+    for (unsigned i = 0; i < n; i++) {
+        unsigned s = (c->hist_n - 1 - i) % MT_HIST;
+        int64_t age = (int64_t)ms - c->hist[s].ms;
+
+        if (age > MT_LIFT_WINDOW_MS) {
+            break;
+        }
+        if (age > 0) {
+            *vx = apple_modern_mt_velocity(c->x - c->hist[s].x, age);
+            *vy = apple_modern_mt_velocity(c->y - c->hist[s].y, age);
+        }
+    }
+}
+
+/*
+ * One frame carrying every contact in use, each at its next stage. Due now, but
+ * never closer than MT_MIN_SPACING_NS to the previous frame of either engine,
+ * with a strictly increasing timestamp. Returns the number of paths sent.
+ */
+static unsigned peer_multi_frame(AppleModernMtpPeer *p)
+{
+    AppleModernMtPath paths[MT_MAX_CONTACTS];
+    uint8_t rep[APPLE_MODERN_MT_FRAME_LEN_N(MT_MAX_CONTACTS)];
+    uint8_t out[APPLE_MODERN_SCM_MAX_MSG];
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t due = MAX(now, p->mt_last_due + MT_MIN_SPACING_NS);
+    uint32_t ms = due / SCALE_MS + 1;
+    unsigned n = 0;
+    size_t len;
+
+    if (ms <= p->mt_last_ms) {
+        ms = p->mt_last_ms + 1;
+    }
+    for (int i = 0; i < MT_MAX_CONTACTS; i++) {
+        MtContact *c = &p->mc[i];
+        AppleModernMtPath *e;
+
+        if (c->phase == MTC_FREE) {
+            continue;
+        }
+        if (c->phase == MTC_DOWN && !c->placed) {
+            if (c->lift) {
+                c->phase = MTC_FREE;          /* lifted before it had a position */
+            }
+            continue;
+        }
+        e = &paths[n++];
+        e->id = c->id;
+        e->x = c->x;
+        e->y = c->y;
+        e->vx = 0;
+        e->vy = 0;
+        switch (c->phase) {
+        case MTC_DOWN:
+            e->stage = APPLE_MODERN_MT_STAGE_MAKE_TOUCH;
+            c->hist_n = 0;
+            peer_mc_sample(c, ms);
+            c->phase = MTC_TOUCHING;
+            break;
+        case MTC_TOUCHING:
+            if (c->lift) {
+                e->stage = APPLE_MODERN_MT_STAGE_BREAK_TOUCH;
+                peer_mc_lift_velocity(c, ms, &e->vx, &e->vy);
+                c->phase = MTC_LINGER;
+            } else {
+                e->stage = APPLE_MODERN_MT_STAGE_TOUCHING;
+                e->vx = apple_modern_mt_velocity(c->x - c->rep_x, ms - c->rep_ms);
+                e->vy = apple_modern_mt_velocity(c->y - c->rep_y, ms - c->rep_ms);
+                peer_mc_sample(c, ms);
+            }
+            break;
+        case MTC_LINGER:
+            e->stage = APPLE_MODERN_MT_STAGE_LINGER_IN_RANGE;
+            c->phase = MTC_OUT;
+            break;
+        default:
+            e->stage = APPLE_MODERN_MT_STAGE_OUT_OF_RANGE;
+            c->phase = MTC_FREE;
+            break;
+        }
+        c->rep_x = c->x;
+        c->rep_y = c->y;
+        c->rep_ms = ms;
+    }
+    if (n == 0) {
+        return 0;
+    }
+    p->mt_last_due = due;
+    p->mt_last_ms = ms;
+    if (p->touch_frames < PEER_LOG_FRAMES) {
+        g_autoptr(GString) paths_log = g_string_new(NULL);
+
+        for (unsigned i = 0; i < n; i++) {
+            g_string_append_printf(paths_log, " [id %u stage %u x %d y %d vx %d vy %d]",
+                                   paths[i].id, paths[i].stage, paths[i].x, paths[i].y,
+                                   (int)paths[i].vx, (int)paths[i].vy);
+        }
+        warn_report("apple-modern: mtp-peer mt frame %u ts %u paths %u:%s",
+                    p->mt_frame, ms, n, paths_log->str);
+    }
+    len = apple_modern_mt_frame_paths(rep, p->mt_frame++, ms, paths, n);
+    len = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 1, rep, len,
+                                  true, 0, 0);
+    p->touch_frames++;
+    peer_queue(p, out, len, due - now);
+    return n;
+}
+
+/*
+ * Engine clock: one frame per MT_FRAME_NS while a contact is in use. A scripted
+ * multi-finger gesture moves its fingers along their lines first, exactly as the
+ * single-finger gesture does (MakeTouch at the start points, the lift-off at the
+ * end points after the hold time).
+ */
+static void peer_multi_tick(void *opaque)
+{
+    AppleModernMtpPeer *p = opaque;
+
+    if (p->mg_on) {
+        int64_t steps = MAX(1, (p->mg_dur + MT_FRAME_NS - 1) / MT_FRAME_NS);
+        int64_t last = steps + (p->mg_hold + MT_FRAME_NS - 1) / MT_FRAME_NS;
+        int64_t k = p->mg_tick++, m = MIN(k, steps);
+
+        for (unsigned f = 0; f < p->mg_n; f++) {
+            MtContact *c = &p->mc[p->mg_f[f].c];
+
+            c->x = p->mg_f[f].x0 + (int)((int64_t)(p->mg_f[f].x1 - p->mg_f[f].x0) * m / steps);
+            c->y = p->mg_f[f].y0 + (int)((int64_t)(p->mg_f[f].y1 - p->mg_f[f].y0) * m / steps);
+            c->lift = k >= last;
+        }
+        p->mg_on = k < last;
+    }
+    if (!peer_multi_frame(p)) {
+        p->multi_on = peer_multi_live(p);   /* contacts still waiting for a position */
+        return;
+    }
+    timer_mod(p->multi_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + MT_FRAME_NS);
+}
+
+static void peer_multi_kick(AppleModernMtpPeer *p)
+{
+    if (!timer_pending(p->multi_timer)) {
+        timer_mod(p->multi_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    }
+}
+
+/* Start a scripted gesture; px[f] = {x0, y0, x1, y1} in panel pixels. The engine is idle. */
+static void peer_multi_gesture(AppleModernMtpPeer *p, unsigned n,
+                               int px[][4], int ms, int hold)
+{
+    for (unsigned f = 0; f < n; f++) {
+        int c = peer_mc_alloc(p, -1);
+
+        peer_abs_to_sensor(peer_px_to_abs(px[f][0], PEER_FB_W),
+                           peer_px_to_abs(px[f][1], PEER_FB_H),
+                           &p->mg_f[f].x0, &p->mg_f[f].y0);
+        peer_abs_to_sensor(peer_px_to_abs(px[f][2], PEER_FB_W),
+                           peer_px_to_abs(px[f][3], PEER_FB_H),
+                           &p->mg_f[f].x1, &p->mg_f[f].y1);
+        p->mg_f[f].c = c;
+        p->mc[c].x = p->mg_f[f].x0;
+        p->mc[c].y = p->mg_f[f].y0;
+        p->mc[c].placed = true;
+    }
+    p->mg_n = n;
+    p->mg_dur = (int64_t)MAX(ms, 1) * SCALE_MS;
+    p->mg_hold = (int64_t)MAX(hold, 0) * SCALE_MS;
+    p->mg_tick = 0;
+    p->mg_on = true;
+    peer_multi_kick(p);
+}
+
+/*
+ * Multi-finger x-touch gestures, all fingers down and up together (panel pixels):
+ *   "tap2 X1 Y1 X2 Y2 [MS]"             two-finger tap, MS (default 60) long
+ *   "pinch CX CY D0 D1 [MS [HOLD_MS]]"  two fingers on the horizontal line through
+ *                                       (CX, CY), first D0 then D1 pixels apart:
+ *                                       D1 > D0 spreads (zoom in), D1 < D0 pinches;
+ *                                       default 400 ms
+ *   "multi MS HOLD_MS X0 Y0 X1 Y1 [X0 Y0 X1 Y1 ...]"
+ *                                       1 to 10 fingers, each from (X0, Y0) to (X1, Y1)
+ * Returns false when value is none of them.
+ */
+static bool peer_x_touch_multi(AppleModernMtpPeer *p, const char *value, Error **errp)
+{
+    int px[MT_MAX_CONTACTS][4];
+    int a, b, c, d, ms = 0, hold = 0, n;
+    unsigned fingers;
+
+    if (g_str_has_prefix(value, "tap2 ")) {
+        n = sscanf(value, "tap2 %d %d %d %d %d", &a, &b, &c, &d, &ms);
+        if (n < 4) {
+            error_setg(errp, "x-touch: expected 'tap2 X1 Y1 X2 Y2 [MS]'");
+            return true;
+        }
+        memcpy(px[0], (int[4]){ a, b, a, b }, sizeof(px[0]));
+        memcpy(px[1], (int[4]){ c, d, c, d }, sizeof(px[1]));
+        fingers = 2;
+        ms = n == 5 ? ms : 60;
+    } else if (g_str_has_prefix(value, "pinch ")) {
+        n = sscanf(value, "pinch %d %d %d %d %d %d", &a, &b, &c, &d, &ms, &hold);
+        if (n < 4) {
+            error_setg(errp, "x-touch: expected 'pinch CX CY D0 D1 [MS [HOLD_MS]]'");
+            return true;
+        }
+        memcpy(px[0], (int[4]){ a - c / 2, b, a - d / 2, b }, sizeof(px[0]));
+        memcpy(px[1], (int[4]){ a + c / 2, b, a + d / 2, b }, sizeof(px[1]));
+        fingers = 2;
+        ms = n >= 5 ? ms : 400;
+        hold = n == 6 ? hold : 0;
+    } else if (g_str_has_prefix(value, "multi ")) {
+        g_auto(GStrv) tok = g_strsplit_set(value + 6, " \t", -1);
+        int v[2 + 4 * MT_MAX_CONTACTS];
+        unsigned nv = 0;
+
+        for (char **t = tok; *t; t++) {
+            if (!**t) {
+                continue;
+            }
+            if (nv == ARRAY_SIZE(v) || qemu_strtoi(*t, NULL, 10, &v[nv]) < 0) {
+                nv = 0;
+                break;
+            }
+            nv++;
+        }
+        if (nv < 6 || (nv - 2) % 4) {
+            error_setg(errp, "x-touch: expected 'multi MS HOLD_MS X0 Y0 X1 Y1 "
+                       "[X0 Y0 X1 Y1 ...]' with 1 to %d fingers", MT_MAX_CONTACTS);
+            return true;
+        }
+        ms = v[0];
+        hold = v[1];
+        fingers = (nv - 2) / 4;
+        for (unsigned f = 0; f < fingers; f++) {
+            memcpy(px[f], &v[2 + 4 * f], sizeof(px[f]));
+        }
+    } else {
+        return false;
+    }
+    peer_multi_gesture(p, fingers, px, ms, hold);
+    warn_report("apple-modern: mtp-peer gesture: %s", value);
+    return true;
+}
+
+/*
+ * QEMU multi-touch input: begin starts a finger on a slot, data moves it (ABS
+ * units), end or cancel lifts it. The engine reports at its own cadence, so a
+ * finger that is held still keeps reporting Touching.
+ */
+static void peer_mtt_event(AppleModernMtpPeer *p, InputMultiTouchEvent *mtt)
+{
+    int i;
+
+    if (!p->init_sent) {
+        return;
+    }
+    i = peer_mc_of_slot(p, mtt->slot);
+    switch (mtt->type) {
+    case INPUT_MULTI_TOUCH_TYPE_BEGIN:
+        if (i >= 0) {
+            break;
+        }
+        if (p->contact || p->gesture_on || p->mg_on) {
+            if (!p->mtt_refused) {
+                p->mtt_refused = true;
+                warn_report("apple-modern: mtp-peer multi-touch input ignored while a "
+                            "pointer or scripted contact is down");
+            }
+            break;
+        }
+        if (peer_mc_alloc(p, mtt->slot) < 0) {
+            warn_report("apple-modern: mtp-peer multi-touch slot %" PRId64 " ignored: "
+                        "%d fingers are already down", mtt->slot, MT_MAX_CONTACTS);
+        }
+        break;
+    case INPUT_MULTI_TOUCH_TYPE_DATA:
+        if (i < 0) {
+            break;
+        }
+        if (mtt->axis == INPUT_AXIS_X) {
+            p->mc[i].ax = mtt->value;
+            p->mc[i].axes |= 1;
+        } else if (mtt->axis == INPUT_AXIS_Y) {
+            p->mc[i].ay = mtt->value;
+            p->mc[i].axes |= 2;
+        }
+        if (p->mc[i].axes == 3) {
+            peer_abs_to_sensor(p->mc[i].ax, p->mc[i].ay, &p->mc[i].x, &p->mc[i].y);
+            p->mc[i].placed = true;
+        }
+        break;
+    case INPUT_MULTI_TOUCH_TYPE_END:
+    case INPUT_MULTI_TOUCH_TYPE_CANCEL:
+        if (i >= 0) {
+            p->mc[i].lift = true;
+            p->mc[i].slot = -1;
+        }
+        break;
+    default:
+        break;                           /* update: the data events carry the change */
+    }
+    p->mtt_seen = true;
+}
+
+/* The pointer's second finger, input units: mirrored about the panel centre (pinch) or beside it (pan). */
+static void peer_ptr2_second(int mode, int ax, int ay, int *bx, int *by)
+{
+    if (mode == PTR2_PINCH) {
+        *bx = INPUT_EVENT_ABS_MAX - ax;
+        *by = INPUT_EVENT_ABS_MAX - ay;
+    } else {
+        int gap = PTR2_PAN_GAP_PX * INPUT_EVENT_ABS_MAX / (PEER_FB_W - 1);
+
+        *bx = ax + gap <= INPUT_EVENT_ABS_MAX ? ax + gap : ax - gap;
+        *by = ay;
+    }
+}
+
+/*
+ * Pointer two-finger modes, at each input sync: pressing the right (pinch) or
+ * middle (pan) button puts two fingers down, moving the pointer moves them, and
+ * releasing the button lifts both. Refused while another contact is down.
+ */
+static void peer_pointer2_sync(AppleModernMtpPeer *p)
+{
+    int mode = p->btn_right ? PTR2_PINCH : p->btn_middle ? PTR2_PAN : 0;
+    int ax[2], ay[2];
+
+    if (p->ptr2_mode && mode != p->ptr2_mode) {
+        for (int i = 0; i < 2; i++) {
+            p->mc[p->ptr2_c[i]].lift = true;
+        }
+        p->ptr2_mode = 0;
+        peer_multi_kick(p);
+        return;
+    }
+    if (!mode) {
+        return;
+    }
+    if (!p->ptr2_mode) {
+        if (p->contact || p->gesture_on || p->multi_on) {
+            return;
+        }
+        for (int i = 0; i < 2; i++) {
+            p->ptr2_c[i] = peer_mc_alloc(p, PTR2_SLOT);   /* cannot fail: nothing is down */
+            p->mc[p->ptr2_c[i]].placed = true;
+        }
+        p->ptr2_mode = mode;
+    }
+    ax[0] = p->abs_x;
+    ay[0] = p->abs_y;
+    peer_ptr2_second(p->ptr2_mode, ax[0], ay[0], &ax[1], &ay[1]);
+    for (int i = 0; i < 2; i++) {
+        peer_abs_to_sensor(ax[i], ay[i], &p->mc[p->ptr2_c[i]].x, &p->mc[p->ptr2_c[i]].y);
+    }
+    peer_multi_kick(p);
+}
+
 /*
  * QOM property "x-touch" on the DockChannel device (QMP qom-set):
  *   "tap X Y [HOLD_MS]"                          pixel coordinates of the 1024x768 panel
  *   "swipe X0 Y0 X1 Y1 [DURATION_MS [HOLD_MS]]"  e.g. "swipe 512 745 512 300 250"
+ * and the multi-finger gestures of peer_x_touch_multi ("tap2", "pinch", "multi").
  */
 static void peer_x_touch_set(Object *obj, const char *value, Error **errp)
 {
@@ -550,8 +1046,12 @@ static void peer_x_touch_set(Object *obj, const char *value, Error **errp)
         error_setg(errp, "x-touch: the guest has not attached the touch device yet");
         return;
     }
-    if (p->gesture_on || p->contact) {
+    if (p->gesture_on || p->contact || p->multi_on) {
         error_setg(errp, "x-touch: a contact is already in progress");
+        return;
+    }
+    /* before the single-finger forms: "tap %d" would also read "tap2 ..." */
+    if (peer_x_touch_multi(p, value, errp)) {
         return;
     }
     if ((n = sscanf(value, "tap %d %d %d", &a, &b, &ms)) >= 2) {
@@ -612,7 +1112,14 @@ static void peer_input_event(DeviceState *dev, QemuConsole *src, InputEvent *evt
         btn = evt->u.btn.data;
         if (btn->button == INPUT_BUTTON_LEFT) {
             p->touching = btn->down;
+        } else if (btn->button == INPUT_BUTTON_RIGHT) {
+            p->btn_right = btn->down;
+        } else if (btn->button == INPUT_BUTTON_MIDDLE) {
+            p->btn_middle = btn->down;
         }
+        break;
+    case INPUT_EVENT_KIND_MTT:
+        peer_mtt_event(p, evt->u.mtt.data);
         break;
     default:
         break;
@@ -629,7 +1136,17 @@ static void peer_input_sync(DeviceState *dev)
     AppleModernMtpPeer *p = peer_of(dev);
     int x, y;
 
-    if (!p->init_sent || p->gesture_on) {
+    if (p->mtt_seen) {
+        p->mtt_seen = false;
+        if (peer_multi_live(p)) {
+            p->multi_on = true;
+            peer_multi_kick(p);
+        }
+    }
+    if (p->init_sent) {
+        peer_pointer2_sync(p);
+    }
+    if (!p->init_sent || p->gesture_on || p->multi_on) {
         return;
     }
     peer_pointer_sensor(p, &x, &y);
@@ -649,7 +1166,7 @@ static void peer_input_sync(DeviceState *dev)
 
 static const QemuInputHandler peer_input_handler = {
     .name = "apple-modern MTP touch",
-    .mask = INPUT_EVENT_MASK_BTN | INPUT_EVENT_MASK_ABS,
+    .mask = INPUT_EVENT_MASK_BTN | INPUT_EVENT_MASK_ABS | INPUT_EVENT_MASK_MTT,
     .event = peer_input_event,
     .sync = peer_input_sync,
 };
@@ -701,6 +1218,7 @@ AppleModernMtpPeer *apple_modern_mtp_peer_new(AppleModernDockChannelState *dc,
     p->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, peer_timer, p);
     p->touch_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, peer_touch_tick, p);
     p->gesture_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, peer_gesture_tick, p);
+    p->multi_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, peer_multi_tick, p);
     object_property_add_str(OBJECT(dc), "x-touch", peer_x_touch_get,
                             peer_x_touch_set);
     apple_modern_dockchannel_set_peer(dc, peer_tx, p);

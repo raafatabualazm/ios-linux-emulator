@@ -34,6 +34,16 @@ MUTANTS = [
     ("mt-velocity-wrapped-not-clamped", "    if (vx > INT16_MAX) {\n        vx = INT16_MAX;", "    if (vx > INT32_MAX) {\n        vx = INT16_MAX;"),
     ("mt-radius-swapped", "    put16(path + 12, 660);                 /* major radius, 0.01 mm */\n    put16(path + 14, 580);", "    put16(path + 12, 580);\n    put16(path + 14, 660);"),
     ("mt-velocity-unit-mm-per-second", "(int64_t)dpos * 80 / (int64_t)dt_ms", "(int64_t)dpos * 10 / (int64_t)dt_ms"),
+    # several fingers in one frame (apple_modern_mt_frame_paths)
+    ("mtn-count-off-by-one", "    out[16] = (uint8_t)n;", "    out[16] = (uint8_t)(n + 1);"),
+    ("mtn-paths-overlap", "out + APPLE_MODERN_MT_HDR_LEN + i * APPLE_MODERN_MT_PATH_LEN;", "out + APPLE_MODERN_MT_HDR_LEN;"),
+    ("mtn-finger-always-one", "    q[2] = c->id;                      /* one finger per path */", "    q[2] = 1;"),
+    ("mtn-id-zero-based", "        q[0] = c->id;", "        q[0] = (uint8_t)i;"),
+    ("mtn-empty-frame-accepted", "    if (n == 0 || n > APPLE_MODERN_MT_MAX_PATHS) {", "    if (n > APPLE_MODERN_MT_MAX_PATHS) {"),
+    ("mtn-no-upper-bound", "    if (n == 0 || n > APPLE_MODERN_MT_MAX_PATHS) {", "    if (n == 0) {"),
+    ("mtn-velocity-wraps", "v > INT16_MAX ? INT16_MAX : v < INT16_MIN ? INT16_MIN : v", "v"),
+    ("mtn-y-is-x", "        put16(q + 6, (uint16_t)c->y);", "        put16(q + 6, (uint16_t)c->x);"),
+    ("mtn-hand-zero", "        q[3] = 1;                          /* hand */", "        q[3] = 0;"),
 ]
 
 

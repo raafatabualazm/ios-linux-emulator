@@ -192,6 +192,88 @@ int main(void)
         CHECK(f[1] == 255 && rd32(f + 4) == 0xfffffffeu && rd16s(f + 28 + 4) == 9999 && rd16s(f + 28 + 6) == 7499);
     }
 
+    /* --- several fingers in one frame -------------------------------------------------- */
+    /* one path: byte for byte the independent swipe vectors above */
+    for (unsigned i = 0; i < 18; i++) {
+        uint8_t want[64], got[APPLE_MODERN_MT_FRAME_LEN_N(1)];
+        size_t wlen = unhex(swipe[i], want);
+        const uint8_t *path = want + APPLE_MODERN_MT_HDR_LEN;
+        AppleModernMtPath one = { 1, path[1], rd16s(path + 4), rd16s(path + 6),
+                                  rd16s(path + 8), rd16s(path + 10) };
+
+        CHECK(apple_modern_mt_frame_paths(got, want[1], rd32(want + 4), &one, 1) == wlen);
+        CHECK(!memcmp(got, want, wlen));
+    }
+
+    /*
+     * Two fingers making contact: written by hand from the layout of MT-REPORT.md
+     * section 4.4 (header with path count 2, then path 1 and path 2, finger id =
+     * path id, hand 1, contact ellipse 660/580/19317/100).
+     */
+    {
+        static const AppleModernMtPath two[2] = {
+            { 1, 3, 5000, 3750, 0, 0 },
+            { 2, 3, 2500, 3750, 0, 0 },
+        };
+        uint8_t want[96], got[APPLE_MODERN_MT_FRAME_LEN_N(2)];
+        size_t wlen = unhex("44 05 1c 00 d0 07 00 00 00 00 00 00 00 00 00 00 02 14 00 00 00 00 00 00 00 00 00 00"
+                            "01 03 01 01 88 13 a6 0e 00 00 00 00 94 02 44 02 75 4b 64 00"
+                            "02 03 02 01 c4 09 a6 0e 00 00 00 00 94 02 44 02 75 4b 64 00", want);
+
+        CHECK(wlen == 68 && APPLE_MODERN_MT_FRAME_LEN_N(2) == 68);
+        CHECK(apple_modern_mt_frame_paths(got, 5, 2000, two, 2) == wlen);
+        CHECK(!memcmp(got, want, wlen));
+    }
+
+    /* three fingers: path i sits at 28 + 20 * i and carries its own fields */
+    {
+        AppleModernMtPath three[3] = {
+            { 3, 4, 100, 200, 8, -8 },
+            { 1, 5, 9999, 7499, -40, 40 },
+            { 7, 6, 4000, 10, 0, 1 },
+        };
+        uint8_t f[APPLE_MODERN_MT_FRAME_LEN_N(3)];
+
+        CHECK(apple_modern_mt_frame_paths(f, 9, 77, three, 3) == 88);
+        CHECK(f[0] == 0x44 && f[1] == 9 && f[2] == 28 && rd32(f + 4) == 77 && f[16] == 3 && f[17] == 20);
+        for (unsigned i = 0; i < 3; i++) {
+            const uint8_t *q = f + 28 + 20 * i;
+
+            CHECK(q[0] == three[i].id && q[1] == three[i].stage && q[2] == three[i].id && q[3] == 1);
+            CHECK(rd16s(q + 4) == three[i].x && rd16s(q + 6) == three[i].y);
+            CHECK(rd16s(q + 8) == three[i].vx && rd16s(q + 10) == three[i].vy);
+        }
+    }
+
+    /* out of range: nothing written; the largest frame fits its length */
+    {
+        AppleModernMtPath many[APPLE_MODERN_MT_MAX_PATHS + 1];
+        uint8_t f[APPLE_MODERN_MT_FRAME_LEN_N(APPLE_MODERN_MT_MAX_PATHS + 1)];
+
+        for (unsigned i = 0; i <= APPLE_MODERN_MT_MAX_PATHS; i++) {
+            many[i] = (AppleModernMtPath){ (uint8_t)(i + 1), 4, (int)i * 100, 50, 0, 0 };
+        }
+        memset(f, 0xaa, sizeof(f));
+        CHECK(apple_modern_mt_frame_paths(f, 0, 1, many, 0) == 0);
+        CHECK(apple_modern_mt_frame_paths(f, 0, 1, many, APPLE_MODERN_MT_MAX_PATHS + 1) == 0);
+        CHECK(f[0] == 0xaa && f[sizeof(f) - 1] == 0xaa);
+        CHECK(apple_modern_mt_frame_paths(f, 0, 1, many, APPLE_MODERN_MT_MAX_PATHS) ==
+              28 + 20 * APPLE_MODERN_MT_MAX_PATHS);
+        CHECK(f[16] == APPLE_MODERN_MT_MAX_PATHS);
+        CHECK(f[28 + 20 * (APPLE_MODERN_MT_MAX_PATHS - 1)] == APPLE_MODERN_MT_MAX_PATHS);
+        CHECK(f[28 + 20 * APPLE_MODERN_MT_MAX_PATHS] == 0xaa);     /* nothing past the last path */
+    }
+
+    /* velocities saturate per path */
+    {
+        AppleModernMtPath sat[2] = { { 1, 4, 0, 0, 1000000, -1000000 }, { 2, 4, 0, 0, -32768, 32767 } };
+        uint8_t f[APPLE_MODERN_MT_FRAME_LEN_N(2)];
+
+        apple_modern_mt_frame_paths(f, 0, 1, sat, 2);
+        CHECK(rd16s(f + 28 + 8) == 32767 && rd16s(f + 28 + 10) == -32768);
+        CHECK(rd16s(f + 48 + 8) == -32768 && rd16s(f + 48 + 10) == 32767);
+    }
+
     printf("ok: %u checks\n", checks);
     return 0;
 }

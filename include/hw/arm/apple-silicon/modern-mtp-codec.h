@@ -75,6 +75,33 @@ size_t apple_modern_mt_frame(uint8_t *out, uint8_t counter, uint32_t ms,
                              uint8_t stage, int x, int y, int64_t vx, int64_t vy);
 
 /*
+ * Several fingers in one report 0x44. MultitouchSupport accepts up to 32 paths
+ * per 0x44 frame (bounds test 0x292bd2660: count <= 32 and H1 + H2 + stride *
+ * count <= length; its device maximum 0x292bcd3a8 is 32 for 0x44, 2 only for the
+ * compact 0x77 format) and path ids 1..31. Every finger in contact must be in
+ * every frame: a path missing from the next frame is moved to OutOfRange.
+ */
+#define APPLE_MODERN_MT_MAX_PATHS 10
+#define APPLE_MODERN_MT_FRAME_LEN_N(n) \
+    (APPLE_MODERN_MT_HDR_LEN + (n) * APPLE_MODERN_MT_PATH_LEN)
+
+typedef struct AppleModernMtPath {
+    uint8_t id;          /* path id 1..31; also used as the finger id */
+    uint8_t stage;       /* APPLE_MODERN_MT_STAGE_* */
+    int x, y;            /* 0.01 mm from the bottom-left of the sensor */
+    int64_t vx, vy;      /* 1/8 mm/s, saturated to s16 */
+} AppleModernMtPath;
+
+/*
+ * One report 0x44 with n paths (1..APPLE_MODERN_MT_MAX_PATHS) in the given
+ * order, hand id 1. ms must be non-zero and increase from frame to frame.
+ * Writes APPLE_MODERN_MT_FRAME_LEN_N(n) bytes and returns that length; returns
+ * 0 and writes nothing when n is out of range.
+ */
+size_t apple_modern_mt_frame_paths(uint8_t *out, uint8_t counter, uint32_t ms,
+                                   const AppleModernMtPath *paths, unsigned n);
+
+/*
  * Velocity for a path that moved dpos (0.01 mm) in dt_ms milliseconds, in the
  * unit the report uses (1/8 mm/s): dpos * 80 / dt_ms. dt_ms of 0 gives 0.
  */

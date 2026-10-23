@@ -24,6 +24,12 @@ Diagnostics and test hooks, all on the QOM object `/machine/modern-dockchannel-m
   so its timing does not depend on host scheduling. The lift-off (BreakTouch) frame is the last step of the motion and keeps
   its velocity, as a real controller's does; a HOLD_MS keeps the finger at the end point and lifts with zero velocity.
   Example: `qom-set ... x-touch "swipe 512 745 512 300 250"`.
+  Multi-finger forms, all fingers down and up together: `tap2 X1 Y1 X2 Y2 [MS]`, `pinch CX CY D0 D1 [MS [HOLD_MS]]`
+  (two fingers on the horizontal line through CX, CY, first D0 then D1 pixels apart: D1 > D0 spreads, D1 < D0 pinches) and
+  `multi MS HOLD_MS X0 Y0 X1 Y1 [X0 Y0 X1 Y1 ...]` (1 to 10 fingers, each from its start to its end point).
+* QEMU multi-touch input (QMP `input-send-event` events of type `mtt`, or a touch screen on a GTK display) drives up to 10
+  fingers: `begin` puts a finger down on a slot, `data` events move it (`x` / `y` in 0..0x7fff across the framebuffer), `end`
+  or `cancel` lifts it. See "Several fingers" below.
 * A pointer drag (VNC, QMP `input-send-event`) is one finger: absolute X/Y move it, the left button is touch down / up. A frame is generated every 16 ms while the
   button is down; frames are never closer than 8 ms (a release a millisecond after a periodic frame is delayed), and the lift-off frame carries the average velocity of the
   last 100 ms of the contact, because a flick is judged by the velocity at release.
@@ -96,9 +102,39 @@ A pointer tap (QMP `input-send-event`, a VNC click) works like a scripted tap, a
 velocity at release is near zero and the system does not treat it as a flick (the test script of the first boots paused 16 ms before releasing). A human flick with a VNC client
 releases while moving.
 
+## Several fingers
+
+Every finger in contact is a path of the same report `0x44` frame, and every frame must carry every finger from MakeTouch to
+OutOfRange: MultitouchSupport moves a path that is missing from a frame to OutOfRange on its own. Limits read in the shared cache
+(MultitouchSupport, iOS 27 24A437): the bounds test (`0x292bd2660`) accepts `count <= 32` and `28 + image + 20 * count <= length`;
+the per-frame device maximum (`0x292bcd3a8`, its only caller `0x292bc2acc` drops a frame with more paths) is 32 for `0x44` frames,
+because the `0x44` header path clears the frame's compact flag (`0x292bc295c`), and 2 only for the compact `0x77` format
+(`0x292bc3484` sets the flag); path ids must be 1..31. The model sends at most 10 paths.
+
+The multi-finger engine (`peer_multi_frame`) keeps a table of contacts, each with its own path id (the lowest id no live contact
+uses; finger id = path id, hand 1) and lifecycle MakeTouch, Touching, BreakTouch, LingerInRange, OutOfRange, and emits one frame
+per 16 ms of virtual time with all of them; velocities are per finger, and a finger's lift-off frame carries its average velocity
+over the last 100 ms, as the single-finger path does. It is fed by QEMU multi-touch input and by the multi-finger `x-touch`
+forms. The single-finger pointer bridge and `x-touch tap` / `swipe` are unchanged and separate; only one of the two owns the
+touch stream at a time (the other is refused or ignored until every finger is out of range).
+
+QMP example, two fingers down and up (values are framebuffer pixels scaled to 0..0x7fff):
+
+    { "execute": "input-send-event", "arguments": { "events": [
+      { "type": "mtt", "data": { "type": "begin", "slot": 0, "tracking-id": 0, "axis": "x", "value": 0 } },
+      { "type": "mtt", "data": { "type": "data",  "slot": 0, "tracking-id": 0, "axis": "x", "value": 16399 } },
+      { "type": "mtt", "data": { "type": "data",  "slot": 0, "tracking-id": 0, "axis": "y", "value": 16233 } },
+      { "type": "mtt", "data": { "type": "begin", "slot": 1, "tracking-id": 1, "axis": "x", "value": 0 } },
+      { "type": "mtt", "data": { "type": "data",  "slot": 1, "tracking-id": 1, "axis": "x", "value": 30012 } },
+      { "type": "mtt", "data": { "type": "data",  "slot": 1, "tracking-id": 1, "axis": "y", "value": 29178 } } ] } }
+    { "execute": "input-send-event", "arguments": { "events": [
+      { "type": "mtt", "data": { "type": "end", "slot": 1, "tracking-id": -1, "axis": "x", "value": 0 } },
+      { "type": "mtt", "data": { "type": "end", "slot": 0, "tracking-id": -1, "axis": "x", "value": 0 } } ] } }
+
 ## Not done
 
-* the other three interfaces' descriptors, the memory FIFOs (no IOMapper: `AppleT8110DART` never starts for `dart-mtp`
-  here), the MTP coprocessor itself, wftm provisioning (its D47S1 personality is not retained), more than one finger.
+* interfaces 2 (`mtp`) and 3 (`nova`) are not announced; they stay in AsyncRegistration and nothing in the touch screen path waits
+  for them. The memory FIFOs (no IOMapper: `AppleT8110DART` never starts for `dart-mtp` here), the MTP coprocessor itself, wftm
+  provisioning (its D47S1 personality is not retained).
 * Verified on the guest: sensor x to the right and sensor y up from the bottom edge map to the framebuffer without any flip
   (a tap at the carousel's information button opened its information view). One finger only.
