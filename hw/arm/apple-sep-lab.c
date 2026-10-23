@@ -138,6 +138,8 @@ struct AppleSEPLabState {
      */
     MemoryRegion trng_mr;
     uint32_t trng_regs[0x80 / 4];
+    MemoryRegion key_fcfg_mr;   /* KEY.FCFG +0x8000 @ 0x2a0e48000 (W side-effect) */
+    uint32_t key_fcfg_8000;
     /*
      * sep-stack-fix (default off; needs seprom): fill missing 16K EL0 stack
      * pages (synthetic layout leaves a Trans_L3 hole under SP). Pre-maps on
@@ -175,6 +177,7 @@ struct AppleSEPLabState {
 #define SEP_KIC_SIZE    0x40000ULL
 #define SEP_TRNG_PA     0x2a0b80000ULL
 #define SEP_TRNG_SIZE   0x80ULL
+#define SEP_KEY_FCFG_PA 0x2a0e48000ULL
 
 static uint64_t sep_pmgr_read(void *opaque, hwaddr off, unsigned size)
 {
@@ -258,12 +261,16 @@ static void sep_trng_write(void *opaque, hwaddr off, uint64_t val,
     if (off == 0x10) {
         /*
          * EPControl TRNG status (app 0x1197e0 / 0x119d68..0x119d80):
-         * write-1-to-clear, then HW raises bit0 (ready). Clearing alone
-         * leaves the app in tbz #0 poll forever (cookie path avoided, but
-         * no progress). Instant-ready is enough for bring-up.
+         * write-1-to-clear. Peer (Antigravity) keeps 0x101 = FIFO ready
+         * | DRBG ready across W1C; bit0 alone also satisfies the poll.
          */
         s->trng_regs[off / 4] &= ~(uint32_t)val;
-        s->trng_regs[off / 4] |= 0x1u;
+        s->trng_regs[off / 4] |= 0x101u;
+        return;
+    }
+    if (off == 0x14) {
+        /* TRNG.CTRL: command bit 15 (0x8000) self-clears (SEPD 0x7e24c). */
+        s->trng_regs[off / 4] = (uint32_t)val & ~0x8000u;
         return;
     }
     s->trng_regs[off / 4] = (uint32_t)val;
@@ -274,6 +281,40 @@ static const MemoryRegionOps sep_trng_ops = {
     .write = sep_trng_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/*
+ * KEY.FCFG +0x8000 (PA 0x2a0e48000): RPC 0x44ca writes 0xffff and checks
+ * state[18:16]==5 (peer Antigravity). Seed 0x40000; on 0xffff -> 0x5ffff.
+ */
+static uint64_t sep_key_fcfg_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+
+    return off == 0 ? s->key_fcfg_8000 : 0;
+}
+
+static void sep_key_fcfg_write(void *opaque, hwaddr off, uint64_t val,
+                               unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+
+    if (off != 0) {
+        return;
+    }
+    if ((uint32_t)val == 0xffffu) {
+        s->key_fcfg_8000 = 0x50000u | 0xffffu;
+    } else {
+        s->key_fcfg_8000 = (uint32_t)val;
+    }
+}
+
+static const MemoryRegionOps sep_key_fcfg_ops = {
+    .read = sep_key_fcfg_read,
+    .write = sep_key_fcfg_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
     .impl = { .min_access_size = 4, .max_access_size = 4 },
 };
 
@@ -606,20 +647,27 @@ static void sep_lab_seed_handoff(AppleSEPLabState *s)
      */
     cfg0c40[0x180 / 4] = 4;
     cfg0c40[0x1a0 / 4] = 0x4000;
-    /* Fuse already seeded at init; re-seed in case of soft reset wipe. */
+    /* Fuse/XPRT already mapped at 0x2e42c0000; re-seed on soft reset. */
     {
-        uint32_t *fz = (uint32_t *)memory_region_get_ram_ptr(&s->fuse);
+        uint8_t *xprt = memory_region_get_ram_ptr(&s->fuse);
+        uint32_t *fz = (uint32_t *)(xprt + 0x8000); /* 0x2e42c8000 */
         unsigned i;
 
+        *(uint32_t *)(xprt + 0x4000) = 0x32b3; /* XPRT.MISC */
         fz[0] = SEP_SENTINEL;
         fz[1] = SEP_SENTINEL;
+        fz[2] = SEP_SENTINEL;
+        fz[3] = SEP_SENTINEL;
+        for (i = 0x900 / 4; i <= 0x90c / 4; i++) {
+            fz[i] = SEP_SENTINEL;
+        }
         /* Antigravity / sender=3: also +0x9b0..+0x9cc */
         for (i = 0x9b0 / 4; i <= 0x9cc / 4; i++) {
             fz[i] = SEP_SENTINEL;
         }
-        /* AKPUCES / TRNG window at fuse_base+0x14000 (=0x2e42dc000). */
+        /* AKPUCES / TRNG window at 0x2e42dc000 (= fuse_base+0x1c000). */
         {
-            uint32_t *uces = &fz[0x14000 / 4];
+            uint32_t *uces = (uint32_t *)(xprt + 0x1c000);
             uces[0x00 / 4] = SEP_SENTINEL;
             uces[0x08 / 4] = SEP_SENTINEL;
             uces[0x20 / 4] = SEP_SENTINEL;
@@ -655,11 +703,12 @@ static void sep_lab_seed_handoff(AppleSEPLabState *s)
          * sep-stack-fix stays default-off.
          */
         memset(s->trng_regs, 0, sizeof(s->trng_regs));
-        /* Output FIFO words read by EPControl 0x119d8c..0x119db0. */
-        s->trng_regs[0x00 / 4] = 0x6b8b4567u;
-        s->trng_regs[0x04 / 4] = 0x327b23c6u;
-        s->trng_regs[0x08 / 4] = 0x643c9869u;
-        s->trng_regs[0x0c / 4] = 0x66334873u;
+        /* FIFO words: Antigravity/image FIPS POST vectors (SEPD + sks). */
+        s->trng_regs[0x00 / 4] = 0x34fbf246u;
+        s->trng_regs[0x04 / 4] = 0xb40a6f2du;
+        s->trng_regs[0x08 / 4] = 0xc56f4777u;
+        s->trng_regs[0x0c / 4] = 0x5f2c2401u;
+        s->trng_regs[0x10 / 4] = 0x101u; /* FIFO|DRBG ready */
         s->trng_regs[0x78 / 4] = 0x00180000u;
         s->trng_regs[0x7c / 4] = 0x02000000u;
         hi[(0x2a0bc1800ULL - 0x2a0b00000ULL) / 4] = 0x3;
@@ -675,7 +724,8 @@ static void sep_lab_seed_handoff(AppleSEPLabState *s)
         tbase = &plat[(0x2a0e40000ULL - 0x2a0d80000ULL) / 4];
         /* +0x400/+0x410 shadowed by timer IO; timer_read returns sentinel.
          * Higher offsets are visible through this RAM (prio 0). */
-        tbase[0x8000 / 4] = 0x40000;
+        tbase[0x8000 / 4] = 0x40000; /* shadowed by key_fcfg_mr */
+        s->key_fcfg_8000 = 0x40000;
         tbase[0xc000 / 4] = 0x5;
         tbase[0x10008 / 4] = 0x5;
         tbase[0x10010 / 4] = 0x4;
@@ -713,6 +763,14 @@ static void sep_lab_reset(void *opaque)
     cpu_reset(CPU(s->cpu));
     cpu_set_pc(CPU(s->cpu), s->entry);
     sep_lab_seed_handoff(s);
+    /*
+     * Entry stub (image 0x4010/0x40fc): x1 is the Mach-O copy source.
+     * Peer (Antigravity): x1 = SEP_KRAM_BASE so 0x4000 bytes land at
+     * 0x1e4001c000. Harmless when the image base is not MH_MAGIC_64.
+     */
+    if (s->seprom) {
+        s->cpu->env.xregs[1] = SEP_KRAM_BASE;
+    }
     s->faulted = false;
     s->reset_generation++;
     sep_lab_trace_reset(s);
@@ -885,6 +943,11 @@ static void sep_lab_init(MachineState *machine)
                               "sep-trng-regs", SEP_TRNG_SIZE);
         memory_region_add_subregion_overlap(&s->private_memory, SEP_TRNG_PA,
                                             &s->trng_mr, 10);
+        /* KEY.FCFG +0x8000 over plat RAM (prio above plat). */
+        memory_region_init_io(&s->key_fcfg_mr, NULL, &sep_key_fcfg_ops, s,
+                              "sep-key-fcfg", 4);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_KEY_FCFG_PA,
+                                            &s->key_fcfg_mr, 10);
         /* Platform pages 0x2a0d80000..0x2a0e80000 (sentinels + timer tail). */
         memory_region_init_ram(&s->plat, NULL, "sep-plat", 0x100000,
                                &error_fatal);
@@ -902,15 +965,18 @@ static void sep_lab_init(MachineState *machine)
          * RAM and seed the sentinels so sepOS proceeds; remaining fuse fields
          * are discovered by iteration (gdb pokes this RAM). */
         /*
-         * Fuse shadow 0x2e42c8000; expand through AKPUCES (TRNG) at
-         * 0x2e42dc000 size 0x8000 so sender/TRNG sentinel reads hit RAM.
+         * XPRT window 0x2e42c0000/0x30000: MISC @+0x4000, FUSE @+0x8000,
+         * through AKPUCES/PMSC @+0x1c000 (peer phys_range).
          */
-        memory_region_init_ram(&s->fuse, NULL, "sep-fuse", 0x20000,
+        memory_region_init_ram(&s->fuse, NULL, "sep-fuse", 0x30000,
                                &error_fatal);
-        memory_region_add_subregion_overlap(&s->private_memory, 0x2e42c8000ULL,
+        memory_region_add_subregion_overlap(&s->private_memory, 0x2e42c0000ULL,
                                             &s->fuse, 0);
         {
-            uint32_t *fz = (uint32_t *)memory_region_get_ram_ptr(&s->fuse);
+            uint8_t *xprt = memory_region_get_ram_ptr(&s->fuse);
+            uint32_t *fz = (uint32_t *)(xprt + 0x8000);
+
+            *(uint32_t *)(xprt + 0x4000) = 0x32b3; /* XPRT.MISC */
             fz[0] = 0xa55ac33c;
             fz[1] = 0xa55ac33c;
         }
