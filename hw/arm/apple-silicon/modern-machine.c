@@ -4106,6 +4106,16 @@ static void modern_init(MachineState *machine)
         metadata_input.chosen_chip_id = s->sep_chip_id_set ? s->sep_chip_id : 0x8140;
     }
     /*
+     * Grok sep-core: the same SEPROMPanicBuffer REQUIRE (chip-id != 0, @
+     * 0xfffffff0096309dc unslid) panics AppleSEPManager as soon as
+     * adt-compat-restore=...+sep lets it match /arm-io/sep, so publish the
+     * chip-id for the real-sepOS core too. No SEPFW carveout: the core is
+     * already running sepOS (DECLARED), the kernel does not ship firmware.
+     */
+    if (s->sep_core && !metadata_input.chosen_chip_id) {
+        metadata_input.chosen_chip_id = s->sep_chip_id_set ? s->sep_chip_id : 0x8140;
+    }
+    /*
      * Publish the acknowledge offset even when modern-aic is off: XNU's
      * AppleInterruptControllerV3 requires the property regardless of whether
      * we model the controller, and panics without it. Zero is refused here
