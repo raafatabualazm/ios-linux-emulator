@@ -37,6 +37,8 @@
  * Block-relative offsets. The mailbox region is mapped at wrapper + 0x8100,
  * so add 0x8100 for the absolute wrapper offsets quoted above.
  */
+#define REG_INT_MASK_SET (0x0) /* abs 0x8100; same as V4 */
+#define REG_INT_MASK_CLR (0x4) /* abs 0x8104 — note SEP ASC uses +0x4108 */
 #define REG_A2I_CTRL (0x10)  /* abs 0x8110, Apple's INBOX0_CTRL  */
 #define REG_I2A_CTRL (0x14)  /* abs 0x8114, Apple's OUTBOX0_CTRL */
 #define REG_A2I_SEND0 (0x700) /* abs 0x8800 */
@@ -93,6 +95,12 @@ static void apple_a7iop_v6_mailbox_reg_write(void *opaque, hwaddr addr,
     s->diagnostic_mmio_writes++;
     trace_apple_a7iop_mailbox_write(s->role, 6, addr, size, data);
     switch (addr) {
+    case REG_INT_MASK_SET:
+        apple_a7iop_mailbox_set_int_mask(s, (uint32_t)data);
+        break;
+    case REG_INT_MASK_CLR:
+        apple_a7iop_mailbox_clear_int_mask(s, (uint32_t)data);
+        break;
     case REG_A2I_CTRL:
         apple_a7iop_mailbox_set_iop_ctrl(s, (uint32_t)data);
         break;
@@ -184,6 +192,9 @@ static uint64_t apple_a7iop_v6_mailbox_reg_read(void *opaque, hwaddr addr,
                       cc->get_pc ? (uint64_t)cc->get_pc(current_cpu) : 0);
     }
     switch (addr) {
+    case REG_INT_MASK_SET:
+    case REG_INT_MASK_CLR:
+        return apple_a7iop_mailbox_get_int_mask(s);
     case REG_A2I_CTRL:
         return apple_a7iop_mailbox_get_iop_ctrl(s);
     case REG_I2A_CTRL:

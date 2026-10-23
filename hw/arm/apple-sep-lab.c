@@ -138,8 +138,10 @@ struct AppleSEPLabState {
     bool sep_inject;
     char *inject_script;
     MemoryRegion mbox_mr;
-    uint32_t mbox_magic;
-    uint32_t mbox_irqstat;
+    uint32_t mbox_int_mask;  /* +0x4100 SET / +0x4108 CLR (IOP_NONEMPTY=BIT4) */
+    MemoryRegion asc_a00_mr;   /* +0xa00 MASK_SET / +0xa80 MASK_CLR (ext IRQ) */
+    MemoryRegion asc_1010_mr;  /* +0x1010/+0x1014 bit1 */
+    uint32_t ext_irq_mask;    /* ASC ext IRQ mask; bit3=0x8 gates TRNG IRQ3 */
     uint32_t a2i_ctrl_en;
     uint32_t i2a_ctrl_en;
     uint8_t a2i_send_scratch[16];
@@ -162,6 +164,8 @@ struct AppleSEPLabState {
      */
     MemoryRegion trng_mr;
     uint32_t trng_regs[0x80 / 4];
+    bool sep_trng_irq;        /* default off: raise KIC 0x10003 on TRNG complete */
+    bool trng_pending;
     MemoryRegion key_fcfg_mr;   /* KEY.FCFG +0x8000 @ 0x2a0e48000 (W side-effect) */
     uint32_t key_fcfg_8000;
     /*
@@ -181,16 +185,20 @@ struct AppleSEPLabState {
 #define SEP_TIMER_HZ   24000000ULL
 #define SEP_KIC_TIMER_EVENT 0x00070001u /* type 7, bit0 valid, bit3 clear */
 #define SEP_KIC_MBOX_EVENT  0x00040000u
+#define SEP_KIC_TRNG_EVENT  0x00010003u /* type1 id3 → IRQ 3 (sks entropy) */
 #define SEP_ASC_MBOX_OFF    0x4100u
 #define SEP_ASC_MBOX_SIZE   0x800u
 #define SEP_MBOX_CTRL_EN    BIT(0)
 #define SEP_MBOX_CTRL_EMPTY BIT(17)
 #define SEP_MBOX_CTRL_COUNT_SHIFT 20
+#define SEP_MBOX_IOP_NONEMPTY BIT(4) /* a7iop IOP_NONEMPTY; AKF CLR unmasks */
+#define SEP_EXT_IRQ_TRNG    BIT(3)   /* ASC +0xa80 unmask value 0x8 */
 #define SEP_INJECT_QDEPTH 16
 #define SEP_INJECT_OUTLOG 64
 
 static void sep_inject_reset_state(AppleSEPLabState *s);
 static void sep_lab_init_inject(AppleSEPLabState *s);
+static void sep_lab_init_trng_irq(AppleSEPLabState *s);
 static void sep_lab_update_irq(AppleSEPLabState *s);
 /*
  * First-app PMGR window (j410 app @file 0x74000; device table name SSEASMBT).
@@ -305,8 +313,27 @@ static void sep_trng_write(void *opaque, hwaddr off, uint64_t val,
         return;
     }
     if (off == 0x14) {
-        /* TRNG.CTRL: command bit 15 (0x8000) self-clears (SEPD 0x7e24c). */
-        s->trng_regs[off / 4] = (uint32_t)val & ~0x8000u;
+        /*
+         * TRNG.CTRL: go-bit 15 (0x8000). EPControl polls tbnz #15 until clear
+         * (0x11a24c); the IRQ path expects bit15 to stay set until the KIC
+         * claim / status ack. With sep-trng-irq=on, posting KIC 0x10003 (IRQ 3)
+         * is gated by ASC ext-IRQ mask bit3 (+0xa80 CLR 0x8).
+         */
+        uint32_t v = (uint32_t)val;
+        if (s->sep_trng_irq && (v & 0x8000u)) {
+            s->trng_regs[off / 4] = v; /* keep bit15 until claim */
+            if (!(s->ext_irq_mask & SEP_EXT_IRQ_TRNG)) {
+                s->trng_pending = true;
+                sep_lab_update_irq(s);
+                error_report("SEP TRNG: go → KIC 0x%x (IRQ 3, CTRL=0x%x)",
+                             SEP_KIC_TRNG_EVENT, v);
+            } else {
+                error_report("SEP TRNG: go bit15 set but ext IRQ3 masked "
+                             "(mask=0x%x)", s->ext_irq_mask);
+            }
+        } else {
+            s->trng_regs[off / 4] = v & ~0x8000u;
+        }
         return;
     }
     s->trng_regs[off / 4] = (uint32_t)val;
@@ -1094,6 +1121,7 @@ static void sep_lab_init(MachineState *machine)
      * can wake sepOS from its WFE mailbox-wait. */
     s->sep_irq = qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_IRQ);
     sep_lab_init_timer(s);
+    sep_lab_init_trng_irq(s);
     sep_lab_init_inject(s);
     sep_lab_init_stack_fix(s);
     qemu_register_reset(sep_lab_reset, s);
@@ -1172,7 +1200,8 @@ static void sep_lab_set_irq(Object *obj, const char *value, Error **errp)
 
 static void sep_lab_update_irq(AppleSEPLabState *s)
 {
-    bool raise = s->t_pending || (s->sep_inject && s->mbox_pending);
+    bool raise = s->t_pending || s->trng_pending ||
+                 (s->sep_inject && s->mbox_pending);
 
     if (s->sep_irq) {
         qemu_set_irq(s->sep_irq, raise);
@@ -1200,6 +1229,12 @@ static uint32_t sep_inject_i2a_ctrl_read(AppleSEPLabState *s)
 static void sep_inject_raise_doorbell(AppleSEPLabState *s)
 {
     if (!s->sep_inject || s->a2i_count == 0) {
+        return;
+    }
+    /* a7iop: IOP_NONEMPTY line stays low while the bit is masked. */
+    if (s->mbox_int_mask & SEP_MBOX_IOP_NONEMPTY) {
+        error_report("SEP inject: doorbell suppressed (IOP_NONEMPTY masked "
+                     "int_mask=0x%x a2i=%u)", s->mbox_int_mask, s->a2i_count);
         return;
     }
     s->mbox_pending = true;
@@ -1246,8 +1281,9 @@ static void sep_inject_reset_state(AppleSEPLabState *s)
     if (!s->mbox_kic_event) {
         s->mbox_kic_event = SEP_KIC_MBOX_EVENT;
     }
-    s->mbox_magic = 0x55551111u;
-    s->mbox_irqstat = 0;
+    /* Match a7iop: int_mask defaults fully unmasked so NONEMPTY can fire.
+     * Kernel later SET 0x55551111; AKF CLR 0x10 to unmask NONEMPTY again. */
+    s->mbox_int_mask = 0;
     s->a2i_ctrl_en = SEP_MBOX_CTRL_EN;
     s->i2a_ctrl_en = SEP_MBOX_CTRL_EN;
     memset(s->a2i_send_scratch, 0, sizeof(s->a2i_send_scratch));
@@ -1280,9 +1316,10 @@ static uint64_t sep_mbox_read(void *opaque, hwaddr off, unsigned size)
 
     switch (off) {
     case 0x00:
-        return s->mbox_magic;
     case 0x08:
-        return s->mbox_irqstat;
+        /* ASC-v6 mailbox: INT_MASK_SET (+0x4100) / INT_MASK_CLR (+0x4108).
+         * Read returns the live mask (kernel SET 0x55551111 is visible). */
+        return s->mbox_int_mask;
     case 0x10:
         return sep_inject_a2i_ctrl_read(s);
     case 0x14:
@@ -1322,13 +1359,22 @@ static void sep_mbox_write(void *opaque, hwaddr off, uint64_t val, unsigned size
 
     switch (off) {
     case 0x00:
-        s->mbox_magic = (uint32_t)val;
-        break;
-    case 0x08:
-        s->mbox_irqstat = (uint32_t)val;
-        if (val & 0x10) {
+        /* INT_MASK_SET (a7iop REG_INT_MASK_SET): OR bits into the mask. */
+        s->mbox_int_mask |= (uint32_t)val;
+        if (s->mbox_int_mask & SEP_MBOX_IOP_NONEMPTY) {
             s->mbox_pending = false;
             sep_lab_update_irq(s);
+        }
+        error_report("SEP inject: INT_MASK_SET |= 0x%x → mask 0x%x",
+                     (uint32_t)val, s->mbox_int_mask);
+        break;
+    case 0x08:
+        /* INT_MASK_CLR: AND-NOT. AKF writes 0x10 to unmask IOP_NONEMPTY. */
+        s->mbox_int_mask &= ~(uint32_t)val;
+        error_report("SEP inject: INT_MASK_CLR &= ~0x%x → mask 0x%x",
+                     (uint32_t)val, s->mbox_int_mask);
+        if ((val & SEP_MBOX_IOP_NONEMPTY) && s->a2i_count) {
+            sep_inject_raise_doorbell(s);
         }
         break;
     case 0x10:
@@ -1597,6 +1643,14 @@ static uint64_t sep_kic_read(void *opaque, hwaddr off, unsigned size)
 {
     AppleSEPLabState *s = opaque;
     if (off == 0x18) {          /* KIC +0x818 EVENT (claim) */
+        if (s->trng_pending) {
+            s->trng_pending = false;
+            s->trng_regs[0x14 / 4] &= ~0x8000u; /* go-bit self-clear on claim */
+            sep_lab_update_irq(s);
+            error_report("SEP TRNG: KIC claim event 0x%x (IRQ 3)",
+                         SEP_KIC_TRNG_EVENT);
+            return SEP_KIC_TRNG_EVENT;
+        }
         if (s->sep_inject && s->mbox_pending) {
             s->mbox_pending = false;
             sep_lab_update_irq(s);
@@ -1651,6 +1705,95 @@ static void sep_lab_run_inject_script(AppleSEPLabState *s)
     }
 }
 
+
+/* ASC +0xa00/+0x1010 probe overlays: see sep_asc_a00_ops. */
+
+static uint64_t sep_asc_a00_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+
+    (void)size;
+    /* +0xa00 SET and +0xa80 CLR both read back the live ext IRQ mask. */
+    if (off == 0x00 || off == 0x80) {
+        return s->ext_irq_mask;
+    }
+    return 0xffffffffu;
+}
+
+static void sep_asc_a00_write(void *opaque, hwaddr off, uint64_t val,
+                              unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+
+    (void)size;
+    if (off == 0x00) {
+        s->ext_irq_mask |= (uint32_t)val;
+        error_report("SEP ASC: ext IRQ MASK_SET |= 0x%x → 0x%x",
+                     (uint32_t)val, s->ext_irq_mask);
+    } else if (off == 0x80) {
+        s->ext_irq_mask &= ~(uint32_t)val;
+        error_report("SEP ASC: ext IRQ MASK_CLR &= ~0x%x → 0x%x",
+                     (uint32_t)val, s->ext_irq_mask);
+    }
+}
+
+static const MemoryRegionOps sep_asc_a00_ops = {
+    .read = sep_asc_a00_read,
+    .write = sep_asc_a00_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static uint64_t sep_asc_1010_read(void *opaque, hwaddr off, unsigned size)
+{
+    (void)opaque;
+    (void)size;
+    (void)off;
+    return 0x2; /* bit1 set — probe 0x7c88 tbz #1 */
+}
+
+static void sep_asc_1010_write(void *opaque, hwaddr off, uint64_t val,
+                               unsigned size)
+{
+    (void)opaque;
+    (void)off;
+    (void)val;
+    (void)size;
+}
+
+static const MemoryRegionOps sep_asc_1010_ops = {
+    .read = sep_asc_1010_read,
+    .write = sep_asc_1010_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+
+static void sep_lab_init_trng_irq(AppleSEPLabState *s)
+{
+    if (!s->sep_trng_irq) {
+        return;
+    }
+    if (!s->seprom) {
+        error_report("SEP lab: sep-trng-irq=on requires seprom=on; ignored");
+        s->sep_trng_irq = false;
+        return;
+    }
+    s->ext_irq_mask = 0; /* fully unmasked until guest SET */
+    s->trng_pending = false;
+    if (!s->sep_timer && !s->sep_inject) {
+        memory_region_init_io(&s->kic_mr, NULL, &sep_kic_ops, s,
+                              "sep-kic-event", 0x100);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_KIC_EVT_PA,
+                                            &s->kic_mr, 20);
+        error_report("SEP lab: sep-trng-irq brought up KIC +0x818");
+    }
+    /* Ext IRQ +0xa00/+0xa80 window is installed by sep-inject; without it,
+     * ext_irq_mask stays 0 (unmasked) and TRNG completion still posts. */
+    error_report("SEP lab: sep-trng-irq on (KIC 0x%x → IRQ 3; gate +0xa80 bit3)",
+                 SEP_KIC_TRNG_EVENT);
+}
+
 static void sep_lab_init_inject(AppleSEPLabState *s)
 {
     if (!s->sep_inject) {
@@ -1673,6 +1816,17 @@ static void sep_lab_init_inject(AppleSEPLabState *s)
     memory_region_add_subregion_overlap(&s->private_memory,
                                         SEP_ASC_PA + SEP_ASC_MBOX_OFF,
                                         &s->mbox_mr, 25);
+    /* Probe windows for 0x7c88 (prio over sepmmio RAM). */
+    memory_region_init_io(&s->asc_a00_mr, NULL, &sep_asc_a00_ops, s,
+                          "sep-asc-a00", 0x100);
+    memory_region_add_subregion_overlap(&s->private_memory, SEP_ASC_PA + 0xa00,
+                                        &s->asc_a00_mr, 25);
+    memory_region_init_io(&s->asc_1010_mr, NULL, &sep_asc_1010_ops, s,
+                          "sep-asc-1010", 0x8);
+    memory_region_add_subregion_overlap(&s->private_memory, SEP_ASC_PA + 0x1010,
+                                        &s->asc_1010_mr, 25);
+    s->ext_irq_mask = 0;
+    s->trng_pending = false;
     sep_inject_reset_state(s);
     if (s->inject_script && s->inject_script[0]) {
         sep_lab_run_inject_script(s);
@@ -1934,6 +2088,16 @@ static void sep_lab_set_sep_timer(Object *obj, bool value, Error **errp)
     APPLE_SEP_LAB(obj)->sep_timer = value;
 }
 
+static bool sep_lab_get_sep_trng_irq(Object *obj, Error **errp)
+{
+    return APPLE_SEP_LAB(obj)->sep_trng_irq;
+}
+
+static void sep_lab_set_sep_trng_irq(Object *obj, bool value, Error **errp)
+{
+    APPLE_SEP_LAB(obj)->sep_trng_irq = value;
+}
+
 static bool sep_lab_get_seprom(Object *obj, Error **errp)
 {
     return APPLE_SEP_LAB(obj)->seprom;
@@ -2042,6 +2206,31 @@ static void sep_lab_set_inject_kic(Object *obj, const char *value, Error **errp)
     error_report("SEP inject: KIC event now 0x%x", s->mbox_kic_event);
 }
 
+static char *sep_lab_get_trng_fire(Object *obj, Error **errp)
+{
+    AppleSEPLabState *s = APPLE_SEP_LAB(obj);
+
+    return g_strdup_printf("pending=%d mask=0x%x", s->trng_pending,
+                           s->ext_irq_mask);
+}
+
+static void sep_lab_set_trng_fire(Object *obj, const char *value, Error **errp)
+{
+    AppleSEPLabState *s = APPLE_SEP_LAB(obj);
+
+    (void)value;
+    if (!s->sep_trng_irq) {
+        error_setg(errp, "x-trng-fire needs sep-trng-irq=on");
+        return;
+    }
+    s->ext_irq_mask &= ~SEP_EXT_IRQ_TRNG;
+    s->trng_regs[0x14 / 4] |= 0x8000u;
+    s->trng_pending = true;
+    sep_lab_update_irq(s);
+    error_report("SEP TRNG: host fire KIC 0x%x (mask now 0x%x CTRL=0x%x)",
+                 SEP_KIC_TRNG_EVENT, s->ext_irq_mask, s->trng_regs[0x14 / 4]);
+}
+
 static void sep_lab_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -2083,6 +2272,12 @@ static void sep_lab_class_init(ObjectClass *oc, const void *data)
     object_class_property_set_description(oc, "sep-timer",
         "Lab-only (needs seprom=on): model the SEP-private timer at "
         "0x2a0e40000 and the KIC +0x818 event claim, wired to the SEP IRQ");
+    object_class_property_add_bool(oc, "sep-trng-irq", sep_lab_get_sep_trng_irq,
+                                   sep_lab_set_sep_trng_irq);
+    object_class_property_set_description(oc, "sep-trng-irq",
+        "Lab-only (default off; needs seprom=on): on TRNG.CTRL bit15 go, post "
+        "KIC +0x818 event 0x10003 (IRQ 3) if ASC ext-IRQ bit3 is unmasked "
+        "(+0xa80 write 0x8). Phase-2 lead: sks entropy before AKF mailbox.");
     object_class_property_add_bool(oc, "seprom", sep_lab_get_seprom,
                                    sep_lab_set_seprom);
     object_class_property_set_description(oc, "seprom",
@@ -2122,6 +2317,10 @@ static void sep_lab_class_init(ObjectClass *oc, const void *data)
     object_class_property_set_description(oc, "x-inject-kic",
         "Host-only: KIC +0x818 event word for doorbell (default 0x40000 = "
         "IRQ_IOP_NONEMPTY). Use to probe which irq vector sepOS handles.");
+    object_class_property_add_str(oc, "x-trng-fire", sep_lab_get_trng_fire,
+                                  sep_lab_set_trng_fire);
+    object_class_property_set_description(oc, "x-trng-fire",
+        "Host-only: post TRNG KIC 0x10003 (IRQ 3) now; clears ext-mask bit3.");
 }
 
 static void sep_lab_finalize(Object *obj)
