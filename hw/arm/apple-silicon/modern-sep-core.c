@@ -1,41 +1,39 @@
 /*
- * apple-modern SEP core: a second modern Apple CPU executing real (decrypted)
- * sepOS in its own private address space. Opt-in (sep-core), default off.
+ * apple-modern SEP core: real sepOS on a private Apple CPU. Opt-in
+ * (sep-core / sep-core-mailbox), default off.
  *
- * This is NOT the firmware-free protocol simulator (sep-sim). It runs the
- * actual sepOS legion2 image on an Apple core so the SEP can produce the real
- * SKS / xART / TXM-secure-channel protocol. Scope here (M2.5 port): stand the
- * core up with the lab-proven SEPROM handoff so sepOS boots through
- * parse → page-tables → MMU → kernel-main into platform init on its own,
- * without gdb pokes. AP mailbox wiring (M3) is separate.
+ * Ports the lab-proven SEPROM handoff + peripherals from apple-sep-lab so the
+ * real iOS AppleSEPManager / AppleSEPKeyStore on the AP can drive the ASC-v6
+ * handshake against live sepOS (not sep-sim).
  *
  * Framing: Corellium-style sepOS-only research on the J410 (A17) image for
- * build 24A437. Synthetic identity (fuses / memory map). Not a faithful D47
- * SEP and not a key-unwrapping vehicle for an existing warm keybag.
+ * build 24A437. Synthetic identity. Not a faithful D47 SEP and not a
+ * key-unwrapping vehicle for an existing warm keybag.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 #include "qemu/osdep.h"
+#include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
 #include "hw/qdev-properties.h"
 #include "hw/irq.h"
+#include "system/address-spaces.h"
 #include "system/reset.h"
+#include "system/memory.h"
 #include "target/arm/cpu.h"
 #include "hw/arm/apple-silicon/modern-sep-core.h"
 #include "hw/misc/apple-silicon/a7iop/core.h"
 #include "hw/misc/apple-silicon/a7iop/base.h"
 
-/* Catch-all for the remaining 0x2_xxxxxxxx aperture after specific RAM pages
- * are overlaid at higher priority. Reads return 0; writes are logged. */
 #define SEP_MMIO_BASE   0x200000000ULL
 #define SEP_MMIO_SIZE   0x100000000ULL
-#define SEP_RAM_AT_ZERO (16ULL << 20) /* small PA-0 lab RAM; image lives in kram */
-
-/* Boot-role sysreg index in CPUARMState.apple_modern_sep_store[]
- * (s3_7_c15_c2_6). Bit0 = present; odd & >1 selects the cold build path. */
+#define SEP_RAM_AT_ZERO (16ULL << 20)
 #define SEP_BOOT_ROLE_STORE_IDX 14
+
+/* ---------- catch-all MMIO ---------- */
 
 static uint64_t sep_mmio_read(void *opaque, hwaddr offset, unsigned size)
 {
@@ -60,64 +58,489 @@ static const MemoryRegionOps sep_mmio_ops = {
     .impl = { .min_access_size = 1, .max_access_size = 8 },
 };
 
-/*
- * Seed the SEPROM handoff the lab reversed (BOOT-RE.md / apple-sep-lab seprom):
- * BPSE boot-args, memory-config regs, fuse sentinels, region encode. Called at
- * create and again from reset so a soft reset restores the contract (RAM
- * contents persist, but boot-role resets to 0 with the CP resetvalue).
- */
+/* ---------- IRQ helper ---------- */
+
+static void sep_core_update_irq(AppleModernSEPCore *core)
+{
+    bool raise = core->t_pending || core->trng_pending || core->mbox_pending;
+    if (core->sep_irq) {
+        qemu_set_irq(core->sep_irq, raise);
+    }
+}
+
+/* ---------- PMGR (+0x2c000 status mirror) ---------- */
+
+static uint64_t sep_pmgr_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+    uint32_t v, out;
+
+    if (off + size > SEP_CORE_PMGR_SIZE || !core->pmgr_regs) {
+        return 0;
+    }
+    v = core->pmgr_regs[off / 4];
+    if ((v & ~0x8000000fu) == 0) {
+        uint32_t n = v & 0xfu;
+        out = (v & 0x80000000u) | (n << 4) | n;
+    } else {
+        out = v;
+    }
+    return out;
+}
+
+static void sep_pmgr_write(void *opaque, hwaddr off, uint64_t val,
+                           unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+
+    if (off + size > SEP_CORE_PMGR_SIZE || !core->pmgr_regs) {
+        return;
+    }
+    {
+        uint32_t v = (uint32_t)val;
+        if ((v & ~0x8000000fu) == 0) {
+            uint32_t n = v & 0xfu;
+            v = (v & 0x80000000u) | (n << 4) | n;
+        }
+        core->pmgr_regs[off / 4] = v;
+    }
+}
+
+static const MemoryRegionOps sep_pmgr_ops = {
+    .read = sep_pmgr_read,
+    .write = sep_pmgr_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/* ---------- TRNG + IRQ 3 ---------- */
+
+static uint64_t sep_trng_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+
+    if (off + size > SEP_CORE_TRNG_SIZE) {
+        return 0;
+    }
+    return core->trng_regs[off / 4];
+}
+
+static void sep_trng_write(void *opaque, hwaddr off, uint64_t val,
+                           unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+
+    if (off + size > SEP_CORE_TRNG_SIZE) {
+        return;
+    }
+    if (off == 0x10) {
+        /* W1C status; keep FIFO|DRBG ready. */
+        core->trng_regs[off / 4] &= ~(uint32_t)val;
+        core->trng_regs[off / 4] |= 0x101u;
+        return;
+    }
+    if (off == 0x14) {
+        uint32_t v = (uint32_t)val;
+        if (v & 0x8000u) {
+            core->trng_regs[off / 4] = v; /* keep go-bit until KIC claim */
+            core->trng_pending = true;
+            sep_core_update_irq(core);
+            error_report("modern-sep-core: TRNG go → KIC 0x%x (IRQ 3)",
+                         SEP_CORE_KIC_TRNG_EVT);
+        } else {
+            core->trng_regs[off / 4] = v & ~0x8000u;
+        }
+        return;
+    }
+    core->trng_regs[off / 4] = (uint32_t)val;
+}
+
+static const MemoryRegionOps sep_trng_ops = {
+    .read = sep_trng_read,
+    .write = sep_trng_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/* ---------- KEY.FCFG ---------- */
+
+static uint64_t sep_key_fcfg_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+    return off == 0 ? core->key_fcfg_8000 : 0;
+}
+
+static void sep_key_fcfg_write(void *opaque, hwaddr off, uint64_t val,
+                               unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+
+    if (off != 0) {
+        return;
+    }
+    if ((uint32_t)val == 0xffffu) {
+        core->key_fcfg_8000 = 0x50000u | 0xffffu;
+    } else {
+        core->key_fcfg_8000 = (uint32_t)val;
+    }
+}
+
+static const MemoryRegionOps sep_key_fcfg_ops = {
+    .read = sep_key_fcfg_read,
+    .write = sep_key_fcfg_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/* ---------- timer ---------- */
+
+static void sep_timer_arm(AppleModernSEPCore *core)
+{
+    uint64_t ticks = core->t_count ? core->t_count : 1;
+    int64_t ns = muldiv64(ticks, NANOSECONDS_PER_SECOND, SEP_CORE_TIMER_HZ);
+    timer_mod(core->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ns);
+}
+
+static void sep_timer_fire(void *opaque)
+{
+    AppleModernSEPCore *core = opaque;
+
+    if (!(core->t_ctrl & 1)) {
+        return;
+    }
+    core->t_stat |= 1;
+    core->t_pending = true;
+    core->t_fires++;
+    if (core->t_fires <= 8 || !(core->t_fires % 100)) {
+        error_report("modern-sep-core: timer fire #%" PRIu64, core->t_fires);
+    }
+    sep_core_update_irq(core);
+}
+
+static uint64_t sep_timer_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+
+    switch (off) {
+    case 0x00: return core->t_ctrl;
+    case 0x08: return core->t_stat;
+    case 0x18: return core->t_count;
+    case 0x400:
+    case 0x410:
+        return SEP_CORE_SENTINEL;
+    default:   return 0;
+    }
+}
+
+static void sep_timer_write(void *opaque, hwaddr off, uint64_t val,
+                            unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+
+    switch (off) {
+    case 0x00:
+        core->t_ctrl = (uint32_t)val;
+        if (val & 1) {
+            sep_timer_arm(core);
+        } else if (core->timer) {
+            timer_del(core->timer);
+        }
+        break;
+    case 0x08:
+        core->t_stat &= ~(uint32_t)val;
+        if (!(core->t_stat & 1)) {
+            core->t_pending = false;
+            sep_core_update_irq(core);
+        }
+        break;
+    case 0x18:
+        core->t_count = (uint32_t)val;
+        break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps sep_timer_ops = {
+    .read = sep_timer_read,
+    .write = sep_timer_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/* ---------- KIC +0x818 claim (TRNG / timer / mbox) ---------- */
+
+static uint64_t sep_kic_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+
+    if (off == 0x18) { /* absolute +0x818 */
+        if (core->trng_pending) {
+            core->trng_pending = false;
+            core->trng_regs[0x14 / 4] &= ~0x8000u;
+            sep_core_update_irq(core);
+            error_report("modern-sep-core: KIC claim TRNG 0x%x (IRQ 3)",
+                         SEP_CORE_KIC_TRNG_EVT);
+            return SEP_CORE_KIC_TRNG_EVT;
+        }
+        if (core->mbox_pending) {
+            core->mbox_pending = false;
+            sep_core_update_irq(core);
+            error_report("modern-sep-core: KIC claim mbox 0x%x (IRQ 0x80)",
+                         SEP_CORE_KIC_MBOX_EVT);
+            return SEP_CORE_KIC_MBOX_EVT;
+        }
+        if (core->t_pending) {
+            core->t_pending = false;
+            sep_core_update_irq(core);
+            return SEP_CORE_KIC_TIMER_EVT;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static void sep_kic_write(void *opaque, hwaddr off, uint64_t val,
+                          unsigned size)
+{
+    (void)opaque;
+    qemu_log_mask(LOG_UNIMP, "modern-sep-core: KIC write +0x%" HWADDR_PRIx
+                  " = 0x%" PRIx64 "\n", off + 0x800, val);
+}
+
+static const MemoryRegionOps sep_kic_ops = {
+    .read = sep_kic_read,
+    .write = sep_kic_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/* ---------- patches / phase2 ---------- */
+
+static void sep_core_apply_patches(AppleModernSEPCore *core)
+{
+    const char *spec = getenv("SEP_PATCH");
+    uint8_t *kram;
+    g_auto(GStrv) items = NULL;
+    int i;
+
+    if (!spec || !*spec || !core->image_size) {
+        return;
+    }
+    kram = memory_region_get_ram_ptr(&core->kram);
+    items = g_strsplit(spec, ",", -1);
+    for (i = 0; items[i]; i++) {
+        char *eq = strchr(items[i], '=');
+        uint64_t va, off, word64;
+
+        if (!eq) {
+            continue;
+        }
+        *eq = '\0';
+        if (qemu_strtou64(g_strstrip(items[i]), NULL, 0, &va) < 0 ||
+            qemu_strtou64(g_strstrip(eq + 1), NULL, 0, &word64) < 0) {
+            error_report("modern-sep-core: SEP_PATCH bad entry '%s'", items[i]);
+            continue;
+        }
+        off = (va >= SEP_CORE_KRAM_BASE) ? (va - SEP_CORE_KRAM_BASE)
+                                         : (va & 0xffffffffULL);
+        if (off + 4 > core->image_size) {
+            error_report("modern-sep-core: SEP_PATCH off 0x%" PRIx64 " OOB",
+                         off);
+            continue;
+        }
+        {
+            uint32_t word = (uint32_t)word64;
+            memcpy(kram + off, &word, 4);
+            error_report("modern-sep-core: SEP_PATCH [0x%" PRIx64 "] = 0x%08x",
+                         off, word);
+        }
+    }
+}
+
+static void sep_core_apply_phase2(AppleModernSEPCore *core)
+{
+    uint8_t *kram;
+    uint32_t retab = 0xd65f0fffu;
+    uint32_t b_tramp;
+    uint32_t tramp[6];
+    uint32_t bl_imm;
+    int32_t off;
+    uint64_t fo;
+    const char *env = getenv("SEP_CORE_PHASE2");
+
+    /* Default ON with sep-core; set SEP_CORE_PHASE2=off to skip. */
+    if (env && !strcmp(env, "off")) {
+        return;
+    }
+    if (!core->image_size) {
+        return;
+    }
+    kram = memory_region_get_ram_ptr(&core->kram);
+
+    fo = SEP_CORE_EP_FO(SEP_CORE_EP_START_EXIT);
+    if (fo + 4 > core->image_size) {
+        error_report("modern-sep-core: sep-phase2 start-all exit OOB");
+        return;
+    }
+    memcpy(kram + fo, &retab, 4);
+
+    off = (int32_t)SEP_CORE_EP_START_ALL - (int32_t)(SEP_CORE_EP_TRAMP + 12);
+    bl_imm = 0x94000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
+    tramp[0] = 0xa9bf7bfdu;
+    tramp[1] = 0x910003fdu;
+    tramp[2] = 0xaa1f03e0u;
+    tramp[3] = bl_imm;
+    tramp[4] = 0xa8c17bfdu;
+    tramp[5] = retab;
+    fo = SEP_CORE_EP_FO(SEP_CORE_EP_TRAMP);
+    if (fo + sizeof(tramp) > core->image_size) {
+        error_report("modern-sep-core: sep-phase2 trampoline OOB");
+        return;
+    }
+    memcpy(kram + fo, tramp, sizeof(tramp));
+
+    off = (int32_t)SEP_CORE_EP_TRAMP - (int32_t)SEP_CORE_EP_CREATE_RET;
+    b_tramp = 0x14000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
+    fo = SEP_CORE_EP_FO(SEP_CORE_EP_CREATE_RET);
+    if (fo + 4 > core->image_size) {
+        error_report("modern-sep-core: sep-phase2 create ret OOB");
+        return;
+    }
+    memcpy(kram + fo, &b_tramp, 4);
+    error_report("modern-sep-core: sep-phase2 on (create→start-all; "
+                 "AKF IRQ 0x80 path)");
+}
+
+/* ---------- SEPROM handoff seed ---------- */
+
 static void sep_core_seed_handoff(AppleModernSEPCore *core)
 {
     uint32_t *sram;
-    uint32_t *cfg0800;
     uint32_t *cfg0c40;
-    uint32_t *fuse;
     uint32_t *sepmmio;
 
-    /* BPSE boot-args in SEP SRAM. */
+    if (!core->cpu) {
+        return;
+    }
+
     sram = memory_region_get_ram_ptr(&core->sram);
-    /* BPSE lives at absolute PA SEP_CORE_BPSE_ADDR inside the SRAM window. */
     {
         uint32_t *bpse = (uint32_t *)((uint8_t *)sram +
                                       (SEP_CORE_BPSE_ADDR - SEP_CORE_SRAM_BASE));
-        bpse[0] = 0x53455042;                 /* "BPSE" */
-        bpse[2] = 1;                          /* [+8] = 1 */
-        bpse[0x70 / 4] = 0x528000;            /* [+0x70] memory size */
+        bpse[0] = 0x53455042; /* BPSE */
+        bpse[2] = 1;
+        bpse[0x70 / 4] = 0x528000;
+        /* FMST carve: 64 KiB with DRAM-lo backed (memcfg 0x9001f). */
+        bpse[0x78 / 4] = 0x10000;
+        /* Insecure-RNG seed pair (lab constants, non-secret). */
+        bpse[0x80 / 4] = 0x5345504c;
+        bpse[0x84 / 4] = 0x00000001;
+        bpse[0x88 / 4] = 0x41425321;
+        bpse[0x8c / 4] = 0x00000002;
     }
 
-    cfg0800 = memory_region_get_ram_ptr(&core->cfg0800);
-    cfg0800[0x408 / 4] = 0x2a3fff;            /* base = (v<<12)+0x1000 = carveout */
-    cfg0800[0x410 / 4] = 0;
-    cfg0800[0x418 / 4] = 0;
+    if (core->pmgr_regs) {
+        /* DRAM window [0x1e00000000, 0x1e40000000) — lab-proven. */
+        core->pmgr_regs[0x408 / 4] = 0x9001f;
+        core->pmgr_regs[0x410 / 4] = 0;
+        core->pmgr_regs[0x418 / 4] = 0;
+    }
 
     cfg0c40 = memory_region_get_ram_ptr(&core->cfg0c40);
     cfg0c40[0x180 / 4] = 4;
-    cfg0c40[0x1a0 / 4] = 0x4000;              /* (0x4000-4) divisible by 10 */
+    cfg0c40[0x1a0 / 4] = 0x4000;
 
-    fuse = memory_region_get_ram_ptr(&core->fuse);
-    fuse[0] = 0xa55ac33c;                     /* secfuse.c:52 sentinels */
-    fuse[1] = 0xa55ac33c;
+    /* XPRT: MISC + fuse sentinels + UCES. */
+    {
+        uint8_t *xprt = memory_region_get_ram_ptr(&core->xprt);
+        uint32_t *fz = (uint32_t *)(xprt + SEP_CORE_FUSE_OFF);
+        unsigned i;
 
-    /* Region encode at 0x2a2404810/4814: type 0xfe, size 0x400000 pages<<12,
-     * base 0x10000000000 >> 12. Contained in the synthetic table[2] the
-     * build path constructs from these handoff values (see BOOT-RE M2.6). */
+        *(uint32_t *)(xprt + 0x4000) = 0x32b3;
+        fz[0] = SEP_CORE_SENTINEL;
+        fz[1] = SEP_CORE_SENTINEL;
+        fz[2] = SEP_CORE_SENTINEL;
+        fz[3] = SEP_CORE_SENTINEL;
+        for (i = 0x900 / 4; i <= 0x90c / 4; i++) {
+            fz[i] = SEP_CORE_SENTINEL;
+        }
+        for (i = 0x9b0 / 4; i <= 0x9cc / 4; i++) {
+            fz[i] = SEP_CORE_SENTINEL;
+        }
+        {
+            uint32_t *uces = (uint32_t *)(xprt + 0x1c000);
+            uces[0x00 / 4] = SEP_CORE_SENTINEL;
+            uces[0x08 / 4] = SEP_CORE_SENTINEL;
+            uces[0x20 / 4] = SEP_CORE_SENTINEL;
+            uces[0x30 / 4] = SEP_CORE_SENTINEL;
+        }
+    }
+
+    {
+        uint32_t *ex = (uint32_t *)memory_region_get_ram_ptr(&core->excl);
+        ex[0] = SEP_CORE_SENTINEL;
+        ex[2] = SEP_CORE_SENTINEL;
+    }
+    {
+        uint32_t *sab = (uint32_t *)memory_region_get_ram_ptr(&core->akp_sab);
+        uint32_t *mmt = (uint32_t *)memory_region_get_ram_ptr(&core->akp_mmt);
+        uint32_t *hi = (uint32_t *)memory_region_get_ram_ptr(&core->akp_hi);
+
+        sab[0] = SEP_CORE_SENTINEL;
+        sab[2] = SEP_CORE_SENTINEL;
+        mmt[0] = SEP_CORE_SENTINEL;
+        mmt[2] = SEP_CORE_SENTINEL;
+        hi[0] = SEP_CORE_SENTINEL;
+        hi[2] = SEP_CORE_SENTINEL;
+        hi[(0x2a0bc1800ULL - 0x2a0b00000ULL) / 4] = 0x3;
+    }
+
+    memset(core->trng_regs, 0, sizeof(core->trng_regs));
+    core->trng_regs[0x00 / 4] = 0x34fbf246u;
+    core->trng_regs[0x04 / 4] = 0xb40a6f2du;
+    core->trng_regs[0x08 / 4] = 0xc56f4777u;
+    core->trng_regs[0x0c / 4] = 0x5f2c2401u;
+    core->trng_regs[0x10 / 4] = 0x101u;
+    core->trng_regs[0x78 / 4] = 0x00180000u;
+    core->trng_regs[0x7c / 4] = 0x02000000u;
+
+    {
+        uint32_t *plat = (uint32_t *)memory_region_get_ram_ptr(&core->plat);
+        uint32_t *tbase;
+
+        plat[(0x2a0dd8008ULL - SEP_CORE_PLAT_PA) / 4] = SEP_CORE_SENTINEL;
+        plat[(0x2a0dc0010ULL - SEP_CORE_PLAT_PA) / 4] = 0x101;
+        tbase = &plat[(SEP_CORE_TIMER_PA - SEP_CORE_PLAT_PA) / 4];
+        tbase[0x8000 / 4] = 0x40000;
+        core->key_fcfg_8000 = 0x40000;
+        tbase[0xc000 / 4] = 0x5;
+        tbase[0x10008 / 4] = 0x5;
+        tbase[0x10010 / 4] = 0x4;
+    }
+
+    /*
+     * One-shot shmbuf descriptor at ASC +0x4810 (type 0xfe). When the live
+     * ASC-v6 alias covers this window, the alias wins (prio 10); the seed
+     * remains for pre-attach / soft-reset without mailbox.
+     */
     sepmmio = memory_region_get_ram_ptr(&core->sepmmio);
+    sepmmio[0x404110 / 4] = 0;
     sepmmio[0x404810 / 4] = 0x040000fe;
     sepmmio[0x404814 / 4] = 0x10000000;
+    sepmmio[0x404818 / 4] = 0;
+    sepmmio[0x40481c / 4] = 0;
 
-    /* Boot-role = BPSE | 1 (present, odd → cold build path). cpu_reset restores
-     * the CP resetvalue (0), so this must run after every cpu_reset. */
     core->cpu->env.apple_modern_sep_store[SEP_BOOT_ROLE_STORE_IDX] =
         SEP_CORE_BPSE_ADDR | 1ULL;
-
-    /* Ready bit (s3_6_c15_c12_4) must stay 1 across reset. */
     core->cpu->env.apple_modern_sep_store[13] = 1ULL;
 
-    /* SEPROM-equivalent record loader: tagged record directory the sep64 parser
-     * (image 0x8f70) walks. 16-byte records [tag:4][count:4][offset:8], offsets
-     * ascending and >= 0x4000, each range contained in the region; tags
-     * CONS/CORE/CPUT/TRAC recognized; a count-0 record ends the walk. Synthetic
-     * declared layout, not a measured Apple SEP memory map. */
+    /* Region blob: tagged record directory. */
     {
         uint8_t *reg = memory_region_get_ram_ptr(&core->region);
         struct { uint32_t tag; uint32_t count; uint64_t offset; } *rec =
@@ -129,6 +552,8 @@ static void sep_core_seed_handoff(AppleModernSEPCore *core)
         rec[3] = (typeof(rec[3])){ 0x54524143, 0x4000, 0x010000 }; /* TRAC */
     }
 
+    /* Entry stub X1 = KRAM base (Mach-O copy source). */
+    core->cpu->env.xregs[1] = SEP_CORE_KRAM_BASE;
     core->seprom_handoff = true;
 }
 
@@ -136,10 +561,18 @@ static void sep_core_reset(void *opaque)
 {
     AppleModernSEPCore *core = opaque;
 
+    core->t_pending = false;
+    core->trng_pending = false;
+    core->mbox_pending = false;
+    core->t_ctrl = 0;
+    core->t_stat = 0;
+    if (core->timer) {
+        timer_del(core->timer);
+    }
     cpu_reset(CPU(core->cpu));
     cpu_set_pc(CPU(core->cpu), core->entry);
-    /* cpu_reset cleared boot-role / ready to their CP resetvalues — reseed. */
     sep_core_seed_handoff(core);
+    sep_core_update_irq(core);
 }
 
 bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
@@ -149,7 +582,7 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
     g_autofree char *data = NULL;
     gsize len = 0;
     Object *cpuobj;
-    (void)cntfrq; /* SEP timebase is forced to 24 MHz; AP value is irrelevant. */
+    (void)cntfrq;
 
     if (!image_path || !*image_path) {
         error_setg(errp, "sep-core needs sep-core-image=/path/to/decrypted/sepos");
@@ -165,66 +598,125 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
         return false;
     }
     core->ram_size = SEP_RAM_AT_ZERO;
-    /* Run from the SEP RAM carveout: VA 0xffffffff00000000 → PA 0x1e40000000. */
     core->entry = SEP_CORE_KRAM_BASE;
+    core->image_size = len;
 
     memory_region_init(&core->container, owner, "modern-sep.space", UINT64_MAX);
 
-    /* PA 0 lab RAM (debug / unused by seprom path). */
+    /*
+     * Alias the AP system address space at low priority so OOL / shmbuf
+     * buffers the AP writes (AppleSEPManager) are reachable at the same PA
+     * from the SEP core. Specific SEP private regions overlay at higher prio.
+     */
+    memory_region_init_alias(&core->ap_alias, owner, "modern-sep.ap-sysmem",
+                             get_system_memory(), 0, UINT64_MAX);
+    memory_region_add_subregion_overlap(&core->container, 0, &core->ap_alias,
+                                        -200);
+    core->ap_alias_attached = true;
+
     memory_region_init_ram(&core->ram, NULL, "modern-sep.ram0", core->ram_size,
                            &error_fatal);
-    memory_region_add_subregion(&core->container, 0, &core->ram);
+    memory_region_add_subregion_overlap(&core->container, 0, &core->ram, 0);
 
-    /* Catch-all MMIO at low priority; specific RAM pages overlay it. */
     memory_region_init_io(&core->mmio, owner, &sep_mmio_ops, core,
                           "modern-sep.mmio", SEP_MMIO_SIZE);
     memory_region_add_subregion_overlap(&core->container, SEP_MMIO_BASE,
                                         &core->mmio, -100);
 
-    /* SEP kernel RAM: image + page-table pool (BSS of the image is zero). */
+    memory_region_init_ram(&core->dram_lo, NULL, "modern-sep.dram-lo",
+                           SEP_CORE_DRAM_LO_SIZE, &error_fatal);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_DRAM_LO_BASE,
+                                        &core->dram_lo, 0);
+
     memory_region_init_ram(&core->kram, NULL, "modern-sep.kram",
                            SEP_CORE_KRAM_SIZE, &error_fatal);
     memory_region_add_subregion_overlap(&core->container, SEP_CORE_KRAM_BASE,
                                         &core->kram, 0);
     memcpy(memory_region_get_ram_ptr(&core->kram), data, len);
 
-    /* SEP SRAM (stack at 0x2a0220000, BPSE at 0x2a0210000). */
     memory_region_init_ram(&core->sram, NULL, "modern-sep.sram",
                            SEP_CORE_SRAM_SIZE, &error_fatal);
     memory_region_add_subregion_overlap(&core->container, SEP_CORE_SRAM_BASE,
                                         &core->sram, 0);
 
-    /* Carveout the memory-config regs advertise. */
     memory_region_init_ram(&core->carveout, NULL, "modern-sep.carveout",
                            SEP_CORE_CARVEOUT_SIZE, &error_fatal);
     memory_region_add_subregion_overlap(&core->container, SEP_CORE_CARVEOUT_BASE,
                                         &core->carveout, 0);
 
-    memory_region_init_ram(&core->cfg0800, NULL, "modern-sep.cfg0800", 0x10000,
-                           &error_fatal);
-    memory_region_add_subregion_overlap(&core->container, 0x2a0800000ULL,
-                                        &core->cfg0800, 0);
-    memory_region_init_ram(&core->cfg0c40, NULL, "modern-sep.cfg0c40", 0x10000,
-                           &error_fatal);
-    memory_region_add_subregion_overlap(&core->container, 0x2a0c40000ULL,
-                                        &core->cfg0c40, 0);
+    /* PMGR IO (replaces the old 64 KiB RAM poke page). */
+    core->pmgr_regs = g_new0(uint32_t, SEP_CORE_PMGR_SIZE / 4);
+    memory_region_init_io(&core->pmgr_mr, NULL, &sep_pmgr_ops, core,
+                          "modern-sep.pmgr", SEP_CORE_PMGR_SIZE);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_PMGR_PA,
+                                        &core->pmgr_mr, 0);
 
-    memory_region_init_ram(&core->fuse, NULL, "modern-sep.fuse", 0x10000,
+    memory_region_init_ram(&core->excl, NULL, "modern-sep.excl",
+                           SEP_CORE_EXCL_SIZE, &error_fatal);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_EXCL_PA,
+                                        &core->excl, 0);
+
+    memory_region_init_ram(&core->akp_sab, NULL, "modern-sep.akp-sab", 0x4000,
                            &error_fatal);
-    memory_region_add_subregion_overlap(&core->container, SEP_CORE_FUSE_BASE,
-                                        &core->fuse, 0);
+    memory_region_add_subregion_overlap(&core->container, 0x2a0940000ULL,
+                                        &core->akp_sab, 0);
+    memory_region_init_ram(&core->akp_mmt, NULL, "modern-sep.akp-mmt", 0x4000,
+                           &error_fatal);
+    memory_region_add_subregion_overlap(&core->container, 0x2a0a08000ULL,
+                                        &core->akp_mmt, 0);
+    memory_region_init_ram(&core->akp_hi, NULL, "modern-sep.akp-hi", 0x140000,
+                           &error_fatal);
+    memory_region_add_subregion_overlap(&core->container, 0x2a0b00000ULL,
+                                        &core->akp_hi, 0);
+
+    memory_region_init_io(&core->trng_mr, NULL, &sep_trng_ops, core,
+                          "modern-sep.trng", SEP_CORE_TRNG_SIZE);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_TRNG_PA,
+                                        &core->trng_mr, 10);
+
+    memory_region_init_ram(&core->cfg0c40, NULL, "modern-sep.cfg0c40",
+                           SEP_CORE_KIC_SIZE, &error_fatal);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_KIC_PA,
+                                        &core->cfg0c40, 1);
+
+    memory_region_init_ram(&core->plat, NULL, "modern-sep.plat",
+                           SEP_CORE_PLAT_SIZE, &error_fatal);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_PLAT_PA,
+                                        &core->plat, 0);
+
+    memory_region_init_io(&core->key_fcfg_mr, NULL, &sep_key_fcfg_ops, core,
+                          "modern-sep.key-fcfg", 4);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_KEY_FCFG_PA,
+                                        &core->key_fcfg_mr, 10);
+
+    memory_region_init_io(&core->timer_mr, NULL, &sep_timer_ops, core,
+                          "modern-sep.timer", 0x1000);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_TIMER_PA,
+                                        &core->timer_mr, 20);
+
+    memory_region_init_ram(&core->xprt, NULL, "modern-sep.xprt",
+                           SEP_CORE_XPRT_SIZE, &error_fatal);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_XPRT_BASE,
+                                        &core->xprt, 0);
 
     memory_region_init_ram(&core->sepmmio, NULL, "modern-sep.sepmmio",
                            SEP_CORE_SEPMMIO_SIZE, &error_fatal);
     memory_region_add_subregion_overlap(&core->container, SEP_CORE_SEPMMIO_BASE,
                                         &core->sepmmio, 0);
 
-    /* Handoff memory region the region encode points at; SEPROM lays the tagged
-     * record directory here (loaded by sep_core_seed_handoff). */
+    /* KIC claim overlay on ASC +0x800 (wins over sepmmio / mbox alias). */
+    memory_region_init_io(&core->kic_mr, NULL, &sep_kic_ops, core,
+                          "modern-sep.kic-event", 0x100);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_KIC_EVT_PA,
+                                        &core->kic_mr, 20);
+
     memory_region_init_ram(&core->region, NULL, "modern-sep.region",
                            SEP_CORE_REGION_SIZE, &error_fatal);
     memory_region_add_subregion_overlap(&core->container, SEP_CORE_REGION_BASE,
                                         &core->region, 0);
+
+    sep_core_apply_patches(core);
+    sep_core_apply_phase2(core);
 
     address_space_init(&core->as, &core->container, "modern-sep");
 
@@ -232,12 +724,10 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
     core->cpu = ARM_CPU(cpuobj);
     object_property_add_child(owner, "sep-cpu", cpuobj);
     object_unref(cpuobj);
-    /* sepOS is EL1 (VBAR_EL1 / TTBR1_EL1). Reset at EL1: no EL2/EL3. */
     object_property_set_bool(cpuobj, "has_el2", false, &error_fatal);
     object_property_set_bool(cpuobj, "has_el3", false, &error_fatal);
     object_property_set_bool(cpuobj, "pauth-noop", false, &error_fatal);
     object_property_set_bool(cpuobj, "apple-modern-sep", true, &error_fatal);
-    /* Force the SEP 24 MHz timebase (timer.c:19). */
     object_property_set_uint(cpuobj, "cntfrq", SEP_CORE_CNTFRQ, &error_fatal);
     object_property_set_uint(cpuobj, "rvbar", core->entry, &error_fatal);
     object_property_set_link(cpuobj, "memory", OBJECT(&core->container),
@@ -247,19 +737,23 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
         return false;
     }
     core->sep_irq = qdev_get_gpio_in(DEVICE(core->cpu), ARM_CPU_IRQ);
+    core->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sep_timer_fire, core);
 
-    /* Seed handoff before first reset so a cold start is gdb-free. */
     sep_core_seed_handoff(core);
     qemu_register_reset(sep_core_reset, core);
 
-    warn_report("apple-modern: opt-in SEP CORE + SEPROM handoff: '%s' core runs "
-                "sepOS '%s' (%zu bytes) from PA 0x%" PRIx64 " (kram); BPSE@"
-                "0x%" PRIx64 ", fuse@0x%" PRIx64 ", cntfrq=%" PRIu64 ", boot-role="
-                "BPSE|1. Synthetic identity; no AP mailbox yet (M3). Declared "
-                "emulator bring-up, not Apple fidelity",
-                cpu_type, image_path, (size_t)len,
-                (uint64_t)SEP_CORE_KRAM_BASE, (uint64_t)SEP_CORE_BPSE_ADDR,
-                (uint64_t)SEP_CORE_FUSE_BASE, (uint64_t)SEP_CORE_CNTFRQ);
+    warn_report("apple-modern: sep-core SEPROM+lab peripherals: image '%s' "
+                "(%zu B) @PA 0x%" PRIx64 "; PMGR@0x%" PRIx64 "+0x2c000; "
+                "TRNG@0x%" PRIx64 "+IRQ3; EXCL@0x%" PRIx64 "; timer@0x%" PRIx64
+                "; KIC claim@0x%" PRIx64 "+0x818; AP sysmem aliased for OOL; "
+                "phase2=%s; SEP_PATCH env optional (e.g. 0x10350=...). "
+                "Synthetic identity; not Apple fidelity",
+                image_path, (size_t)len, (uint64_t)SEP_CORE_KRAM_BASE,
+                (uint64_t)SEP_CORE_PMGR_PA, (uint64_t)SEP_CORE_TRNG_PA,
+                (uint64_t)SEP_CORE_EXCL_PA, (uint64_t)SEP_CORE_TIMER_PA,
+                (uint64_t)SEP_CORE_KIC_EVT_PA,
+                (getenv("SEP_CORE_PHASE2") &&
+                 !strcmp(getenv("SEP_CORE_PHASE2"), "off")) ? "off" : "on");
     return true;
 }
 
@@ -271,19 +765,19 @@ bool apple_modern_sep_core_attach_mailbox(AppleModernSEPCore *core,
                    "SEP wrapper (sep-mailbox=on)");
         return false;
     }
-    /* Same wrapper MMIO the AP sees (CTRL/SEND/RECV frames), SEP-side view. */
+    /* Shared APPLE_A7IOP_V6: AP at 0x282600000, SEP view at 0x2a2400000. */
     memory_region_init_alias(&core->mbox_alias, OBJECT(a7iop),
                              "modern-sep.asc-v6", &a7iop->mmio, 0,
                              memory_region_size(&a7iop->mmio));
     memory_region_add_subregion_overlap(&core->container, SEP_CORE_MBOX_BASE,
                                         &core->mbox_alias, 10);
-    /* SEP-iop doorbell -> SEP core IRQ (as sep.c wires it for t8030). */
+    /* KIC claim (prio 20) already covers +0x800.. over this alias. */
     qdev_connect_gpio_out_named(DEVICE(a7iop->iop_mailbox),
                                 APPLE_A7IOP_SEP_CPU_IRQ, 0, core->sep_irq);
     core->mailbox_attached = true;
-    warn_report("apple-modern: sep-core-mailbox: ASC-v6 '%s' shared AP<->SEP; "
-                "SEP view at 0x%" PRIx64 " (declared), SEP-iop -> ARM_CPU_IRQ. "
-                "Transport only, no SKS/crypto replies", a7iop->role,
-                (uint64_t)SEP_CORE_MBOX_BASE);
+    warn_report("apple-modern: sep-core-mailbox: ASC-v6 '%s' shared AP@ADT "
+                "reg / SEP@0x%" PRIx64 " (+0x4100 IOP, KIC +0x818→IRQ "
+                "0x80/0x83); SEP-iop → ARM_CPU_IRQ; AP OOL via sysmem alias",
+                a7iop->role, (uint64_t)SEP_CORE_MBOX_BASE);
     return true;
 }
