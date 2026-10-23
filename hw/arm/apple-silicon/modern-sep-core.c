@@ -119,6 +119,26 @@ static const MemoryRegionOps sep_pmgr_ops = {
 
 /* ---------- TRNG + IRQ 3 ---------- */
 
+#define SEP_CORE_EXT_IRQ_TRNG     BIT(3)
+#define SEP_CORE_TRNG_CTRL_IRQ_EN BIT(21)
+
+static void sep_core_eval_trng_irq(AppleModernSEPCore *core)
+{
+    if ((core->trng_regs[0x14 / 4] & SEP_CORE_TRNG_CTRL_IRQ_EN) &&
+        !(core->ext_irq_mask & SEP_CORE_EXT_IRQ_TRNG)) {
+        if (!core->trng_pending) {
+            core->trng_pending = true;
+            sep_core_update_irq(core);
+            error_report("modern-sep-core: TRNG IRQ 3 pending → KIC 0x%x "
+                         "(CTRL=0x%x)", SEP_CORE_KIC_TRNG_EVT,
+                         core->trng_regs[0x14 / 4]);
+        }
+    } else if (core->trng_pending) {
+        core->trng_pending = false;
+        sep_core_update_irq(core);
+    }
+}
+
 static uint64_t sep_trng_read(void *opaque, hwaddr off, unsigned size)
 {
     AppleModernSEPCore *core = opaque;
@@ -144,16 +164,15 @@ static void sep_trng_write(void *opaque, hwaddr off, uint64_t val,
         return;
     }
     if (off == 0x14) {
-        uint32_t v = (uint32_t)val;
-        if (v & 0x8000u) {
-            core->trng_regs[off / 4] = v; /* keep go-bit until KIC claim */
-            core->trng_pending = true;
-            sep_core_update_irq(core);
-            error_report("modern-sep-core: TRNG go → KIC 0x%x (IRQ 3)",
-                         SEP_CORE_KIC_TRNG_EVT);
-        } else {
-            core->trng_regs[off / 4] = v & ~0x8000u;
-        }
+        /*
+         * TRNG.CTRL: bit 15 (0x8000) is a synchronous self-clearing command
+         * bit polled at EL0 (0x11a24c: tbnz w0, #15); bit 21 (0x200000,
+         * 0x0021760f vs 0x0000760f) enables IRQ-driven FIFO refills on IRQ 3
+         * (KIC 0x10003), gated by ASC ext-IRQ mask bit 3 (+0xa00/+0xa80).
+         */
+        uint32_t v = (uint32_t)val & ~0x8000u;
+        core->trng_regs[off / 4] = v;
+        sep_core_eval_trng_irq(core);
         return;
     }
     core->trng_regs[off / 4] = (uint32_t)val;
@@ -465,6 +484,39 @@ static const MemoryRegionOps sep_kic_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 8 },
     .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static uint64_t sep_asc_a00_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+
+    (void)size;
+    if (off == 0x00 || off == 0x80) {
+        return core->ext_irq_mask;
+    }
+    return 0xffffffffu;
+}
+
+static void sep_asc_a00_write(void *opaque, hwaddr off, uint64_t val,
+                              unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+
+    (void)size;
+    if (off == 0x00) {
+        core->ext_irq_mask |= (uint32_t)val;
+        sep_core_eval_trng_irq(core);
+    } else if (off == 0x80) {
+        core->ext_irq_mask &= ~(uint32_t)val;
+        sep_core_eval_trng_irq(core);
+    }
+}
+
+static const MemoryRegionOps sep_asc_a00_ops = {
+    .read = sep_asc_a00_read,
+    .write = sep_asc_a00_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
 };
 
 /* ---------- optional state watch (SEP_CORE_WATCH=<ms>) ---------- */
@@ -812,6 +864,7 @@ static void sep_core_seed_handoff(AppleModernSEPCore *core)
     core->trng_regs[0x10 / 4] = 0x101u;
     core->trng_regs[0x78 / 4] = 0x00180000u;
     core->trng_regs[0x7c / 4] = 0x02000000u;
+    core->ext_irq_mask = 0xffffffffu;
 
     {
         uint32_t *plat = (uint32_t *)memory_region_get_ram_ptr(&core->plat);
@@ -888,6 +941,7 @@ static void sep_core_reset(void *opaque)
     core->t_pending = false;
     core->trng_pending = false;
     core->mbox_pending = false;
+    core->ext_irq_mask = 0xffffffffu;
     core->boot_desc_sent = false;
     core->rom_announced = false;
     core->rom_status = 1;
@@ -1036,6 +1090,13 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
                           "modern-sep.kic-event", 0x100);
     memory_region_add_subregion_overlap(&core->container, SEP_CORE_KIC_EVT_PA,
                                         &core->kic_mr, 20);
+
+    /* ASC external IRQ mask (+0xa00 MASK_SET / +0xa80 MASK_CLR, bit 3 TRNG). */
+    memory_region_init_io(&core->asc_a00_mr, NULL, &sep_asc_a00_ops, core,
+                          "modern-sep.asc-a00", 0x100);
+    memory_region_add_subregion_overlap(&core->container,
+                                        SEP_CORE_MBOX_BASE + 0xa00,
+                                        &core->asc_a00_mr, 20);
 
     memory_region_init_ram(&core->region, NULL, "modern-sep.region",
                            SEP_CORE_REGION_SIZE, &error_fatal);

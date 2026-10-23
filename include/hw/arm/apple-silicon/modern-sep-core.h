@@ -99,6 +99,7 @@ typedef struct AppleModernSEPCore {
     MemoryRegion region;
     MemoryRegion timer_mr;
     MemoryRegion kic_mr;        /* ASC +0x800.. claim at +0x818 */
+    MemoryRegion asc_a00_mr;    /* ASC +0xa00 MASK_SET / +0xa80 MASK_CLR */
     MemoryRegion mmio;
     MemoryRegion mbox_alias;    /* SEP view of shared ASC-v6 */
     MemoryRegion ap_alias;      /* system_memory: AP OOL/shmbuf reachability */
@@ -113,6 +114,7 @@ typedef struct AppleModernSEPCore {
     /* PMGR / TRNG / timer / KIC state (lab models). */
     uint32_t *pmgr_regs;
     uint32_t trng_regs[SEP_CORE_TRNG_SIZE / 4];
+    uint32_t ext_irq_mask;
     uint32_t key_fcfg_8000;
     uint32_t t_ctrl;
     uint32_t t_stat;

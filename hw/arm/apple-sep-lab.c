@@ -301,6 +301,27 @@ static uint64_t sep_trng_read(void *opaque, hwaddr off, unsigned size)
     return s->trng_regs[off / 4];
 }
 
+#define SEP_TRNG_CTRL_IRQ_EN BIT(21) /* TRNG.CTRL 0x0021760f vs 0x0000760f */
+
+static void sep_lab_eval_trng_irq(AppleSEPLabState *s)
+{
+    if (!s->sep_trng_irq) {
+        return;
+    }
+    if ((s->trng_regs[0x14 / 4] & SEP_TRNG_CTRL_IRQ_EN) &&
+        !(s->ext_irq_mask & SEP_EXT_IRQ_TRNG)) {
+        if (!s->trng_pending) {
+            s->trng_pending = true;
+            sep_lab_update_irq(s);
+            error_report("SEP TRNG: IRQ 3 pending → KIC 0x%x (CTRL=0x%x)",
+                         SEP_KIC_TRNG_EVENT, s->trng_regs[0x14 / 4]);
+        }
+    } else if (s->trng_pending) {
+        s->trng_pending = false;
+        sep_lab_update_irq(s);
+    }
+}
+
 static void sep_trng_write(void *opaque, hwaddr off, uint64_t val,
                            unsigned size)
 {
@@ -321,26 +342,14 @@ static void sep_trng_write(void *opaque, hwaddr off, uint64_t val,
     }
     if (off == 0x14) {
         /*
-         * TRNG.CTRL: go-bit 15 (0x8000). EPControl polls tbnz #15 until clear
-         * (0x11a24c); the IRQ path expects bit15 to stay set until the KIC
-         * claim / status ack. With sep-trng-irq=on, posting KIC 0x10003 (IRQ 3)
-         * is gated by ASC ext-IRQ mask bit3 (+0xa80 CLR 0x8).
+         * TRNG.CTRL: bit 15 (0x8000) is a synchronous self-clearing command
+         * bit polled at EL0 (0x11a24c: tbnz w0, #15); bit 21 (0x200000,
+         * 0x0021760f vs 0x0000760f) enables IRQ-driven FIFO refills on IRQ 3
+         * (KIC 0x10003), gated by ASC ext-IRQ mask bit 3 (+0xa00/+0xa80).
          */
-        uint32_t v = (uint32_t)val;
-        if (s->sep_trng_irq && (v & 0x8000u)) {
-            s->trng_regs[off / 4] = v; /* keep bit15 until claim */
-            if (!(s->ext_irq_mask & SEP_EXT_IRQ_TRNG)) {
-                s->trng_pending = true;
-                sep_lab_update_irq(s);
-                error_report("SEP TRNG: go → KIC 0x%x (IRQ 3, CTRL=0x%x)",
-                             SEP_KIC_TRNG_EVENT, v);
-            } else {
-                error_report("SEP TRNG: go bit15 set but ext IRQ3 masked "
-                             "(mask=0x%x)", s->ext_irq_mask);
-            }
-        } else {
-            s->trng_regs[off / 4] = v & ~0x8000u;
-        }
+        uint32_t v = (uint32_t)val & ~0x8000u;
+        s->trng_regs[off / 4] = v;
+        sep_lab_eval_trng_irq(s);
         return;
     }
     s->trng_regs[off / 4] = (uint32_t)val;
@@ -829,6 +838,8 @@ static void sep_lab_reset(void *opaque)
 
     s->stack_fix_fills = 0;
     s->stack_fix_next_pa = 0;
+    s->ext_irq_mask = 0xffffffffu;
+    s->trng_pending = false;
 
     cpu_reset(CPU(s->cpu));
     cpu_set_pc(CPU(s->cpu), s->entry);
@@ -1842,10 +1853,12 @@ static void sep_asc_a00_write(void *opaque, hwaddr off, uint64_t val,
         s->ext_irq_mask |= (uint32_t)val;
         error_report("SEP ASC: ext IRQ MASK_SET |= 0x%x → 0x%x",
                      (uint32_t)val, s->ext_irq_mask);
+        sep_lab_eval_trng_irq(s);
     } else if (off == 0x80) {
         s->ext_irq_mask &= ~(uint32_t)val;
         error_report("SEP ASC: ext IRQ MASK_CLR &= ~0x%x → 0x%x",
                      (uint32_t)val, s->ext_irq_mask);
+        sep_lab_eval_trng_irq(s);
     }
 }
 
@@ -1891,7 +1904,7 @@ static void sep_lab_init_trng_irq(AppleSEPLabState *s)
         s->sep_trng_irq = false;
         return;
     }
-    s->ext_irq_mask = 0; /* fully unmasked until guest SET */
+    s->ext_irq_mask = 0xffffffffu;
     s->trng_pending = false;
     if (!s->sep_timer && !s->sep_inject) {
         memory_region_init_io(&s->kic_mr, NULL, &sep_kic_ops, s,
@@ -1900,8 +1913,18 @@ static void sep_lab_init_trng_irq(AppleSEPLabState *s)
                                             &s->kic_mr, 20);
         error_report("SEP lab: sep-trng-irq brought up KIC +0x818");
     }
-    /* Ext IRQ +0xa00/+0xa80 window is installed by sep-inject; without it,
-     * ext_irq_mask stays 0 (unmasked) and TRNG completion still posts. */
+    if (!s->sep_inject) {
+        memory_region_init_io(&s->asc_a00_mr, NULL, &sep_asc_a00_ops, s,
+                              "sep-asc-a00", 0x100);
+        memory_region_add_subregion_overlap(&s->private_memory,
+                                            SEP_ASC_PA + 0xa00,
+                                            &s->asc_a00_mr, 25);
+        memory_region_init_io(&s->asc_1010_mr, NULL, &sep_asc_1010_ops, s,
+                              "sep-asc-1010", 0x8);
+        memory_region_add_subregion_overlap(&s->private_memory,
+                                            SEP_ASC_PA + 0x1010,
+                                            &s->asc_1010_mr, 25);
+    }
     error_report("SEP lab: sep-trng-irq on (KIC 0x%x → IRQ 3; gate +0xa80 bit3)",
                  SEP_KIC_TRNG_EVENT);
 }
@@ -1937,7 +1960,7 @@ static void sep_lab_init_inject(AppleSEPLabState *s)
                           "sep-asc-1010", 0x8);
     memory_region_add_subregion_overlap(&s->private_memory, SEP_ASC_PA + 0x1010,
                                         &s->asc_1010_mr, 25);
-    s->ext_irq_mask = 0;
+    s->ext_irq_mask = 0xffffffffu;
     s->trng_pending = false;
     sep_inject_reset_state(s);
     if (s->inject_script && s->inject_script[0]) {
