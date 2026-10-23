@@ -918,11 +918,21 @@ bool apple_modern_sep_core_attach_mailbox(AppleModernSEPCore *core,
                    "SEP wrapper (sep-mailbox=on)");
         return false;
     }
-    /* Shared APPLE_A7IOP_V6: AP at 0x282600000, SEP view at 0x2a2400000. */
+    /*
+     * Shared APPLE_A7IOP_V6: AP at 0x282600000, SEP view at 0x2a2400000.
+     * Alias ONLY the IOP mailbox block (ASC +0x4100..+0x4840: INT_MASK,
+     * A2I/I2A CTRL, A2I_RECV, I2A_SEND). The rest of the SEP's ASC window
+     * (+0x40, +0xa00..+0xa0c, +0x1000..+0x101c, ...) stays on the sepmmio
+     * RAM, as in apple-sep-lab: sepOS writes those and reads them back
+     * (e.g. 0x7c88 checks +0x1010/+0x1014 bit1 and +0xa00..+0xa0c == ~0),
+     * and the AP wrapper's IO model dropped the writes and read back 0.
+     */
     memory_region_init_alias(&core->mbox_alias, OBJECT(a7iop),
-                             "modern-sep.asc-v6", &a7iop->mmio, 0,
-                             memory_region_size(&a7iop->mmio));
-    memory_region_add_subregion_overlap(&core->container, SEP_CORE_MBOX_BASE,
+                             "modern-sep.asc-v6-iop-mbox",
+                             &a7iop->iop_mailbox->mmio, 0,
+                             memory_region_size(&a7iop->iop_mailbox->mmio));
+    memory_region_add_subregion_overlap(&core->container,
+                                        SEP_CORE_MBOX_BASE + 0x4100,
                                         &core->mbox_alias, 10);
     /* KIC claim (prio 20) already covers +0x800.. over this alias. */
     core->a7iop = a7iop;
