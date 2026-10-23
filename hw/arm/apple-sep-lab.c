@@ -166,6 +166,13 @@ struct AppleSEPLabState {
     uint32_t trng_regs[0x80 / 4];
     bool sep_trng_irq;        /* default off: raise KIC 0x10003 on TRNG complete */
     bool trng_pending;
+    /*
+     * sep-phase2 (default off; needs seprom): after EPControl device create
+     * (AKF/MBOX irq=-1, TRNG irq=3), run start-all so AKF binds IRQ 0x80 and
+     * clears ASC INT_MASK IOP_NONEMPTY. Bridges the missing sks→0x4047 RPC
+     * that never fires before idle in the lab.
+     */
+    bool sep_phase2;
     MemoryRegion key_fcfg_mr;   /* KEY.FCFG +0x8000 @ 0x2a0e48000 (W side-effect) */
     uint32_t key_fcfg_8000;
     /*
@@ -843,6 +850,76 @@ static void sep_lab_reset(void *opaque)
 }
 
 
+
+/*
+ * File offsets inside sepos.j410 image for EPControl (Mach-O @ 0x74000,
+ * __TEXT vmaddr 0x110000). Patches the in-kram copy only.
+ */
+#define SEP_EP_FILE          0x74000u
+#define SEP_EP_TEXT_VA       0x110000u
+#define SEP_EP_FO(va)        (SEP_EP_FILE + ((va) - SEP_EP_TEXT_VA))
+#define SEP_EP_START_ALL     0x118498u
+#define SEP_EP_START_EXIT    0x118524u   /* b #reply → retab when phase2 */
+#define SEP_EP_CREATE_RET    0x118e6cu   /* create-fn retab → b trampoline */
+#define SEP_EP_TRAMP         0x123000u   /* zero cave in __TEXT */
+
+static void sep_lab_apply_phase2(AppleSEPLabState *s, gsize image_size)
+{
+    uint8_t *kram;
+    uint32_t retab = 0xd65f0fffu;
+    uint32_t b_tramp;
+    uint32_t tramp[6];
+    uint32_t bl_imm;
+    int32_t off;
+    uint64_t fo;
+
+    if (!s->sep_phase2) {
+        return;
+    }
+    if (!s->seprom) {
+        error_report("SEP lab: sep-phase2=on requires seprom=on; ignored");
+        s->sep_phase2 = false;
+        return;
+    }
+    kram = memory_region_get_ram_ptr(&s->kram);
+
+    /* start-all epilogue: reply branch → retab so it is callable */
+    fo = SEP_EP_FO(SEP_EP_START_EXIT);
+    if (fo + 4 > image_size) {
+        error_report("SEP lab: sep-phase2 start-all exit OOB");
+        return;
+    }
+    memcpy(kram + fo, &retab, 4);
+
+    /* trampoline: save LR, bl start-all, restore, retab */
+    off = (int32_t)SEP_EP_START_ALL - (int32_t)(SEP_EP_TRAMP + 12);
+    bl_imm = 0x94000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
+    tramp[0] = 0xa9bf7bfdu; /* stp x29, x30, [sp, #-0x10]! */
+    tramp[1] = 0x910003fdu; /* mov x29, sp */
+    tramp[2] = 0xaa1f03e0u; /* mov x0, xzr */
+    tramp[3] = bl_imm;
+    tramp[4] = 0xa8c17bfdu; /* ldp x29, x30, [sp], #0x10 */
+    tramp[5] = retab;
+    fo = SEP_EP_FO(SEP_EP_TRAMP);
+    if (fo + sizeof(tramp) > image_size) {
+        error_report("SEP lab: sep-phase2 trampoline OOB");
+        return;
+    }
+    memcpy(kram + fo, tramp, sizeof(tramp));
+
+    /* create-fn retab → b trampoline */
+    off = (int32_t)SEP_EP_TRAMP - (int32_t)SEP_EP_CREATE_RET;
+    b_tramp = 0x14000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
+    fo = SEP_EP_FO(SEP_EP_CREATE_RET);
+    if (fo + 4 > image_size) {
+        error_report("SEP lab: sep-phase2 create ret OOB");
+        return;
+    }
+    memcpy(kram + fo, &b_tramp, 4);
+
+    error_report("SEP lab: sep-phase2 on (create→start-all; AKF IRQ 0x80 path)");
+}
+
 /* Default-off, env-gated in-memory image patcher (SEP_PATCH). Patches ONLY the
  * kram copy of the loaded image (never the file on disk) so documented debug
  * assertions can be neutered to see how far sepOS boots. Format:
@@ -1066,6 +1143,7 @@ static void sep_lab_init(MachineState *machine)
         memcpy(memory_region_get_ram_ptr(&s->kram), image, image_size);
         s->entry = SEP_KRAM_BASE;
         sep_lab_apply_patches(s, image_size);
+        sep_lab_apply_phase2(s, image_size);
         /* Handoff memory region the sep64 region encode points at. The real
          * SEPROM maps SEP DRAM here and writes the tagged record directory the
          * kernel parses at image 0x8f70; back it as RAM so the loader
@@ -2098,6 +2176,16 @@ static void sep_lab_set_sep_trng_irq(Object *obj, bool value, Error **errp)
     APPLE_SEP_LAB(obj)->sep_trng_irq = value;
 }
 
+static bool sep_lab_get_sep_phase2(Object *obj, Error **errp)
+{
+    return APPLE_SEP_LAB(obj)->sep_phase2;
+}
+
+static void sep_lab_set_sep_phase2(Object *obj, bool value, Error **errp)
+{
+    APPLE_SEP_LAB(obj)->sep_phase2 = value;
+}
+
 static bool sep_lab_get_seprom(Object *obj, Error **errp)
 {
     return APPLE_SEP_LAB(obj)->seprom;
@@ -2278,6 +2366,13 @@ static void sep_lab_class_init(ObjectClass *oc, const void *data)
         "Lab-only (default off; needs seprom=on): on TRNG.CTRL bit15 go, post "
         "KIC +0x818 event 0x10003 (IRQ 3) if ASC ext-IRQ bit3 is unmasked "
         "(+0xa80 write 0x8). Phase-2 lead: sks entropy before AKF mailbox.");
+    object_class_property_add_bool(oc, "sep-phase2", sep_lab_get_sep_phase2,
+                                   sep_lab_set_sep_phase2);
+    object_class_property_set_description(oc, "sep-phase2",
+        "Lab-only (default off; needs seprom=on): after EPControl create "
+        "(AKF/MBOX + TRNG), call start-all so AKF binds IRQ 0x80 and unmasks "
+        "ASC IOP_NONEMPTY. Stands in for the sks libShared RPC 0x4047 that "
+        "does not run before idle in this lab.");
     object_class_property_add_bool(oc, "seprom", sep_lab_get_seprom,
                                    sep_lab_set_seprom);
     object_class_property_set_description(oc, "seprom",
