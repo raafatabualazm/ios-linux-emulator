@@ -122,6 +122,13 @@ typedef struct AppleModernSEPCore {
     bool mbox_pending;
     uint64_t t_fires;
     QEMUTimer *timer;
+
+    /* SEP_CORE_WATCH diagnostic (default off). */
+    QEMUTimer *watch_timer;
+    uint64_t watch_ms;
+    uint64_t watch_last_pc;
+    uint64_t watch_last_esr;
+    uint64_t watch_last_elr;
 } AppleModernSEPCore;
 
 struct AppleA7IOP;

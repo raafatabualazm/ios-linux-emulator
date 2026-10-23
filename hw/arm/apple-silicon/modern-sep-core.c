@@ -320,6 +320,50 @@ static const MemoryRegionOps sep_kic_ops = {
     .impl = { .min_access_size = 4, .max_access_size = 4 },
 };
 
+/* ---------- optional state watch (SEP_CORE_WATCH=<ms>) ---------- */
+
+static void sep_core_watch_tick(void *opaque)
+{
+    AppleModernSEPCore *core = opaque;
+    CPUARMState *env = &core->cpu->env;
+    uint64_t pc = env->pc;
+    uint64_t esr = env->cp15.esr_el[1];
+    uint64_t elr = env->elr_el[1];
+
+    if (pc != core->watch_last_pc || esr != core->watch_last_esr ||
+        elr != core->watch_last_elr) {
+        error_report("modern-sep-core: watch pc=0x%" PRIx64 " el=%d "
+                     "esr_el1=0x%" PRIx64 " elr_el1=0x%" PRIx64
+                     " far_el1=0x%" PRIx64 " vbar_el1=0x%" PRIx64
+                     " sp=0x%" PRIx64 " mpidr_aff=0x%" PRIx64,
+                     pc, (int)extract32(env->pstate, 2, 2), esr, elr, env->cp15.far_el[1],
+                     env->cp15.vbar_el[1], env->xregs[31],
+                     core->cpu->mp_affinity);
+        core->watch_last_pc = pc;
+        core->watch_last_esr = esr;
+        core->watch_last_elr = elr;
+    }
+    timer_mod(core->watch_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+              core->watch_ms);
+}
+
+static void sep_core_watch_init(AppleModernSEPCore *core)
+{
+    const char *env = getenv("SEP_CORE_WATCH");
+    uint64_t ms;
+
+    if (!env || !*env || qemu_strtou64(env, NULL, 0, &ms) < 0 || !ms) {
+        return;
+    }
+    core->watch_ms = ms;
+    core->watch_last_pc = UINT64_MAX;
+    core->watch_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, sep_core_watch_tick,
+                                     core);
+    timer_mod(core->watch_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + ms);
+    error_report("modern-sep-core: SEP_CORE_WATCH every %" PRIu64 " ms "
+                 "(diagnostic: logs pc/esr/elr/far on change)", ms);
+}
+
 /* ---------- patches / phase2 ---------- */
 
 static void sep_core_apply_patches(AppleModernSEPCore *core)
@@ -730,6 +774,19 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
     object_property_set_bool(cpuobj, "apple-modern-sep", true, &error_fatal);
     object_property_set_uint(cpuobj, "cntfrq", SEP_CORE_CNTFRQ, &error_fatal);
     object_property_set_uint(cpuobj, "rvbar", core->entry, &error_fatal);
+    /*
+     * The SEP is a uniprocessor: sepOS's entry (image 0x4014) takes
+     * MPIDR_EL1.Aff0 as its core number and places the boot stack at
+     * 0x18000 + 0x4000 * (aff0 + 1). Left to QEMU's default, this CPU gets
+     * Aff0 = cpu_index (6 with smp=6), so the stack lands at 0x30000..0x34000
+     * inside the page-table pool (0x24000..). The 0x5000 -> 0x8354 page-table
+     * build then hands out and zeroes 0x1e40030000, wiping the saved LR; the
+     * ret goes to PA 0 (zero RAM), UDF, and the core parks in the sync vector
+     * at image+0xa00. Lab (smp=1) has Aff0 = 0. Reproduced in the lab with
+     * -global max-arm-cpu.mp-affinity=6 (same SP/X0/X1 at the fault).
+     * arm_get_cpu_by_id() still resolves affinity 0 to AP cpu0 first.
+     */
+    object_property_set_uint(cpuobj, "mp-affinity", 0, &error_fatal);
     object_property_set_link(cpuobj, "memory", OBJECT(&core->container),
                              &error_fatal);
     core->cpu->sme_vq.supported = 0x0b;
@@ -741,6 +798,7 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
 
     sep_core_seed_handoff(core);
     qemu_register_reset(sep_core_reset, core);
+    sep_core_watch_init(core);
 
     warn_report("apple-modern: sep-core SEPROM+lab peripherals: image '%s' "
                 "(%zu B) @PA 0x%" PRIx64 "; PMGR@0x%" PRIx64 "+0x2c000; "
