@@ -130,6 +130,15 @@ struct AppleSEPLabState {
     bool t_pending;
     uint64_t t_fires, t_claims;
     /*
+     * TRNG REGS overlay @ 0x2a0b80000 (EPControl "TRNG", fourcc REGS).
+     * App bring-up (0x1197e0) writes 0x63ff to +0x10 as W1C; a later check
+     * (0x119d70, cookie 0x120c25) requires bits 0x620c clear. Plain RAM keeps
+     * the write and false-panics into IPC 0x7d0 recursion. Overlay implements
+     * W1C on +0x10; +0x78/+0x7c carry status seeds.
+     */
+    MemoryRegion trng_mr;
+    uint32_t trng_regs[0x80 / 4];
+    /*
      * sep-stack-fix (default off; needs seprom): fill missing 16K EL0 stack
      * pages (synthetic layout leaves a Trans_L3 hole under SP). Pre-maps on
      * EL0 entry and on EL0 data-abort. Phys pages from top of kram.
@@ -164,6 +173,8 @@ struct AppleSEPLabState {
 #define SEP_ASC_PA      0x2a2400000ULL
 #define SEP_KIC_PA      0x2a0c40000ULL
 #define SEP_KIC_SIZE    0x40000ULL
+#define SEP_TRNG_PA     0x2a0b80000ULL
+#define SEP_TRNG_SIZE   0x80ULL
 
 static uint64_t sep_pmgr_read(void *opaque, hwaddr off, unsigned size)
 {
@@ -220,6 +231,47 @@ static void sep_pmgr_write(void *opaque, hwaddr off, uint64_t val,
 static const MemoryRegionOps sep_pmgr_ops = {
     .read = sep_pmgr_read,
     .write = sep_pmgr_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+
+static uint64_t sep_trng_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+
+    if (off + size > SEP_TRNG_SIZE) {
+        return 0;
+    }
+    return s->trng_regs[off / 4];
+}
+
+static void sep_trng_write(void *opaque, hwaddr off, uint64_t val,
+                           unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+
+    if (off + size > SEP_TRNG_SIZE) {
+        return;
+    }
+    if (off == 0x10) {
+        /*
+         * EPControl TRNG status (app 0x1197e0 / 0x119d68..0x119d80):
+         * write-1-to-clear, then HW raises bit0 (ready). Clearing alone
+         * leaves the app in tbz #0 poll forever (cookie path avoided, but
+         * no progress). Instant-ready is enough for bring-up.
+         */
+        s->trng_regs[off / 4] &= ~(uint32_t)val;
+        s->trng_regs[off / 4] |= 0x1u;
+        return;
+    }
+    s->trng_regs[off / 4] = (uint32_t)val;
+}
+
+static const MemoryRegionOps sep_trng_ops = {
+    .read = sep_trng_read,
+    .write = sep_trng_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 8 },
     .impl = { .min_access_size = 4, .max_access_size = 4 },
@@ -595,7 +647,21 @@ static void sep_lab_seed_handoff(AppleSEPLabState *s)
         /* SSEAESAB at 0x2a0b00000 (start of akp_hi). */
         hi[0] = SEP_SENTINEL;
         hi[2] = SEP_SENTINEL;
-        hi[(0x2a0b8007cULL - 0x2a0b00000ULL) / 4] = SEP_SENTINEL;
+        /*
+         * TRNG REGS live in trng_mr (W1C +0x10). Status seeds: +0x7c nibble
+         * [27:24]==2 (cookie 0x120c21); +0x78 bits 19|20 (cookie 0x120c2b).
+         * Missing W1C on +0x10 -> cookie 0x120c25. All three used to funnel
+         * into IPC 0x7d0 panic recursion (not a real stack need).
+         * sep-stack-fix stays default-off.
+         */
+        memset(s->trng_regs, 0, sizeof(s->trng_regs));
+        /* Output FIFO words read by EPControl 0x119d8c..0x119db0. */
+        s->trng_regs[0x00 / 4] = 0x6b8b4567u;
+        s->trng_regs[0x04 / 4] = 0x327b23c6u;
+        s->trng_regs[0x08 / 4] = 0x643c9869u;
+        s->trng_regs[0x0c / 4] = 0x66334873u;
+        s->trng_regs[0x78 / 4] = 0x00180000u;
+        s->trng_regs[0x7c / 4] = 0x02000000u;
         hi[(0x2a0bc1800ULL - 0x2a0b00000ULL) / 4] = 0x3;
     }
     /* Platform sentinels (plat RAM base 0x2a0d80000, size 0x100000). */
@@ -814,6 +880,11 @@ static void sep_lab_init(MachineState *machine)
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, 0x2a0b00000ULL,
                                             &s->akp_hi, 0);
+        /* TRNG REGS overlay (W1C +0x10) on top of akp_hi RAM. */
+        memory_region_init_io(&s->trng_mr, NULL, &sep_trng_ops, s,
+                              "sep-trng-regs", SEP_TRNG_SIZE);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_TRNG_PA,
+                                            &s->trng_mr, 10);
         /* Platform pages 0x2a0d80000..0x2a0e80000 (sentinels + timer tail). */
         memory_region_init_ram(&s->plat, NULL, "sep-plat", 0x100000,
                                &error_fatal);
