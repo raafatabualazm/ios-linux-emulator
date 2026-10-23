@@ -533,8 +533,20 @@ static void sep_core_seed_handoff(AppleModernSEPCore *core)
         bpse[0] = 0x53455042; /* BPSE */
         bpse[2] = 1;
         bpse[0x70 / 4] = 0x528000;
-        /* FMST carve: 64 KiB with DRAM-lo backed (memcfg 0x9001f). */
-        bpse[0x78 / 4] = 0x10000;
+        /*
+         * FMST carve (SEPB+0x78): lab-proven default 0x4000 (apple-sep-lab
+         * without sep-stack-fix reaches idle with it). SEP_CORE_FMST=<n>
+         * overrides (16K-aligned).
+         */
+        {
+            const char *e = getenv("SEP_CORE_FMST");
+            uint64_t carve = 0x4000;
+
+            if (e && *e && qemu_strtou64(e, NULL, 0, &carve) < 0) {
+                carve = 0x4000;
+            }
+            bpse[0x78 / 4] = (uint32_t)carve;
+        }
         /* Insecure-RNG seed pair (lab constants, non-secret). */
         bpse[0x80 / 4] = 0x5345504c;
         bpse[0x84 / 4] = 0x00000001;
@@ -647,6 +659,27 @@ static void sep_core_seed_handoff(AppleModernSEPCore *core)
         rec[1] = (typeof(rec[1])){ 0x434f4e53, 0x4000, 0x008000 }; /* CONS */
         rec[2] = (typeof(rec[2])){ 0x434f5245, 0x4000, 0x00c000 }; /* CORE */
         rec[3] = (typeof(rec[3])){ 0x54524143, 0x4000, 0x010000 }; /* TRAC */
+        /*
+         * Roottask directory entries (apple-sep-lab Task 8, parser 0xd990):
+         * PNIC must be exactly 0x8000 (0xd9cc); FLAG payload lists SEPO
+         * bit0 so the TXMB default create at 0xdc30 runs; OPLA/IPIS/TOCS/
+         * OTON fill the 4-entry table at 0x174cc (0xfbe8). Without these the
+         * roottask asserts and the panic printer recurses into its stack
+         * guard (EL0 Perm_L3 at ELR 0xb350 -> obj_tcb.c:173).
+         */
+        rec[4] = (typeof(rec[4])){ 0x504e4943, 0x8000, 0x014000 }; /* PNIC */
+        rec[5] = (typeof(rec[5])){ 0x464c4147, 0x4000, 0x01c000 }; /* FLAG */
+        rec[6] = (typeof(rec[6])){ 0x414c504f, 0x4000, 0x020000 };
+        rec[7] = (typeof(rec[7])){ 0x53495049, 0x4000, 0x024000 };
+        rec[8] = (typeof(rec[8])){ 0x53434f54, 0x4000, 0x028000 };
+        rec[9] = (typeof(rec[9])){ 0x4e4f544f, 0x4000, 0x02c000 };
+        {
+            uint32_t *flag = (uint32_t *)(reg + 0x1c000);
+
+            flag[0] = 1;            /* count */
+            flag[1] = 0x5345504f;   /* "SEPO" */
+            flag[2] = 1;            /* flags bit0 */
+        }
     }
 
     /* Entry stub X1 = KRAM base (Mach-O copy source). */
