@@ -1,4 +1,4 @@
-# apple-modern touch input (branch claude/touch-attach)
+# apple-modern touch input (branches claude/touch-attach, claude/touch-input)
 
 Architecture note for the multi-touch path of the `apple-modern` machine (T8140 / iPhone17,3, iOS 27 24A437).
 Everything here is default-off. The goal is a device model that plays the multi-touch coprocessor's end of
@@ -118,6 +118,15 @@ over the last 100 ms, as the single-finger path does. It is fed by QEMU multi-to
 forms. The single-finger pointer bridge and `x-touch tap` / `swipe` are unchanged and separate; only one of the two owns the
 touch stream at a time (the other is refused or ignored until every finger is out of range).
 
+Verified on the guest (run `touch-input3`, 2026-10-23, oracle `touch-input/mtp-multi-oracle.py` in the evidence tree): the
+carousel's information button toggles the information view (about 635,560 changed pixels each time). With the first finger on
+an empty point and only a later path on the button, the button fired every time: `x-touch tap2` (path 2), QMP `mtt` input with
+two slots (path 2), a staggered `mtt` touch (finger 2 taps while finger 1 rests), the pointer right-click pinch (the mirrored
+second finger), the pointer middle-click pan pair, and an `x-touch multi` five-finger tap (path 5 of a 5-path frame). A single
+tap on the empty point changed nothing; two fingers on empty points did not toggle anything (only the cover sheet's own tap
+response: the home indicator 22 px higher at the screenshot). The peer's frame log shows every finger in every frame from
+MakeTouch to OutOfRange with ids 1..n; the single-finger tap still toggles as before.
+
 QMP example, two fingers down and up (values are framebuffer pixels scaled to 0..0x7fff):
 
     { "execute": "input-send-event", "arguments": { "events": [
@@ -137,4 +146,4 @@ QMP example, two fingers down and up (values are framebuffer pixels scaled to 0.
   for them. The memory FIFOs (no IOMapper: `AppleT8110DART` never starts for `dart-mtp` here), the MTP coprocessor itself, wftm
   provisioning (its D47S1 personality is not retained).
 * Verified on the guest: sensor x to the right and sensor y up from the bottom edge map to the framebuffer without any flip
-  (a tap at the carousel's information button opened its information view). One finger only.
+  (a tap at the carousel's information button opened its information view). Several fingers: see above.
