@@ -4249,13 +4249,14 @@ static void modern_init(MachineState *machine)
          * 0xfffffff0085f9678). Without the pmgr compat group no PMGR driver
          * ever publishes that function, so the lookup waits forever and start()
          * never reaches sepfw-loaded / PM init / _bootSEP (gdb: entered
-         * 0x85f9678 from 0x9622338's call, never returned). Point the
-         * reference at an unresolvable phandle so the lookup fails fast; the
-         * driver null-checks the result (0x9628d48 cbz). SEP_CORE_PGWAIT=keep
-         * restores the stock value.
+         * 0x85f9678 from 0x9622338's call, never returned). The lookup
+         * resolves the phandle lazily (0x85f9d44 builds a matching dict, then
+         * 0x85f9898 waits with timeout -1), so even an unresolvable phandle
+         * hangs; only a value shorter than 8 bytes fails fast (0x85f9744
+         * cmp #8 -> kIOReturnInternalError, NULL). The driver null-checks the
+         * result (0x9628d48 cbz). SEP_CORE_PGWAIT=keep restores the stock value.
          */
-        static const uint8_t no_pg_wait[8] = { 0xff, 0xff, 0xff, 0xff,
-                                               'W', 'a', 'i', 't' };
+        static const uint8_t no_pg_wait[4] = { 0, 0, 0, 0 };
         static const AppleModernAdtOverride pg = {
             "/arm-io/sep/iop-sep-nub", "function-wait_for_power_gate",
             no_pg_wait, sizeof(no_pg_wait),
@@ -4266,7 +4267,7 @@ static void modern_init(MachineState *machine)
         }
         overrides[override_count++] = pg;
         warn_report("apple-modern: sep-core: iop-sep-nub "
-                    "function-wait_for_power_gate -> unresolvable phandle "
+                    "function-wait_for_power_gate -> 4-byte stub (lookup fails fast) "
                     "(no pmgr driver without adt-compat-restore +pmgr)");
     }
     if (s->dcp_iop) {
