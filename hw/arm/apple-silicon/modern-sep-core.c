@@ -417,6 +417,96 @@ static void sep_core_watch_init(AppleModernSEPCore *core)
                  "(diagnostic: logs pc/esr/elr/far on change)", ms);
 }
 
+/* ---------- optional EL0 exception log (SEP_CORE_EXCLOG=<n>) ---------- */
+
+/*
+ * Diagnostic for EL0 asserts in sepOS apps: keeps a ring of the last 64 EL0
+ * SVCs (pc, lr, x0..x3, x16, x27) and prints it on the first SVC carrying
+ * 0x7d0 (L4 panic IPC key, PROGRESS "TRNG W1C" section) or the first EL0
+ * abort/UDF; then logs up to <n> further non-SVC EL0 exceptions.
+ */
+static void sep_core_exclog_dump_ring(AppleModernSEPCore *core, const char *why)
+{
+    unsigned i;
+
+    error_report("modern-sep-core: exclog ring dump (%s), oldest first:", why);
+    for (i = 0; i < 64; i++) {
+        uint64_t *e = core->exclog_ring[(core->exclog_ring_pos + i) % 64];
+
+        if (!e[0]) {
+            continue;
+        }
+        error_report("  svc pc=0x%" PRIx64 " lr=0x%" PRIx64 " x0=0x%" PRIx64
+                     " x1=0x%" PRIx64 " x2=0x%" PRIx64 " x3=0x%" PRIx64
+                     " x16=0x%" PRIx64 " x27=0x%" PRIx64,
+                     e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
+    }
+}
+
+static void sep_core_exclog_hook(ARMCPU *cpu, void *opaque)
+{
+    AppleModernSEPCore *core = opaque;
+    CPUARMState *env = &cpu->env;
+    CPUState *cs = CPU(cpu);
+    int el = extract32(env->pstate, 2, 2);
+
+    if (el != 0 || !(env->aarch64)) {
+        return;
+    }
+    if (cs->exception_index == EXCP_SWI) {
+        uint64_t *e = core->exclog_ring[core->exclog_ring_pos];
+        bool hit = false;
+        int r;
+
+        e[0] = env->pc; e[1] = env->xregs[30];
+        e[2] = env->xregs[0]; e[3] = env->xregs[1];
+        e[4] = env->xregs[2]; e[5] = env->xregs[3];
+        e[6] = env->xregs[16]; e[7] = env->xregs[27];
+        core->exclog_ring_pos = (core->exclog_ring_pos + 1) % 64;
+        for (r = 0; r <= 8; r++) {
+            if (env->xregs[r] == 0x7d0) {
+                hit = true;
+            }
+        }
+        if (hit && core->exclog_svc_hits++ < 2) {
+            sep_core_exclog_dump_ring(core, "SVC with 0x7d0");
+        }
+        return;
+    }
+    if (cs->exception_index != EXCP_DATA_ABORT &&
+        cs->exception_index != EXCP_PREFETCH_ABORT &&
+        cs->exception_index != EXCP_UDEF) {
+        return;
+    }
+    if (core->exclog_n == 0) {
+        sep_core_exclog_dump_ring(core, "first EL0 abort/UDF");
+    }
+    if (core->exclog_n++ < core->exclog_max) {
+        error_report("modern-sep-core: EL0 exc %d syn=0x%" PRIx64 " pc=0x%"
+                     PRIx64 " far=0x%" PRIx64 " sp0=0x%" PRIx64 " lr=0x%"
+                     PRIx64 " x0=0x%" PRIx64 " x1=0x%" PRIx64 " x27=0x%"
+                     PRIx64 " ttbr0=0x%" PRIx64,
+                     cs->exception_index, (uint64_t)env->exception.syndrome,
+                     env->pc, (uint64_t)env->exception.vaddress, env->sp_el[0],
+                     env->xregs[30], env->xregs[0], env->xregs[1],
+                     env->xregs[27], env->cp15.ttbr0_el[1]);
+    }
+}
+
+static void sep_core_exclog_init(AppleModernSEPCore *core)
+{
+    const char *env = getenv("SEP_CORE_EXCLOG");
+    uint64_t n;
+
+    if (!env || !*env || qemu_strtou64(env, NULL, 0, &n) < 0 || !n) {
+        return;
+    }
+    core->exclog_max = (uint32_t)n;
+    arm_register_pre_el_change_hook(core->cpu, sep_core_exclog_hook, core);
+    error_report("modern-sep-core: SEP_CORE_EXCLOG=%u (EL0 exception log)",
+                 core->exclog_max);
+}
+
 /* ---------- patches / phase2 ---------- */
 
 static void sep_core_apply_patches(AppleModernSEPCore *core)
@@ -886,6 +976,7 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
     sep_core_seed_handoff(core);
     qemu_register_reset(sep_core_reset, core);
     sep_core_watch_init(core);
+    sep_core_exclog_init(core);
 
     warn_report("apple-modern: sep-core SEPROM+lab peripherals: image '%s' "
                 "(%zu B) @PA 0x%" PRIx64 "; PMGR@0x%" PRIx64 "+0x2c000; "

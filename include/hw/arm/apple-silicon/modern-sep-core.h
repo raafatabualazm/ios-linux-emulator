@@ -133,6 +133,12 @@ typedef struct AppleModernSEPCore {
     uint64_t watch_last_pc;
     uint64_t watch_last_esr;
     uint64_t watch_last_elr;
+    /* SEP_CORE_EXCLOG=<n>: EL0 exception log (diagnostic, default off). */
+    uint32_t exclog_max;
+    uint32_t exclog_n;
+    uint32_t exclog_svc_hits;
+    uint32_t exclog_ring_pos;
+    uint64_t exclog_ring[64][8];
 } AppleModernSEPCore;
 
 struct AppleA7IOP;
