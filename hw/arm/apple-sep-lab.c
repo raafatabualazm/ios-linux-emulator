@@ -130,6 +130,30 @@ struct AppleSEPLabState {
     bool t_pending;
     uint64_t t_fires, t_claims;
     /*
+     * sep-inject (default off; needs seprom): lab-side ASC-v6 mailbox player.
+     * IOP view at ASC+0x4100 (A2I_CTRL +0x10, A2I_RECV +0x710, I2A_SEND +0x720).
+     * Enqueues AP->SEP frames, raises KIC event 0x40000 (IRQ_IOP_NONEMPTY) onto
+     * sep_cpu_irq, captures SEP->AP outbox writes. No invented replies.
+     */
+    bool sep_inject;
+    char *inject_script;
+    MemoryRegion mbox_mr;
+    uint32_t mbox_magic;
+    uint32_t mbox_irqstat;
+    uint32_t a2i_ctrl_en;
+    uint32_t i2a_ctrl_en;
+    uint8_t a2i_send_scratch[16];
+    uint8_t a2i_recv_scratch[16];
+    uint8_t i2a_send_scratch[16];
+    uint8_t i2a_recv_scratch[16];
+    uint8_t a2i_q[16][16];
+    unsigned a2i_head, a2i_tail, a2i_count;
+    uint8_t outbox_log[64][16];
+    unsigned outbox_count;
+    bool mbox_pending;
+    uint32_t mbox_kic_event; /* default SEP_KIC_MBOX_EVENT; QOM x-inject-kic */
+    uint64_t inject_enqueues, inject_dequeues, outbox_posts;
+    /*
      * TRNG REGS overlay @ 0x2a0b80000 (EPControl "TRNG", fourcc REGS).
      * App bring-up (0x1197e0) writes 0x63ff to +0x10 as W1C; a later check
      * (0x119d70, cookie 0x120c25) requires bits 0x620c clear. Plain RAM keeps
@@ -156,6 +180,18 @@ struct AppleSEPLabState {
 #define SEP_KIC_EVT_PA 0x2a2400800ULL   /* window covers KIC +0x800..+0x8ff */
 #define SEP_TIMER_HZ   24000000ULL
 #define SEP_KIC_TIMER_EVENT 0x00070001u /* type 7, bit0 valid, bit3 clear */
+#define SEP_KIC_MBOX_EVENT  0x00040000u
+#define SEP_ASC_MBOX_OFF    0x4100u
+#define SEP_ASC_MBOX_SIZE   0x800u
+#define SEP_MBOX_CTRL_EN    BIT(0)
+#define SEP_MBOX_CTRL_EMPTY BIT(17)
+#define SEP_MBOX_CTRL_COUNT_SHIFT 20
+#define SEP_INJECT_QDEPTH 16
+#define SEP_INJECT_OUTLOG 64
+
+static void sep_inject_reset_state(AppleSEPLabState *s);
+static void sep_lab_init_inject(AppleSEPLabState *s);
+static void sep_lab_update_irq(AppleSEPLabState *s);
 /*
  * First-app PMGR window (j410 app @file 0x74000; device table name SSEASMBT).
  * VA→PA 0x2a0800000 size 0x80000. Kick +0x2c000=0xf, +0x2c008=0x800000.
@@ -763,6 +799,9 @@ static void sep_lab_reset(void *opaque)
     cpu_reset(CPU(s->cpu));
     cpu_set_pc(CPU(s->cpu), s->entry);
     sep_lab_seed_handoff(s);
+    if (s->sep_inject) {
+        sep_inject_reset_state(s);
+    }
     /*
      * Entry stub (image 0x4010/0x40fc): x1 is the Mach-O copy source.
      * Peer (Antigravity): x1 = SEP_KRAM_BASE so 0x4000 bytes land at
@@ -1055,6 +1094,7 @@ static void sep_lab_init(MachineState *machine)
      * can wake sepOS from its WFE mailbox-wait. */
     s->sep_irq = qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_IRQ);
     sep_lab_init_timer(s);
+    sep_lab_init_inject(s);
     sep_lab_init_stack_fix(s);
     qemu_register_reset(sep_lab_reset, s);
     rom_add_blob_fixed("sep-lab.raw-image", image, image_size, 0);
@@ -1128,9 +1168,353 @@ static void sep_lab_set_irq(Object *obj, const char *value, Error **errp)
 }
 
 
+/* ---- sep-inject: ASC-v6 IOP mailbox player (default off) ---- */
+
+static void sep_lab_update_irq(AppleSEPLabState *s)
+{
+    bool raise = s->t_pending || (s->sep_inject && s->mbox_pending);
+
+    if (s->sep_irq) {
+        qemu_set_irq(s->sep_irq, raise);
+    }
+}
+
+static uint32_t sep_inject_a2i_ctrl_read(AppleSEPLabState *s)
+{
+    uint32_t v = s->a2i_ctrl_en & SEP_MBOX_CTRL_EN;
+
+    if (s->a2i_count == 0) {
+        v |= SEP_MBOX_CTRL_EMPTY;
+    } else {
+        uint32_t c = s->a2i_count > 15 ? 15 : s->a2i_count;
+        v |= c << SEP_MBOX_CTRL_COUNT_SHIFT;
+    }
+    return v;
+}
+
+static uint32_t sep_inject_i2a_ctrl_read(AppleSEPLabState *s)
+{
+    return (s->i2a_ctrl_en & SEP_MBOX_CTRL_EN) | SEP_MBOX_CTRL_EMPTY;
+}
+
+static void sep_inject_raise_doorbell(AppleSEPLabState *s)
+{
+    if (!s->sep_inject || s->a2i_count == 0) {
+        return;
+    }
+    s->mbox_pending = true;
+    sep_lab_update_irq(s);
+    error_report("SEP inject: doorbell (a2i=%u KIC=0x%x)",
+                 s->a2i_count, s->mbox_kic_event);
+}
+
+static bool sep_inject_enqueue(AppleSEPLabState *s, const uint8_t msg[16],
+                               bool doorbell)
+{
+    if (s->a2i_count >= SEP_INJECT_QDEPTH) {
+        error_report("SEP inject: A2I FIFO full");
+        return false;
+    }
+    memcpy(s->a2i_q[s->a2i_tail], msg, 16);
+    s->a2i_tail = (s->a2i_tail + 1) % SEP_INJECT_QDEPTH;
+    s->a2i_count++;
+    s->inject_enqueues++;
+    error_report("SEP inject: A2I ep=%u tag=%u op=%u param=%u data=0x%08x%s",
+                 msg[0], msg[1], msg[2], msg[3], ldl_le_p(msg + 4),
+                 doorbell ? " +doorbell" : "");
+    if (doorbell) {
+        sep_inject_raise_doorbell(s);
+    }
+    return true;
+}
+
+static void sep_inject_seed_boot_descriptor(AppleSEPLabState *s)
+{
+    uint8_t boot[16];
+
+    memset(boot, 0, sizeof(boot));
+    stl_le_p(boot + 0, 0x040000fe);
+    stl_le_p(boot + 4, 0x10000000);
+    sep_inject_enqueue(s, boot, false);
+}
+
+static void sep_inject_reset_state(AppleSEPLabState *s)
+{
+    s->a2i_head = s->a2i_tail = s->a2i_count = 0;
+    s->outbox_count = 0;
+    s->mbox_pending = false;
+    if (!s->mbox_kic_event) {
+        s->mbox_kic_event = SEP_KIC_MBOX_EVENT;
+    }
+    s->mbox_magic = 0x55551111u;
+    s->mbox_irqstat = 0;
+    s->a2i_ctrl_en = SEP_MBOX_CTRL_EN;
+    s->i2a_ctrl_en = SEP_MBOX_CTRL_EN;
+    memset(s->a2i_send_scratch, 0, sizeof(s->a2i_send_scratch));
+    memset(s->a2i_recv_scratch, 0, sizeof(s->a2i_recv_scratch));
+    memset(s->i2a_send_scratch, 0, sizeof(s->i2a_send_scratch));
+    memset(s->i2a_recv_scratch, 0, sizeof(s->i2a_recv_scratch));
+    sep_inject_seed_boot_descriptor(s);
+}
+
+static void sep_inject_capture_outbox(AppleSEPLabState *s, const uint8_t msg[16])
+{
+    unsigned slot = s->outbox_count < SEP_INJECT_OUTLOG ? s->outbox_count
+                                                       : SEP_INJECT_OUTLOG - 1;
+
+    memcpy(s->outbox_log[slot], msg, 16);
+    if (s->outbox_count < SEP_INJECT_OUTLOG) {
+        s->outbox_count++;
+    }
+    s->outbox_posts++;
+    error_report("SEP inject: I2A outbox ep=%u tag=%u op=%u param=%u data=0x%08x "
+                 "(post #%" PRIu64 ")",
+                 msg[0], msg[1], msg[2], msg[3], ldl_le_p(msg + 4),
+                 s->outbox_posts);
+}
+
+static uint64_t sep_mbox_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+    uint64_t ret = 0;
+
+    switch (off) {
+    case 0x00:
+        return s->mbox_magic;
+    case 0x08:
+        return s->mbox_irqstat;
+    case 0x10:
+        return sep_inject_a2i_ctrl_read(s);
+    case 0x14:
+        return sep_inject_i2a_ctrl_read(s);
+    case 0x710:
+        if (s->a2i_count == 0) {
+            memset(s->a2i_recv_scratch, 0, 16);
+        } else {
+            memcpy(s->a2i_recv_scratch, s->a2i_q[s->a2i_head], 16);
+            s->a2i_head = (s->a2i_head + 1) % SEP_INJECT_QDEPTH;
+            s->a2i_count--;
+            s->inject_dequeues++;
+            error_report("SEP inject: SEP popped A2I ep=%u tag=%u op=%u (left=%u)",
+                         s->a2i_recv_scratch[0], s->a2i_recv_scratch[1],
+                         s->a2i_recv_scratch[2], s->a2i_count);
+        }
+        /* fall through */
+    case 0x714:
+    case 0x718:
+    case 0x71c:
+        memcpy(&ret, s->a2i_recv_scratch + (off - 0x710), size);
+        return ret;
+    case 0x730:
+    case 0x734:
+    case 0x738:
+    case 0x73c:
+        memcpy(&ret, s->i2a_recv_scratch + (off - 0x730), size);
+        return ret;
+    default:
+        return 0;
+    }
+}
+
+static void sep_mbox_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+
+    switch (off) {
+    case 0x00:
+        s->mbox_magic = (uint32_t)val;
+        break;
+    case 0x08:
+        s->mbox_irqstat = (uint32_t)val;
+        if (val & 0x10) {
+            s->mbox_pending = false;
+            sep_lab_update_irq(s);
+        }
+        break;
+    case 0x10:
+        s->a2i_ctrl_en = (uint32_t)val & SEP_MBOX_CTRL_EN;
+        break;
+    case 0x14:
+        s->i2a_ctrl_en = (uint32_t)val & SEP_MBOX_CTRL_EN;
+        break;
+    case 0x700:
+    case 0x704:
+    case 0x708:
+    case 0x70c:
+        memcpy(s->a2i_send_scratch + (off - 0x700), &val, size);
+        break;
+    case 0x720:
+    case 0x724:
+    case 0x728:
+    case 0x72c:
+        memcpy(s->i2a_send_scratch + (off - 0x720), &val, size);
+        if (off + size >= 0x730) {
+            sep_inject_capture_outbox(s, s->i2a_send_scratch);
+            memset(s->i2a_send_scratch, 0, 16);
+        }
+        break;
+    default:
+        error_report("SEP inject: unmodelled mbox write +0x%" HWADDR_PRIx
+                     " = 0x%" PRIx64, SEP_ASC_MBOX_OFF + off, val);
+        break;
+    }
+}
+
+static const MemoryRegionOps sep_mbox_ops = {
+    .read = sep_mbox_read,
+    .write = sep_mbox_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 8 },
+};
+
+static void sep_inject_pack(uint8_t out[16], uint8_t ep, uint8_t tag,
+                            uint8_t op, uint8_t param, uint32_t data)
+{
+    memset(out, 0, 16);
+    out[0] = ep;
+    out[1] = tag;
+    out[2] = op;
+    out[3] = param;
+    stl_le_p(out + 4, data);
+}
+
+static bool sep_inject_named(AppleSEPLabState *s, const char *name, bool doorbell)
+{
+    uint8_t msg[16];
+
+    if (!strcmp(name, "ping")) {
+        sep_inject_pack(msg, 0xff, 0, 1, 0, 0);
+    } else if (!strcmp(name, "status")) {
+        sep_inject_pack(msg, 0xff, 0, 2, 0, 0);
+    } else if (!strcmp(name, "alive")) {
+        sep_inject_pack(msg, 0, 0, 13, 0, 0);
+    } else if (!strcmp(name, "epmap")) {
+        sep_inject_pack(msg, 0xfd, 0, 0, 0, 0);
+    } else if (!strcmp(name, "sksopen")) {
+        sep_inject_pack(msg, 18, 0, 0, 0, 0);
+    } else {
+        return false;
+    }
+    return sep_inject_enqueue(s, msg, doorbell);
+}
+
+static int sep_inject_parse_one(AppleSEPLabState *s, const char *tok, Error **errp)
+{
+    uint8_t msg[16];
+    int ep = 0, tag = 0, op = 0, param = 0;
+    unsigned data = 0;
+    int n;
+
+    while (*tok == ' ' || *tok == '\t') {
+        tok++;
+    }
+    if (!*tok) {
+        return 0;
+    }
+    if (sep_inject_named(s, tok, true)) {
+        return 0;
+    }
+    if (!strncmp(tok, "hex:", 4)) {
+        const char *p = tok + 4;
+        for (int i = 0; i < 16; i++) {
+            unsigned v;
+            if (sscanf(p + 2 * i, "%2x", &v) != 1) {
+                error_setg(errp, "x-inject hex: needs 32 hex digits");
+                return -1;
+            }
+            msg[i] = (uint8_t)v;
+        }
+        return sep_inject_enqueue(s, msg, true) ? 0 : -1;
+    }
+    n = sscanf(tok, "%i,%i,%i,%i,%i", &ep, &tag, &op, &param, &data);
+    if (n < 3) {
+        error_setg(errp,
+                   "x-inject: ping|status|alive|epmap|sksopen or "
+                   "ep,tag,op[,param[,data]] or hex:<32 hex digits>");
+        return -1;
+    }
+    if (n < 4) {
+        param = 0;
+    }
+    if (n < 5) {
+        data = 0;
+    }
+    sep_inject_pack(msg, (uint8_t)ep, (uint8_t)tag, (uint8_t)op,
+                    (uint8_t)param, (uint32_t)data);
+    return sep_inject_enqueue(s, msg, true) ? 0 : -1;
+}
+
+static char *sep_lab_get_inject(Object *obj, Error **errp)
+{
+    AppleSEPLabState *s = APPLE_SEP_LAB(obj);
+
+    return g_strdup_printf("enqueues=%" PRIu64 " dequeues=%" PRIu64
+                           " outbox=%" PRIu64 " a2i=%u pending=%d",
+                           s->inject_enqueues, s->inject_dequeues,
+                           s->outbox_posts, s->a2i_count, s->mbox_pending);
+}
+
+static void sep_lab_set_inject(Object *obj, const char *value, Error **errp)
+{
+    AppleSEPLabState *s = APPLE_SEP_LAB(obj);
+    g_autofree char *dup = NULL;
+    char *save = NULL;
+    char *tok;
+
+    if (!s->sep_inject) {
+        error_setg(errp, "x-inject needs sep-inject=on");
+        return;
+    }
+    if (!s->sep_irq) {
+        error_setg(errp, "x-inject available only after machine init");
+        return;
+    }
+    if (!value || !value[0]) {
+        error_setg(errp, "x-inject: empty");
+        return;
+    }
+    dup = g_strdup(value);
+    for (tok = strtok_r(dup, ";+", &save); tok;
+         tok = strtok_r(NULL, ";+", &save)) {
+        if (sep_inject_parse_one(s, tok, errp) < 0) {
+            return;
+        }
+    }
+}
+
+static char *sep_lab_get_outbox(Object *obj, Error **errp)
+{
+    AppleSEPLabState *s = APPLE_SEP_LAB(obj);
+    GString *gs = g_string_new(NULL);
+    unsigned n = s->outbox_count < SEP_INJECT_OUTLOG ? s->outbox_count
+                                                     : SEP_INJECT_OUTLOG;
+
+    for (unsigned i = 0; i < n; i++) {
+        const uint8_t *m = s->outbox_log[i];
+        g_string_append_printf(gs,
+            "%u: ep=%u tag=%u op=%u param=%u data=0x%08x\n",
+            i, m[0], m[1], m[2], m[3], ldl_le_p(m + 4));
+    }
+    if (!n) {
+        g_string_append(gs, "(empty)\n");
+    }
+    return g_string_free(gs, false);
+}
+
+static void sep_lab_set_outbox(Object *obj, const char *value, Error **errp)
+{
+    AppleSEPLabState *s = APPLE_SEP_LAB(obj);
+
+    if (value && (!strcmp(value, "clear") || !strcmp(value, "0"))) {
+        s->outbox_count = 0;
+        s->outbox_posts = 0;
+    }
+}
+
 static void sep_timer_update_irq(AppleSEPLabState *s)
 {
-    qemu_set_irq(s->sep_irq, s->t_pending);
+    sep_lab_update_irq(s);
 }
 
 static void sep_timer_fire(void *opaque)
@@ -1213,6 +1597,13 @@ static uint64_t sep_kic_read(void *opaque, hwaddr off, unsigned size)
 {
     AppleSEPLabState *s = opaque;
     if (off == 0x18) {          /* KIC +0x818 EVENT (claim) */
+        if (s->sep_inject && s->mbox_pending) {
+            s->mbox_pending = false;
+            sep_lab_update_irq(s);
+            error_report("SEP inject: KIC claim mbox event 0x%x",
+                         s->mbox_kic_event);
+            return s->mbox_kic_event;
+        }
         if (s->t_pending) {
             s->t_pending = false;
             s->t_claims++;
@@ -1238,6 +1629,60 @@ static const MemoryRegionOps sep_kic_ops = {
     .valid = { .min_access_size = 4, .max_access_size = 8 },
     .impl = { .min_access_size = 4, .max_access_size = 4 },
 };
+
+static void sep_lab_run_inject_script(AppleSEPLabState *s)
+{
+    g_autofree char *dup = NULL;
+    char *save = NULL;
+    char *tok;
+    Error *local = NULL;
+
+    if (!s->inject_script || !s->inject_script[0]) {
+        return;
+    }
+    dup = g_strdup(s->inject_script);
+    error_report("SEP inject: running script '%s'", s->inject_script);
+    for (tok = strtok_r(dup, ",;+", &save); tok;
+         tok = strtok_r(NULL, ",;+", &save)) {
+        if (sep_inject_parse_one(s, tok, &local) < 0) {
+            error_report_err(local);
+            local = NULL;
+        }
+    }
+}
+
+static void sep_lab_init_inject(AppleSEPLabState *s)
+{
+    if (!s->sep_inject) {
+        return;
+    }
+    if (!s->seprom) {
+        error_report("SEP lab: sep-inject=on requires seprom=on; ignored");
+        s->sep_inject = false;
+        return;
+    }
+    if (!s->sep_timer) {
+        memory_region_init_io(&s->kic_mr, NULL, &sep_kic_ops, s,
+                              "sep-kic-event", 0x100);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_KIC_EVT_PA,
+                                            &s->kic_mr, 20);
+        error_report("SEP lab: sep-inject brought up KIC +0x818 (no sep-timer)");
+    }
+    memory_region_init_io(&s->mbox_mr, NULL, &sep_mbox_ops, s,
+                          "sep-asc-mbox", SEP_ASC_MBOX_SIZE);
+    memory_region_add_subregion_overlap(&s->private_memory,
+                                        SEP_ASC_PA + SEP_ASC_MBOX_OFF,
+                                        &s->mbox_mr, 25);
+    sep_inject_reset_state(s);
+    if (s->inject_script && s->inject_script[0]) {
+        sep_lab_run_inject_script(s);
+    }
+    error_report("SEP lab: sep-inject on (ASC IOP mbox 0x%llx+0x%x; "
+                 "QOM x-inject / x-outbox; script=%s)",
+                 (unsigned long long)SEP_ASC_PA, SEP_ASC_MBOX_OFF,
+                 s->inject_script && s->inject_script[0] ? s->inject_script
+                                                         : "(none)");
+}
 
 
 /* ---- sep-stack-fix: synthetic EL0 stack Trans_L3 filler (default off) ---- */
@@ -1554,6 +1999,49 @@ static void sep_lab_set_ap_probe(Object *obj, const char *value, Error **errp)
     }
 }
 
+static bool sep_lab_get_sep_inject(Object *obj, Error **errp)
+{
+    return APPLE_SEP_LAB(obj)->sep_inject;
+}
+
+static void sep_lab_set_sep_inject(Object *obj, bool value, Error **errp)
+{
+    APPLE_SEP_LAB(obj)->sep_inject = value;
+}
+
+static char *sep_lab_get_inject_script(Object *obj, Error **errp)
+{
+    AppleSEPLabState *s = APPLE_SEP_LAB(obj);
+
+    return g_strdup(s->inject_script ? s->inject_script : "");
+}
+
+static void sep_lab_set_inject_script(Object *obj, const char *value, Error **errp)
+{
+    AppleSEPLabState *s = APPLE_SEP_LAB(obj);
+
+    g_free(s->inject_script);
+    s->inject_script = g_strdup(value ? value : "");
+}
+
+static char *sep_lab_get_inject_kic(Object *obj, Error **errp)
+{
+    return g_strdup_printf("0x%x", APPLE_SEP_LAB(obj)->mbox_kic_event);
+}
+
+static void sep_lab_set_inject_kic(Object *obj, const char *value, Error **errp)
+{
+    AppleSEPLabState *s = APPLE_SEP_LAB(obj);
+    uint64_t v;
+
+    if (qemu_strtou64(value, NULL, 0, &v) < 0) {
+        error_setg(errp, "x-inject-kic expects a KIC event word");
+        return;
+    }
+    s->mbox_kic_event = (uint32_t)v;
+    error_report("SEP inject: KIC event now 0x%x", s->mbox_kic_event);
+}
+
 static void sep_lab_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -1608,12 +2096,39 @@ static void sep_lab_class_init(ObjectClass *oc, const void *data)
         "Lab-only (needs seprom=on, default off): back memcfg DRAM lo "
         "(0x1e00000000/64MiB), grow FMST carve to 64KiB, and fill missing "
         "EL0 SP 16K pages on Trans_L3 (synthetic stack hole after PMGR).");
+    object_class_property_add_bool(oc, "sep-inject", sep_lab_get_sep_inject,
+                                   sep_lab_set_sep_inject);
+    object_class_property_set_description(oc, "sep-inject",
+        "Lab-only (default off; needs seprom=on): ASC-v6 mailbox injector at "
+        "0x2a2404100 — AP->SEP A2I FIFO, KIC 0x40000 doorbell, I2A capture. "
+        "Use QOM x-inject / x-outbox. Fabricates no SEP replies.");
+    object_class_property_add_str(oc, "sep-inject-script",
+                                  sep_lab_get_inject_script,
+                                  sep_lab_set_inject_script);
+    object_class_property_set_description(oc, "sep-inject-script",
+        "Optional comma list of named msgs (ping,status,alive,epmap,sksopen) "
+        "queued at reset after the boot 0xfe descriptor; doorbell on each.");
+    object_class_property_add_str(oc, "x-inject", sep_lab_get_inject,
+                                  sep_lab_set_inject);
+    object_class_property_set_description(oc, "x-inject",
+        "Host-only: enqueue mailbox msg(s). Names: ping|status|alive|epmap|sksopen; "
+        "or ep,tag,op[,param[,data]]; or hex:<32 hex>; separate with ; or +.");
+    object_class_property_add_str(oc, "x-outbox", sep_lab_get_outbox,
+                                  sep_lab_set_outbox);
+    object_class_property_set_description(oc, "x-outbox",
+        "Host-only: dump captured SEP->AP I2A frames; write clear/0 to reset log.");
+    object_class_property_add_str(oc, "x-inject-kic", sep_lab_get_inject_kic,
+                                  sep_lab_set_inject_kic);
+    object_class_property_set_description(oc, "x-inject-kic",
+        "Host-only: KIC +0x818 event word for doorbell (default 0x40000 = "
+        "IRQ_IOP_NONEMPTY). Use to probe which irq vector sepOS handles.");
 }
 
 static void sep_lab_finalize(Object *obj)
 {
     AppleSEPLabState *s = APPLE_SEP_LAB(obj);
 
+    g_free(s->inject_script);
     if (s->cpu) {
         qemu_unregister_reset(sep_lab_reset, s);
     }

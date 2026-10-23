@@ -72,8 +72,10 @@ typedef struct AppleModernSEPCore {
  * SEP core ARM_CPU_IRQ. Pure transport: no message handler, no SKS/crypto.
  * SEP_CORE_MBOX_BASE is the sepOS platform block at 0x2a2400000/0x6c000:
  * kernel 0x7cf8 waits for +0x4110 bit17 clear, then reads the one-shot
- * shmbuf descriptor at +0x4810 (low byte 0xfe). Not proven as a live ASC
- * doorbell yet. Loader __phys_range also lists KIC at 0x2a0c40000/0x40000
+ * shmbuf descriptor at +0x4810 (low byte 0xfe). Lab injector (apple-sep-lab
+ * sep-inject=on) maps the same IOP view: A2I_CTRL +0x4110, A2I_RECV +0x4810,
+ * I2A_SEND +0x4820, KIC event +0x818 = 0x40000 (IRQ_IOP_NONEMPTY -> irq 0x80).
+ * Loader __phys_range also lists KIC at 0x2a0c40000/0x40000
  * (kernel writes +0x4008/+0x4010). 0x2a1000000 is EXCL (AKPLCXE) sentinel
  * only — seed [+0]=[+8]=0xa55ac33c; never a mailbox.
  */
