@@ -17,6 +17,7 @@
 #include "qemu/error-report.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
+#include "qemu/bswap.h"
 #include "qapi/error.h"
 #include "hw/qdev-properties.h"
 #include "hw/irq.h"
@@ -62,7 +63,8 @@ static const MemoryRegionOps sep_mmio_ops = {
 
 static void sep_core_update_irq(AppleModernSEPCore *core)
 {
-    bool raise = core->t_pending || core->trng_pending || core->mbox_pending;
+    bool raise = core->t_pending || core->trng_pending || core->mbox_pending ||
+                 core->mbox_line;
     if (core->sep_irq) {
         qemu_set_irq(core->sep_irq, raise);
     }
@@ -294,6 +296,24 @@ static uint64_t sep_kic_read(void *opaque, hwaddr off, unsigned size)
                          SEP_CORE_KIC_MBOX_EVT);
             return SEP_CORE_KIC_MBOX_EVT;
         }
+        if (core->mbox_line && core->a7iop && core->a7iop->iop_mailbox) {
+            /*
+             * Live ASC-v6 (shared with AppleSEPManager): our +0x800 overlay
+             * shadows the wrapper's own +0x818, so forward the claim. The
+             * a7iop masks the claimed source (e.g. IOP_NONEMPTY) until sepOS
+             * clears it via INT_MASK_CLR, as on the lab model.
+             */
+            AppleA7IOPMailbox *mb = core->a7iop->iop_mailbox;
+            uint32_t st = apple_a7iop_mailbox_read_interrupt_status(mb);
+
+            apple_a7iop_mailbox_update_irq(mb);
+            if (core->mbox_claims++ < 64) {
+                error_report("modern-sep-core: KIC claim a7iop 0x%x", st);
+            }
+            if (st) {
+                return st;
+            }
+        }
         if (core->t_pending) {
             core->t_pending = false;
             sep_core_update_irq(core);
@@ -304,12 +324,45 @@ static uint64_t sep_kic_read(void *opaque, hwaddr off, unsigned size)
     return 0;
 }
 
+/*
+ * SEPROM-equivalent boot descriptor. sepOS sep64 (image 0x7cf8) spins while
+ * A2I_CTRL (+0x4110) bit17 EMPTY is set, then pops +0x4810..+0x481c and
+ * decodes the handoff region: (base>>12)<<32 | (size>>12)<<16 | 0xfe. On the
+ * lab this is the injector's reset message; in apple-modern the A2I FIFO is
+ * the live ASC-v6 shared with the AP, so post it there once per reset, right
+ * when sepOS programs its KIC (+0x80c), just before the poll.
+ * SEP_CORE_BOOTDESC=off disables.
+ */
+static void sep_core_post_boot_desc(AppleModernSEPCore *core)
+{
+    AppleA7IOPMessage *msg;
+    const char *env = getenv("SEP_CORE_BOOTDESC");
+
+    if (core->boot_desc_sent || !core->a7iop || (env && !strcmp(env, "off"))) {
+        return;
+    }
+    core->boot_desc_sent = true;
+    msg = g_new0(AppleA7IOPMessage, 1);
+    stl_le_p(msg->data + 0x0, 0x040000feu);
+    stl_le_p(msg->data + 0x4, (uint32_t)(SEP_CORE_REGION_BASE >> 12));
+    stl_le_p(msg->data + 0x8, 0);
+    stl_le_p(msg->data + 0xc, 0);
+    apple_a7iop_send_iop(core->a7iop, msg);
+    error_report("modern-sep-core: boot descriptor → A2I ep=0xfe "
+                 "region=0x%" PRIx64 " (SEPROM-equivalent)",
+                 (uint64_t)SEP_CORE_REGION_BASE);
+}
+
 static void sep_kic_write(void *opaque, hwaddr off, uint64_t val,
                           unsigned size)
 {
-    (void)opaque;
+    AppleModernSEPCore *core = opaque;
+
     qemu_log_mask(LOG_UNIMP, "modern-sep-core: KIC write +0x%" HWADDR_PRIx
                   " = 0x%" PRIx64 "\n", off + 0x800, val);
+    if (off == 0x0c) {
+        sep_core_post_boot_desc(core);
+    }
 }
 
 static const MemoryRegionOps sep_kic_ops = {
@@ -608,6 +661,7 @@ static void sep_core_reset(void *opaque)
     core->t_pending = false;
     core->trng_pending = false;
     core->mbox_pending = false;
+    core->boot_desc_sent = false;
     core->t_ctrl = 0;
     core->t_stat = 0;
     if (core->timer) {
@@ -815,6 +869,14 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
     return true;
 }
 
+static void sep_core_mbox_irq(void *opaque, int n, int level)
+{
+    AppleModernSEPCore *core = opaque;
+
+    core->mbox_line = level != 0;
+    sep_core_update_irq(core);
+}
+
 bool apple_modern_sep_core_attach_mailbox(AppleModernSEPCore *core,
                                           AppleA7IOP *a7iop, Error **errp)
 {
@@ -830,8 +892,11 @@ bool apple_modern_sep_core_attach_mailbox(AppleModernSEPCore *core,
     memory_region_add_subregion_overlap(&core->container, SEP_CORE_MBOX_BASE,
                                         &core->mbox_alias, 10);
     /* KIC claim (prio 20) already covers +0x800.. over this alias. */
+    core->a7iop = a7iop;
+    /* OR the a7iop line with our timer/TRNG sources (one CPU IRQ input). */
     qdev_connect_gpio_out_named(DEVICE(a7iop->iop_mailbox),
-                                APPLE_A7IOP_SEP_CPU_IRQ, 0, core->sep_irq);
+                                APPLE_A7IOP_SEP_CPU_IRQ, 0,
+                                qemu_allocate_irq(sep_core_mbox_irq, core, 0));
     core->mailbox_attached = true;
     warn_report("apple-modern: sep-core-mailbox: ASC-v6 '%s' shared AP@ADT "
                 "reg / SEP@0x%" PRIx64 " (+0x4100 IOP, KIC +0x818→IRQ "
