@@ -3953,8 +3953,28 @@ static void modern_init(MachineState *machine)
     size_t asset_budget = GiB;
     Error *error = NULL;
 
+    /*
+     * sep-core adds one more vCPU (the SEP) outside -smp. MTTCG sizes its
+     * per-thread TCG context table and code-buffer regions from
+     * smp.max_cpus (accel/tcg/tcg-all.c), and this fork builds with NDEBUG,
+     * so the assert(n < tcg_max_ctxs) in tcg_register_thread() is compiled
+     * out: an uncounted SEP thread writes tcg_ctxs[max_cpus] past the end of
+     * the array and gets no code region of its own. Measured with -smp 1:
+     * the SEP vCPU spins forever in tb_lock_page0 at its 2nd TB (PC
+     * 0x1e4000000c) while CPU0 waits in start_exclusive after an SPTM
+     * "tlbi ...is", and serial stays empty. Require maxcpus = cpus + 1 so
+     * the SEP thread has a real TCG context.
+     */
+    unsigned sep_extra = s->sep_core ? 1 : 0;
+
+    if (s->sep_core && machine->smp.max_cpus != machine->smp.cpus + 1) {
+        error_report("apple-modern: sep-core needs -smp %u,maxcpus=%u (one "
+                     "TCG thread context for the SEP vCPU)",
+                     machine->smp.cpus, machine->smp.cpus + 1);
+        exit(EXIT_FAILURE);
+    }
     if (machine->smp.cpus < 1 || machine->smp.cpus > APPLE_MODERN_MAX_CPUS ||
-        machine->smp.max_cpus != machine->smp.cpus ||
+        machine->smp.max_cpus != machine->smp.cpus + sep_extra ||
         machine->kernel_filename || machine->dtb || machine->initrd_filename) {
         error_report("apple-modern uses 1 to %d CPUs, all present at boot, and "
                      "explicit decoded machine assets; -kernel/-dtb/-initrd are "
@@ -5529,7 +5549,8 @@ static void modern_class_init(ObjectClass *oc, const void *data)
     MachineClass *mc = MACHINE_CLASS(oc);
     mc->desc = "Modern Apple boot experiment (optional boot framebuffer)";
     mc->init = modern_init;
-    mc->max_cpus = APPLE_MODERN_MAX_CPUS;
+    /* +1: room for the sep-core vCPU's TCG context (maxcpus = cpus + 1). */
+    mc->max_cpus = APPLE_MODERN_MAX_CPUS + 1;
     mc->default_ram_size = 8 * GiB;
     /*
      * Same name as the region the board used to create itself, so the
