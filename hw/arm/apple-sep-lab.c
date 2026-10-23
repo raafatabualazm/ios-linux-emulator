@@ -1517,6 +1517,38 @@ static bool sep_inject_named(AppleSEPLabState *s, const char *name, bool doorbel
         sep_inject_pack(msg, 0xfd, 0, 0, 0, 0);
     } else if (!strcmp(name, "sksopen")) {
         sep_inject_pack(msg, 18, 0, 0, 0, 0);
+    /*
+     * sepOS runtime control endpoint (ep0, AppleSEPControl). Each request is
+     * answered by an ep0 op=1 ACK (verified sep-phase2). ep0xff/0xfd are the
+     * SEPROM boot and SEP->AP discovery endpoints: popped but never answered
+     * once sepOS runs. OOL addr/size data are lab placeholders (no DART).
+     */
+    } else if (!strcmp(name, "ctrl-nop")) {
+        sep_inject_pack(msg, 0, 0, 0, 0, 0);
+    } else if (!strcmp(name, "ool-in-addr")) {
+        sep_inject_pack(msg, 0, 0, 2, 0, 0x1000);
+    } else if (!strcmp(name, "ool-out-addr")) {
+        sep_inject_pack(msg, 0, 0, 3, 0, 0x2000);
+    } else if (!strcmp(name, "ool-in-size")) {
+        sep_inject_pack(msg, 0, 0, 4, 0, 1);
+    } else if (!strcmp(name, "ool-out-size")) {
+        sep_inject_pack(msg, 0, 0, 5, 0, 1);
+    } else if (!strcmp(name, "secmode")) {
+        sep_inject_pack(msg, 0, 0, 20, 0, 0);
+    } else if (!strcmp(name, "selftest")) {
+        sep_inject_pack(msg, 0, 0, 24, 0, 0);
+    } else if (!strcmp(name, "ctrl-handshake")) {
+        /* AP reply to the cntl advertise/expose + op13/op41 announce. */
+        static const char *const seq[] = {
+            "ctrl-nop", "ool-in-addr", "ool-out-addr",
+            "ool-in-size", "ool-out-size",
+        };
+        for (size_t i = 0; i < ARRAY_SIZE(seq); i++) {
+            if (!sep_inject_named(s, seq[i], doorbell)) {
+                return false;
+            }
+        }
+        return true;
     } else {
         return false;
     }
@@ -1554,7 +1586,9 @@ static int sep_inject_parse_one(AppleSEPLabState *s, const char *tok, Error **er
     n = sscanf(tok, "%i,%i,%i,%i,%i", &ep, &tag, &op, &param, &data);
     if (n < 3) {
         error_setg(errp,
-                   "x-inject: ping|status|alive|epmap|sksopen or "
+                   "x-inject: ping|status|alive|epmap|sksopen|ctrl-nop|"
+                   "ool-in-addr|ool-out-addr|ool-in-size|ool-out-size|"
+                   "secmode|selftest|ctrl-handshake or "
                    "ep,tag,op[,param[,data]] or hex:<32 hex digits>");
         return -1;
     }
@@ -2401,7 +2435,9 @@ static void sep_lab_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "x-inject", sep_lab_get_inject,
                                   sep_lab_set_inject);
     object_class_property_set_description(oc, "x-inject",
-        "Host-only: enqueue mailbox msg(s). Names: ping|status|alive|epmap|sksopen; "
+        "Host-only: enqueue mailbox msg(s). Names: ping|status|alive|epmap|sksopen|"
+        "ctrl-nop|ool-in-addr|ool-out-addr|ool-in-size|ool-out-size|secmode|"
+        "selftest|ctrl-handshake; "
         "or ep,tag,op[,param[,data]]; or hex:<32 hex>; separate with ; or +.");
     object_class_property_add_str(oc, "x-outbox", sep_lab_get_outbox,
                                   sep_lab_set_outbox);
