@@ -4238,6 +4238,37 @@ static void modern_init(MachineState *machine)
                     "written)", s->adt_compat_restore,
                     override_count - before);
     }
+    if (s->sep_core && s->adt_compat_restore &&
+        strstr(s->adt_compat_restore, "sep") &&
+        !strstr(s->adt_compat_restore, "pmgr") &&
+        !(getenv("SEP_CORE_PGWAIT") && !strcmp(getenv("SEP_CORE_PGWAIT"), "keep"))) {
+        /*
+         * Grok sep-core: AppleSEPManager::start resolves the platform function
+         * /arm-io/sep/iop-sep-nub "function-wait_for_power_gate" = <pmgr
+         * phandle 0x22, 'Wait'> (unslid call 0xfffffff009622334 ->
+         * 0xfffffff0085f9678). Without the pmgr compat group no PMGR driver
+         * ever publishes that function, so the lookup waits forever and start()
+         * never reaches sepfw-loaded / PM init / _bootSEP (gdb: entered
+         * 0x85f9678 from 0x9622338's call, never returned). Point the
+         * reference at an unresolvable phandle so the lookup fails fast; the
+         * driver null-checks the result (0x9628d48 cbz). SEP_CORE_PGWAIT=keep
+         * restores the stock value.
+         */
+        static const uint8_t no_pg_wait[8] = { 0xff, 0xff, 0xff, 0xff,
+                                               'W', 'a', 'i', 't' };
+        static const AppleModernAdtOverride pg = {
+            "/arm-io/sep/iop-sep-nub", "function-wait_for_power_gate",
+            no_pg_wait, sizeof(no_pg_wait),
+        };
+        if (override_count >= APPLE_MODERN_MAX_ADT_OVERRIDES) {
+            error_report("sep-core power-gate override exceeds ADT capacity");
+            exit(EXIT_FAILURE);
+        }
+        overrides[override_count++] = pg;
+        warn_report("apple-modern: sep-core: iop-sep-nub "
+                    "function-wait_for_power_gate -> unresolvable phandle "
+                    "(no pmgr driver without adt-compat-restore +pmgr)");
+    }
     if (s->dcp_iop) {
         unsigned dcp_iop_mode = 0;
         if (!apple_modern_dcp_iop_mode(s->dcp_iop, &dcp_iop_mode)) {
