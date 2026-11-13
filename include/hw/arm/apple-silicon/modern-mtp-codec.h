@@ -49,6 +49,14 @@ uint32_t apple_modern_scm_checksum(const uint8_t *body, size_t len);
 #define APPLE_MODERN_MT_INIT_MAX (22 + 4 + 64 + 6)
 size_t apple_modern_mt_init_packet(uint8_t *out, uint8_t iface, const char *name,
                                    const uint8_t *hid_desc, size_t hid_len);
+/*
+ * Same announcement with no HID descriptor and ready-status 1 (Inactive).
+ * The retained D47 MTP firmware has one digitizer descriptor, for multi-touch;
+ * nova and mtp have no recovered report descriptor. Status 1 is the parser's
+ * Inactive value (SCM-WIRE.md §7.2). Returns the packet length.
+ */
+size_t apple_modern_mt_init_inactive(uint8_t *out, uint8_t iface,
+                                     const char *name);
 
 #define APPLE_MODERN_MT_REPORT_ID 0x44
 #define APPLE_MODERN_MT_HDR_LEN   28

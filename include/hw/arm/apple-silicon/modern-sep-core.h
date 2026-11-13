@@ -15,10 +15,20 @@ typedef struct AppleModernSEPCore {
     ARMCPU *cpu;
     AddressSpace as;
     MemoryRegion container;   /* root of the SEP CPU's private address space */
-    MemoryRegion ram;         /* SEP SRAM at 0: sepOS image + working memory  */
+    MemoryRegion ram;         /* legacy low RAM alias                        */
     MemoryRegion mmio;        /* catch-all for the SEP register aperture      */
+    MemoryRegion sram;        /* SEP SRAM 0x2a0200000 (stack + BPSE handoff) */
+    MemoryRegion dram;        /* SEP DRAM 0x1e00000000 (kernel @ 0x1e40000000) */
+    MemoryRegion pfour;       /* SEP platform config window 0x10000000000    */
+    MemoryRegion cfg0800;     /* SEP PMGR + memcfg 0x2a0800000 (512 KiB)     */
+    MemoryRegion pmgr_ps_io;  /* PMGR power-state auto-latch at +0x4000      */
+    MemoryRegion periph;      /* SEP peripheral backing 0x2a0b00000..        */
+    MemoryRegion periph_io;   /* SEP peripheral MMIO ops 0x2a0b00000..       */
+    MemoryRegion cfg0c40;     /* SEP memory-config 0x2a0c40000               */
+    MemoryRegion fuse;        /* SEP XPRT + fuse blocks 0x2e42c0000          */
+    MemoryRegion sepmmio;     /* SEP MMIO / AKF block 0x2a2000000            */
     uint64_t ram_size;
-    uint64_t entry;           /* reset PC (legion2 entry; 0)                  */
+    uint64_t entry;           /* reset PC (0x1e40000000)                     */
 } AppleModernSEPCore;
 
 /*

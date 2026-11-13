@@ -98,6 +98,28 @@ size_t apple_modern_mt_init_packet(uint8_t *out, uint8_t iface, const char *name
     return k;
 }
 
+size_t apple_modern_mt_init_inactive(uint8_t *out, uint8_t iface,
+                                     const char *name)
+{
+    size_t k = 0, name_len = strlen(name);
+
+    assert(name_len < 16);
+    memset(out, 0, 22 + 6);
+    out[k++] = 0xf0;
+    put16(out + k, 1);
+    k += 2;
+    out[k++] = iface;
+    memcpy(out + k, name, name_len);
+    k += 16;
+    put16(out + k, 0);                     /* more packets: none */
+    k += 2;
+    put16(out + k, 4);                     /* section 4 only: ready status */
+    put16(out + k + 2, 2);
+    put16(out + k + 4, 1);                 /* 1 = Inactive */
+    k += 6;
+    return k;
+}
+
 size_t apple_modern_mt_frame(uint8_t *out, uint8_t counter, uint32_t ms,
                              uint8_t stage, int x, int y, int64_t vx, int64_t vy)
 {

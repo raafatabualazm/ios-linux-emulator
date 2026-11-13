@@ -92,9 +92,12 @@ struct AppleSEPLabState {
     MemoryRegion dram;          /* SEP DRAM window at 0x1e00000000 (2 GiB) */
     MemoryRegion pfour;         /* slice of the 0x10000000000 window (16 MiB) */
     qemu_irq sep_irq;           /* the SEP cpu's IRQ input (ARM_CPU_IRQ), host-pulseable */
-    MemoryRegion cfg0800;       /* memory-config regs 0x2a0800xxx as RAM        */
+    MemoryRegion cfg0800;       /* SEP PMGR + memcfg 0x2a0800000 (512 KiB)     */
+    MemoryRegion pmgr_ps_io;    /* PMGR power-state auto-latch at +0x4000      */
     MemoryRegion cfg0c40;       /* memory-config regs 0x2a0c40xxx as RAM        */
-    MemoryRegion fuse;          /* SEP security-fuse shadow at 0x2e42c8000      */
+    MemoryRegion periph;        /* SEP peripheral blocks 0x2a0900000..0x2a1004000 */
+    MemoryRegion key_fcfg_io;   /* KEY.FCFG state-machine reg at 0x2a0e48000    */
+    MemoryRegion fuse;          /* SEP XPRT/fuse blocks 0x2e42c0000 (192 KiB)  */
     MemoryRegion sepmmio;       /* broad SEP MMIO swath 0x2a2000000 as pokeable RAM */
     Error *migration_blocker;
 };
@@ -252,6 +255,90 @@ static const MemoryRegionOps sep_lab_ops = {    .read_with_attrs = sep_lab_read,
     },
 };
 
+static uint64_t sep_lab_pmgr_ps_read(void *opaque, hwaddr addr, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+    uint8_t *p = memory_region_get_ram_ptr(&s->cfg0800) + 0x4000 + addr;
+    uint64_t val = 0;
+
+    if (addr + size <= 0x7c000) {
+        memcpy(&val, p, size);
+    }
+    return val;
+}
+
+static void sep_lab_pmgr_ps_write(void *opaque, hwaddr addr, uint64_t data,
+                                  unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+    uint8_t *p = memory_region_get_ram_ptr(&s->cfg0800) + 0x4000 + addr;
+
+    if (addr + size <= 0x7c000) {
+        if (size == 4 && addr < 0x3c000 && (addr & 0x3fff) == 0) {
+            /* SEP PMGR power-state register: ACTUAL_PS[7:4] latches TARGET_PS[3:0] */
+            uint32_t v = ((uint32_t)data & ~0x800000f0U) |
+                         (((uint32_t)data & 0xfU) << 4);
+            memcpy(p, &v, 4);
+        } else {
+            memcpy(p, &data, size);
+        }
+    }
+}
+
+static const MemoryRegionOps sep_lab_pmgr_ps_ops = {
+    .read = sep_lab_pmgr_ps_read,
+    .write = sep_lab_pmgr_ps_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
+    .impl = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
+};
+
+static uint64_t sep_lab_periph_read(void *opaque, hwaddr addr, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+    uint8_t *p = memory_region_get_ram_ptr(&s->periph) + addr;
+    uint64_t val = 0;
+
+    if (addr + size <= 0x504000) {
+        memcpy(&val, p, size);
+    }
+    return val;
+}
+
+static void sep_lab_periph_write(void *opaque, hwaddr addr, uint64_t data,
+                                 unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+    uint8_t *p = memory_region_get_ram_ptr(&s->periph) + addr;
+
+    if (addr + size <= 0x504000) {
+        if (addr == (0x2a0b80010ULL - 0x2a0b00000ULL) && size == 4) {
+            /* TRNG status W1C: clear fault bits, keep ready bits (0x101) asserted */
+            uint32_t v = 0x101U;
+            memcpy(p, &v, 4);
+        } else if (addr == (0x2a0b80014ULL - 0x2a0b00000ULL) && size == 4) {
+            /* TRNG ctrl: command bit 15 (0x8000) self-clears on completion */
+            uint32_t v = (uint32_t)data & ~0x8000U;
+            memcpy(p, &v, 4);
+        } else if (addr == (0x2a0e48000ULL - 0x2a0b00000ULL) && size == 4 &&
+                   (uint32_t)data == 0xffffU) {
+            /* RPC 0x44ca writes 0xffff to KEY.FCFG+0x8000 and checks state[18:16]==5 */
+            uint32_t v = 0x50000U | 0xffffU;
+            memcpy(p, &v, 4);
+        } else {
+            memcpy(p, &data, size);
+        }
+    }
+}
+
+static const MemoryRegionOps sep_lab_periph_ops = {
+    .read = sep_lab_periph_read,
+    .write = sep_lab_periph_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
+    .impl = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
+};
+
 static void sep_lab_reset(void *opaque)
 {
     AppleSEPLabState *s = opaque;
@@ -264,9 +351,12 @@ static void sep_lab_reset(void *opaque)
      * sepOS's self-bootstrapping build path. Store index 14 is that
      * register (target/arm/modern-sysregs.c, read-as-written). Seeded
      * after cpu_reset so the register's resetvalue does not clear it.
+     * Also set X1 = SEP_KRAM_BASE so the entry stub at 0x4070 copies the
+     * kernel Mach-O header from SEP_KRAM_BASE into 0x1e4001c000.
      */
     if (s->seprom) {
         s->cpu->env.apple_modern_sep_store[14] = SEP_BPSE_BASE | 1;
+        s->cpu->env.xregs[1] = SEP_KRAM_BASE;
     }
     s->faulted = false;
     s->reset_generation++;
@@ -337,11 +427,11 @@ static void sep_lab_init(MachineState *machine)
     memory_region_init_io(&s->unknown.mr, OBJECT(s), &sep_lab_ops, &s->unknown,
                           "sep-private-unimplemented", UINT64_MAX);
     memory_region_add_subregion_overlap(&s->private_memory, 0,
-                                        &s->unknown.mr, -100);
+                                         &s->unknown.mr, -100);
     memory_region_init_alias(&s->private_ram, OBJECT(s), "sep-private-ram",
                              machine->ram, 0, machine->ram_size);
     memory_region_add_subregion_overlap(&s->private_memory, 0,
-                                        &s->private_ram, 0);
+                                         &s->private_ram, 0);
 
     /* Discovery mode backs the SEP SRAM with real RAM so the stack at
      * 0x2a0220000 works and the kernel runs far enough to touch its KIC and
@@ -355,35 +445,52 @@ static void sep_lab_init(MachineState *machine)
                                             &s->sram, 0);
     }
     if (s->seprom) {
-        /* SEP DRAM the kernel builds its page tables in, plus the two
-         * memory-config register pages backed as RAM so gdb can poke the
-         * handoff values and iterate. */
+        /* SEP DRAM the kernel builds its page tables in, plus the PMGR /
+         * memory-config and peripheral register blocks backed as RAM. */
         memory_region_init_ram(&s->carveout, NULL, "sep-carveout",
                                SEP_CARVEOUT_SIZE, &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory,
                                             SEP_CARVEOUT_BASE, &s->carveout, 0);
-        memory_region_init_ram(&s->cfg0800, NULL, "sep-cfg0800", 0x10000,
+        memory_region_init_ram(&s->cfg0800, NULL, "sep-cfg0800", 0x80000,
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, 0x2a0800000ULL,
                                             &s->cfg0800, 0);
+        memory_region_init_io(&s->pmgr_ps_io, OBJECT(s), &sep_lab_pmgr_ps_ops,
+                              s, "sep-pmgr-ps", 0x7c000);
+        memory_region_add_subregion_overlap(&s->private_memory, 0x2a0804000ULL,
+                                            &s->pmgr_ps_io, 1);
+        memory_region_init_ram(&s->periph, NULL, "sep-periph", 0x504000,
+                               &error_fatal);
+        memory_region_init_io(&s->key_fcfg_io, OBJECT(s),
+                              &sep_lab_periph_ops, s, "sep-periph-io", 0x504000);
+        memory_region_add_subregion_overlap(&s->private_memory, 0x2a0b00000ULL,
+                                            &s->key_fcfg_io, 0);
         memory_region_init_ram(&s->cfg0c40, NULL, "sep-cfg0c40", 0x10000,
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, 0x2a0c40000ULL,
-                                            &s->cfg0c40, 0);
-        /* SEP security-fuse shadow. sepOS's secfuse init (image 0x8d80) maps
-         * PA 0x2e42c8000 (16 KiB) and asserts (secfuse.c:52, panic thunk
-         * 0xa23c) that fuse words [0] and [1] each equal one of two hardcoded
-         * sentinels built at image 0x8d38: 0xa55ac33c or 0xa050c030. Back it as
-         * RAM and seed the sentinels so sepOS proceeds; remaining fuse fields
-         * are discovered by iteration (gdb pokes this RAM). */
-        memory_region_init_ram(&s->fuse, NULL, "sep-fuse", 0x10000,
+                                            &s->cfg0c40, 1);
+        /* SEP XPRT + security-fuse shadow (0x2e42c0000..0x2e42f0000).
+         * Covers ('XPRT','MISC') at 0x2e42c4000, ('XPRT','FUSE') at 0x2e42c8000,
+         * and ('XPRT','PMSC') / ('PKA ','SECU') at 0x2e42dc000. */
+        memory_region_init_ram(&s->fuse, NULL, "sep-fuse", 0x30000,
                                &error_fatal);
-        memory_region_add_subregion_overlap(&s->private_memory, 0x2e42c8000ULL,
+        memory_region_add_subregion_overlap(&s->private_memory, 0x2e42c0000ULL,
                                             &s->fuse, 0);
         {
-            uint32_t *fz = (uint32_t *)memory_region_get_ram_ptr(&s->fuse);
+            uint8_t *xprt = memory_region_get_ram_ptr(&s->fuse);
+            uint32_t *fz = (uint32_t *)(xprt + 0x8000); /* 0x2e42c8000 */
+            *(uint32_t *)(xprt + 0x4000) = 0x32b3;      /* XPRT.MISC + 0 */
             fz[0] = 0xa55ac33c;
             fz[1] = 0xa55ac33c;
+            fz[2] = 0xa55ac33c;
+            fz[3] = 0xa55ac33c;
+            fz[0x900 / 4] = 0xa55ac33c;
+            fz[0x904 / 4] = 0xa55ac33c;
+            fz[0x908 / 4] = 0xa55ac33c;
+            fz[0x90c / 4] = 0xa55ac33c;
+            for (unsigned i = 0; i < 8; i++) {
+                fz[(0x9b0 + i * 4) / 4] = 0xa55ac33c;
+            }
         }
         /* Broad SEP MMIO swath backed as RAM so the platform register blocks
          * sepOS's sep64 init reads (e.g. the memory-config block at 0x2a2400000,
@@ -410,6 +517,7 @@ static void sep_lab_init(MachineState *machine)
             /* SEPROM-equivalent handoff, all values derived above. */
             uint8_t *cfg0800 = memory_region_get_ram_ptr(&s->cfg0800);
             uint8_t *cfg0c40 = memory_region_get_ram_ptr(&s->cfg0c40);
+            uint8_t *periph = memory_region_get_ram_ptr(&s->periph);
             uint8_t *mmio = memory_region_get_ram_ptr(&s->sepmmio);
             uint8_t *sram = memory_region_get_ram_ptr(&s->sram);
             uint8_t *bpse = sram + (SEP_BPSE_BASE - SEP_SRAM_BASE);
@@ -419,14 +527,41 @@ static void sep_lab_init(MachineState *machine)
             *(uint32_t *)(bpse + 0x00) = 0x53455042;         /* "BPSE" */
             *(uint32_t *)(bpse + 0x08) = 1;                  /* version */
             *(uint32_t *)(bpse + 0x70) = image_size;         /* mem size */
-            *(uint32_t *)(bpse + 0x78) = 0;                  /* extra size */
+            *(uint32_t *)(bpse + 0x78) = 0x4000;             /* FMST manifest size */
+            *(uint64_t *)(bpse + 0x80) = 0x0123456789abcdefULL; /* Root Task PRNG s1 */
+            *(uint64_t *)(bpse + 0x88) = 0xfedcba9876543210ULL; /* Root Task PRNG s2 */
 
-            /* Memory-config registers. */
+            /* Memory-config + PMGR power-state registers. */
             *(uint32_t *)(cfg0800 + 0x408) = (SEP_HANDOFF_B >> 12) - 1;
             *(uint32_t *)(cfg0800 + 0x410) = SEP_HANDOFF_R410;
             *(uint32_t *)(cfg0800 + 0x418) = SEP_HANDOFF_R410;
+            *(uint32_t *)(cfg0800 + 0x8000) = 0x44;
+            *(uint32_t *)(cfg0800 + 0xc000) = 0x44;
+            *(uint32_t *)(cfg0800 + 0x14000) = 0x44;
+            *(uint32_t *)(cfg0800 + 0x20000) = 0x44;
+            *(uint32_t *)(cfg0800 + 0x2c000) = 0x44;
             *(uint32_t *)(cfg0c40 + 0x180) = SEP_HANDOFF_COUNT;
             *(uint32_t *)(cfg0c40 + 0x1a0) = SEP_HANDOFF_SIZE_PAGES;
+
+            /* Child-server peripheral registers (TRNG, KEY, MONI, PKA.EXCL). */
+            *(uint32_t *)(periph + (0x2a0b80000ULL - 0x2a0b00000ULL)) = 0x34fbf246;
+            *(uint32_t *)(periph + (0x2a0b80004ULL - 0x2a0b00000ULL)) = 0xb40a6f2d;
+            *(uint32_t *)(periph + (0x2a0b80008ULL - 0x2a0b00000ULL)) = 0xc56f4777;
+            *(uint32_t *)(periph + (0x2a0b8000cULL - 0x2a0b00000ULL)) = 0x5f2c2401;
+            *(uint32_t *)(periph + (0x2a0b80010ULL - 0x2a0b00000ULL)) = 0x101;
+            *(uint32_t *)(periph + (0x2a0b80078ULL - 0x2a0b00000ULL)) = 0x00180000;
+            *(uint32_t *)(periph + (0x2a0b8007cULL - 0x2a0b00000ULL)) = 0x02000000;
+            *(uint32_t *)(periph + (0x2a0bc1800ULL - 0x2a0b00000ULL)) = 0x3;
+            *(uint32_t *)(periph + (0x2a0dc0010ULL - 0x2a0b00000ULL)) = 0x101;
+            *(uint32_t *)(periph + (0x2a0dd8008ULL - 0x2a0b00000ULL)) = 0xa55ac33c;
+            *(uint32_t *)(periph + (0x2a0e40400ULL - 0x2a0b00000ULL)) = 0xa55ac33c;
+            *(uint32_t *)(periph + (0x2a0e40410ULL - 0x2a0b00000ULL)) = 0xa55ac33c;
+            *(uint32_t *)(periph + (0x2a0e48000ULL - 0x2a0b00000ULL)) = 0x40000;
+            *(uint32_t *)(periph + (0x2a0e4c000ULL - 0x2a0b00000ULL)) = 0x5;
+            *(uint32_t *)(periph + (0x2a0e50008ULL - 0x2a0b00000ULL)) = 0x5;
+            *(uint32_t *)(periph + (0x2a0e50010ULL - 0x2a0b00000ULL)) = 0x4;
+            *(uint32_t *)(periph + (0x2a1000000ULL - 0x2a0b00000ULL)) = 0xa55ac33c;
+            *(uint32_t *)(periph + (0x2a1000008ULL - 0x2a0b00000ULL)) = 0xa55ac33c;
 
             /* sep64 platform region descriptor at 0x2a2400000 + 0x4810:
              * base 0x10000000000 (inside the static 4 GiB table entry),
@@ -449,11 +584,11 @@ static void sep_lab_init(MachineState *machine)
                     uint32_t size;
                     uint64_t off;
                 } plat_cfg[] = {
-                    { { 'S', 'N', 'O', 'C' }, 0x100, 0x4000 },
-                    { { 'E', 'R', 'O', 'C' }, 0x100, 0x4100 },
-                    { { 'T', 'U', 'P', 'C' }, 0x100, 0x4200 },
-                    { { 'C', 'I', 'N', 'P' }, 0x200, 0x4400 },
-                    { { 'C', 'A', 'R', 'T' }, 0x100, 0x4600 },
+                    { { 'S', 'N', 'O', 'C' }, 0x4000, 0x04000 },
+                    { { 'E', 'R', 'O', 'C' }, 0x4000, 0x08000 },
+                    { { 'T', 'U', 'P', 'C' }, 0x4000, 0x0c000 },
+                    { { 'C', 'I', 'N', 'P' }, 0x8000, 0x10000 },
+                    { { 'C', 'A', 'R', 'T' }, 0x4000, 0x18000 },
                     { { 'l', 'l', 'u', 'n' }, 0, 0 },
                 };
                 for (unsigned i = 0; i < ARRAY_SIZE(plat_cfg); i++) {

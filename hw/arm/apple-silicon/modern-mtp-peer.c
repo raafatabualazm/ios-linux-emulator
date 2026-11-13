@@ -259,7 +259,14 @@ static void peer_handle(AppleModernMtpPeer *p, const uint8_t *f, size_t len)
      */
     if (!(len >= 16 && (f[8] & 1)) && f[5] == 0 && len >= 20 &&
         lduw_le_p(f + 10) >= 2 && f[16] == 0xb4) {
-        const uint8_t ready[4] = { 0xf1, f[17], 0, 0 };
+        /*
+         * Interfaces 2 (mtp) and 3 (nova) are announced Inactive: the retained
+         * D47 firmware has no HID descriptor for them. Status 1 keeps
+         * handleReady from treating them as HID and from arming a wftm bootload
+         * wait. Interface 1 stays status 0.
+         */
+        const uint8_t ready[4] = { 0xf1, f[17],
+                                    (f[17] == 2 || f[17] == 3) ? 1 : 0, 0 };
 
         n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 0, ready,
                                     sizeof(ready), true, 0, 0);
@@ -361,6 +368,19 @@ static void peer_arm(void *opaque, uint32_t thresh)
     n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 0, pkt, k,
                                 true, 0, 0);
     peer_queue(p, out, n, PEER_READY_DELAY_NS);
+    /*
+     * nova (3) then mtp (2), matching the static-config order after
+     * multi-touch. Inactive announcements only: no invented HID descriptor.
+     * Spaced so each frame can drain before the next is queued to the FIFO.
+     */
+    k = apple_modern_mt_init_inactive(pkt, 3, "nova");
+    n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 0, pkt, k,
+                                true, 0, 0);
+    peer_queue(p, out, n, PEER_READY_DELAY_NS + MT_FRAME_NS);
+    k = apple_modern_mt_init_inactive(pkt, 2, "mtp");
+    n = apple_modern_scm_encode(out, APPLE_MODERN_SCM_TYPE_REPORT, 0, 0, pkt, k,
+                                true, 0, 0);
+    peer_queue(p, out, n, PEER_READY_DELAY_NS + 2 * MT_FRAME_NS);
 }
 
 /*

@@ -157,6 +157,22 @@ int main(void)
         CHECK(!memcmp(got, want, 84));
     }
 
+    /* Inactive announcement: section 4 status 1, no HID section. */
+    {
+        uint8_t pkt[APPLE_MODERN_MT_INIT_MAX];
+        size_t plen = apple_modern_mt_init_inactive(pkt, 3, "nova");
+
+        CHECK(plen == 28);
+        CHECK(pkt[0] == 0xf0 && pkt[3] == 3);
+        CHECK(!memcmp(pkt + 4, "nova", 4));
+        CHECK(pkt[4 + 16] == 0 && pkt[5 + 16] == 0);      /* more = 0 */
+        CHECK(pkt[22] == 4 && pkt[23] == 0);              /* section type 4 */
+        CHECK(pkt[24] == 2 && pkt[25] == 0);              /* size 2 */
+        CHECK(pkt[26] == 1 && pkt[27] == 0);              /* status 1 = Inactive */
+        plen = apple_modern_mt_init_inactive(pkt, 2, "mtp");
+        CHECK(plen == 28 && pkt[3] == 2 && !memcmp(pkt + 4, "mtp", 3));
+    }
+
     /* --- the multitouch frame --------------------------------------------------------- */
     for (unsigned i = 0; i < 18; i++) {
         uint8_t want[64], got[APPLE_MODERN_MT_FRAME_LEN];

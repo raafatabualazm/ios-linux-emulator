@@ -98,7 +98,8 @@ releases while moving.
 
 ## Not done
 
-* the other three interfaces' descriptors, the memory FIFOs (no IOMapper: `AppleT8110DART` never starts for `dart-mtp`
-  here), the MTP coprocessor itself, wftm provisioning (its D47S1 personality is not retained), more than one finger.
+* HID descriptors for `nova` (interface 3) and `mtp` (interface 2). The retained `D47_MtpFirmware` image has one digitizer descriptor, the multi-touch one; `D47S1` and `wftm` are not in it. The peer now announces those two interfaces Inactive (ready status 1, no invented descriptor) so a READY can clear AsyncRegistration. That announcement is codec-tested only; a guest replay of tip `d72897a` has not been run.
+* the memory FIFOs (no IOMapper: `AppleT8110DART` never starts for `dart-mtp`
+  here), the MTP coprocessor itself, wftm provisioning, more than one finger.
 * Verified on the guest: sensor x to the right and sensor y up from the bottom edge map to the framebuffer without any flip
   (a tap at the carousel's information button opened its information view). One finger only.
