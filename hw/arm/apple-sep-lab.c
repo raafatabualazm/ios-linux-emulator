@@ -30,6 +30,7 @@
 #include "target/arm/internals.h"
 #include "exec/cputlb.h"
 #include "exec/cpu-common.h"
+#include "crypto/aes.h"
 #include "qom/object.h"
 
 #define TYPE_APPLE_SEP_LAB MACHINE_TYPE_NAME("apple-sep-lab")
@@ -63,6 +64,7 @@ struct AppleSEPLabState {
     MachineState parent_obj;
     ARMCPU *cpu;
     MemoryRegion private_memory;
+    AddressSpace private_as;
     MemoryRegion private_ram;
     MemoryRegion sram;
     SEPLabRegion unknown;
@@ -142,6 +144,10 @@ struct AppleSEPLabState {
     MemoryRegion asc_a00_mr;   /* +0xa00 MASK_SET / +0xa80 MASK_CLR (ext IRQ) */
     MemoryRegion asc_1010_mr;  /* +0x1010/+0x1014 bit1 */
     uint32_t ext_irq_mask;    /* ASC ext IRQ mask; bit3=0x8 gates TRNG IRQ3 */
+    uint32_t ext_irq_edge;    /* device-asserted ext IRQs, not yet claimed */
+    uint32_t ext_irq_claims;
+    bool pmgr28000_latched;   /* +0x28000 rose to 0xf; deliver IRQ 9 once */
+    bool pmgr2c000_latched;   /* +0x2c000 rose to 0xf; deliver IRQ 5 once */
     uint32_t a2i_ctrl_en;
     uint32_t i2a_ctrl_en;
     uint8_t a2i_send_scratch[16];
@@ -166,6 +172,9 @@ struct AppleSEPLabState {
     uint32_t trng_regs[0x80 / 4];
     bool sep_trng_irq;        /* default off: raise KIC 0x10003 on TRNG complete */
     bool trng_pending;
+    MemoryRegion aess_mr;     /* SSEAESAB ('AESS'/'BASE') @ 0x2a0b00000 */
+    uint32_t aess_regs[0x80 / 4];
+    uint8_t aess_key[32];
     /*
      * sep-phase2 (default off; needs seprom): after EPControl device create
      * (AKF/MBOX irq=-1, TRNG irq=3), run start-all so AKF binds IRQ 0x80 and
@@ -176,6 +185,16 @@ struct AppleSEPLabState {
     MemoryRegion key_fcfg_mr;   /* KEY.FCFG +0x8000 @ 0x2a0e48000 (W side-effect) */
     uint32_t key_fcfg_8000;
     /*
+     * dxio_async register files. Entitlement phys map names them BASEI2C
+     * (0x2a0e80000) and BASEGPIO (0x2a0ec0000), 16 KiB each. Unimplemented
+     * reads return 0 and drop writes, so a write of the GPIO command word
+     * (+0xc = 0x20c) is invisible to the following poll.
+     */
+    MemoryRegion i2c_mr;
+    MemoryRegion gpio_mr;
+    uint32_t *i2c_regs;
+    uint32_t *gpio_regs;
+    /*
      * sep-stack-fix (default off; needs seprom): fill missing 16K EL0 stack
      * pages (synthetic layout leaves a Trans_L3 hole under SP). Pre-maps on
      * EL0 entry and on EL0 data-abort. Phys pages from top of kram.
@@ -184,6 +203,21 @@ struct AppleSEPLabState {
     uint64_t stack_fix_next_pa;
     unsigned stack_fix_fills;
     MemoryRegion dram_lo; /* sep-stack-fix: back memcfg window low slice */
+    uint32_t exclog_max;
+    uint32_t exclog_n;
+    uint64_t exclog_ring[64][16];
+    unsigned exclog_ring_pos;
+    unsigned exclog_svc_hits;
+    uint32_t exclog_svc_mask;
+    bool sars_init_notified;
+    bool synth_serve;
+    bool synth_e0;
+    unsigned pmgr2c_count;
+    bool xart_e0_send_active;
+    bool e0_receive_active;
+    uint64_t e0_receive_pc;
+    unsigned notify_svc_active;      /* svc 2/3/4 pending on obj_notify */
+    uint64_t notify_svc_pc;
     Error *migration_blocker;
 };
 
@@ -207,6 +241,96 @@ static void sep_inject_reset_state(AppleSEPLabState *s);
 static void sep_lab_init_inject(AppleSEPLabState *s);
 static void sep_lab_init_trng_irq(AppleSEPLabState *s);
 static void sep_lab_update_irq(AppleSEPLabState *s);
+static void sep_lab_eval_trng_irq(AppleSEPLabState *s);
+
+/* dxio's PMGR +0x28000 on-transition is ext IRQ 9 (mask bit 0x200).
+ * SEPD's demux (0x11238c) unmasks that line and calls the slot handler.
+ * Re-arming on every unmask while the nibble stays 0xf livelocks the demux.
+ * Latch the rising edge and deliver it once. */
+#define SEP_EXT_IRQ_PMGR28000 BIT(9)
+#define SEP_PMGR_DXIO_OFF     0x28000u
+
+static void sep_lab_raise_pmgr28000(AppleSEPLabState *s)
+{
+    if (!s->pmgr28000_latched) {
+        return;
+    }
+    if (s->ext_irq_mask & SEP_EXT_IRQ_PMGR28000) {
+        return;
+    }
+    if (s->ext_irq_edge & SEP_EXT_IRQ_PMGR28000) {
+        return;
+    }
+    s->pmgr28000_latched = false;
+    s->ext_irq_edge |= SEP_EXT_IRQ_PMGR28000;
+    sep_lab_update_irq(s);
+}
+
+static void sep_lab_note_pmgr28000(AppleSEPLabState *s, uint32_t old,
+                                   uint32_t newv)
+{
+    bool was = (old & 0xf0u) == 0xf0u;
+    bool now = (newv & 0xf0u) == 0xf0u;
+
+    if (now && !was) {
+        s->pmgr28000_latched = true;
+    } else if (!now) {
+        s->pmgr28000_latched = false;
+        s->ext_irq_edge &= ~SEP_EXT_IRQ_PMGR28000;
+    }
+    sep_lab_raise_pmgr28000(s);
+}
+
+/* Same one-shot pattern for the bit-5 domain: SEPD's dxio dance writes
+ * PMGR +0x8000 then +0x2c000 while ext IRQ 5 (mask bit 0x20) is unmasked
+ * and waits for the domain-ready completion. Verified live 2026-10-25:
+ * KIC event 0x00010005 claimed at that point stops the retry loop and
+ * advances phase 2. +0x2c000 nibble rising to 0xf latches IRQ 5 once. */
+#define SEP_EXT_IRQ_PMGR2C000 BIT(5)
+/* The +0x2c000 (DXIO2C) power-domain-done waiter in sepOS unmasks ext IRQ
+ * bit 7 (0x80) after each +0x2c000 = 0xf write; IRQ 5 alone never completes
+ * that wait. Deliver the domain-done on both lines. */
+#define SEP_EXT_IRQ_PMGR2C000_IRQ7 BIT(7)
+#define SEP_PMGR_DXIO2C_OFF   0x2c000u
+
+static void sep_lab_raise_pmgr2c000(AppleSEPLabState *s)
+{
+    bool delivered = false;
+
+    if (!s->pmgr2c000_latched) {
+        return;
+    }
+    if (!(s->ext_irq_mask & SEP_EXT_IRQ_PMGR2C000) &&
+        !(s->ext_irq_edge & SEP_EXT_IRQ_PMGR2C000)) {
+        s->ext_irq_edge |= SEP_EXT_IRQ_PMGR2C000;
+        delivered = true;
+    }
+    if (!(s->ext_irq_mask & SEP_EXT_IRQ_PMGR2C000_IRQ7) &&
+        !(s->ext_irq_edge & SEP_EXT_IRQ_PMGR2C000_IRQ7)) {
+        s->ext_irq_edge |= SEP_EXT_IRQ_PMGR2C000_IRQ7;
+        delivered = true;
+    }
+    if (delivered) {
+        s->pmgr2c000_latched = false;
+        sep_lab_update_irq(s);
+    }
+}
+
+static void sep_lab_note_pmgr2c000(AppleSEPLabState *s, uint32_t old,
+                                   uint32_t newv)
+{
+    bool was = (old & 0xf0u) == 0xf0u;
+    bool now = (newv & 0xf0u) == 0xf0u;
+
+    if (now && !was) {
+        s->pmgr2c000_latched = true;
+    } else if (!now) {
+        s->pmgr2c000_latched = false;
+        s->ext_irq_edge &= ~(SEP_EXT_IRQ_PMGR2C000 |
+                             SEP_EXT_IRQ_PMGR2C000_IRQ7);
+    }
+    sep_lab_raise_pmgr2c000(s);
+}
 /*
  * First-app PMGR window (j410 app @file 0x74000; device table name SSEASMBT).
  * VA→PA 0x2a0800000 size 0x80000. Kick +0x2c000=0xf, +0x2c008=0x800000.
@@ -226,9 +350,14 @@ static void sep_lab_update_irq(AppleSEPLabState *s);
 #define SEP_ASC_PA      0x2a2400000ULL
 #define SEP_KIC_PA      0x2a0c40000ULL
 #define SEP_KIC_SIZE    0x40000ULL
+#define SEP_AESS_PA     0x2a0b00000ULL
+#define SEP_AESS_SIZE   0x80ULL
 #define SEP_TRNG_PA     0x2a0b80000ULL
 #define SEP_TRNG_SIZE   0x80ULL
 #define SEP_KEY_FCFG_PA 0x2a0e48000ULL
+#define SEP_I2C_PA      0x2a0e80000ULL  /* BASEI2C, entitlement phys map */
+#define SEP_GPIO_PA     0x2a0ec0000ULL  /* BASEGPIO */
+#define SEP_IO_BLK_SIZE 0x4000ULL
 
 static uint64_t sep_pmgr_read(void *opaque, hwaddr off, unsigned size)
 {
@@ -248,8 +377,13 @@ static uint64_t sep_pmgr_read(void *opaque, hwaddr off, unsigned size)
     } else {
         out = v;
     }
-    if (pmgr_rlog < 24 && (off == 0x2c000 || off == 0x2c008 ||
-                           off == 0x8000 || off == 0x40010)) {
+    if (pmgr_rlog < 2048 && (off == 0x2c000 || off == 0x2c004 ||
+                              off == 0x2c008 || off == 0x2c00c ||
+                              off == 0x28000 || off == 0x28004 ||
+                              off == 0x28008 || off == 0x2800c ||
+                              off == 0x8000 || off == 0x40010 ||
+                              off == 0x14000 || off == 0x14004 ||
+                              off == 0x14008 || off == 0x1400c)) {
         pmgr_rlog++;
         error_report("SEP pmgr: read +0x%" HWADDR_PRIx " raw=0x%x -> 0x%x",
                      off, v, out);
@@ -257,22 +391,78 @@ static uint64_t sep_pmgr_read(void *opaque, hwaddr off, unsigned size)
     return out;
 }
 
+static bool sep_lab_el1_read_u64(AppleSEPLabState *s, uint64_t va,
+                                 uint64_t *value);
+static int sep_lab_kernel_rw(AppleSEPLabState *s, uint64_t va, void *buf,
+                             int len, bool is_write);
+static void sep_lab_dump_tcbmap(AppleSEPLabState *s);
+
 static void sep_pmgr_write(void *opaque, hwaddr off, uint64_t val,
                            unsigned size)
 {
     AppleSEPLabState *s = opaque;
-    static uint32_t pmgr_log_left = 64;
+    static uint32_t pmgr_log_left = 256;
+    static uint32_t pmgr_2c000_count;
 
     if (off + size > SEP_PMGR_SIZE) {
         return;
     }
     {
+        uint32_t old = s->pmgr_regs[off / 4];
         uint32_t v = (uint32_t)val;
         if ((v & ~0x8000000fu) == 0) {
             uint32_t n = v & 0xfu;
-            v = (v & 0x80000000u) | (n << 4) | n;
+            v = (v & 0x80000000u) | (n << 4) | (n);
         }
         s->pmgr_regs[off / 4] = v;
+        if (off == SEP_PMGR_DXIO_OFF) {
+            sep_lab_note_pmgr28000(s, old, v);
+        }
+        if (off == SEP_PMGR_DXIO2C_OFF) {
+            sep_lab_note_pmgr2c000(s, old, v);
+            pmgr_2c000_count++;
+            s->pmgr2c_count = pmgr_2c000_count;
+            /* Identify the thread that runs the +0x2c000 power-poll loop. */
+            if (pmgr_2c000_count == 50 || pmgr_2c000_count == 110) {
+                uint64_t cur = 0, pc = 0, wait = 0, parked = 0, name = 0;
+
+                if (sep_lab_el1_read_u64(s, 0xffffffff00020be0ULL, &cur) &&
+                    cur) {
+                    sep_lab_el1_read_u64(s, cur + 0xf8, &pc);
+                    sep_lab_el1_read_u64(s, cur + 0x410, &wait);
+                    sep_lab_el1_read_u64(s, cur + 0x3f8, &parked);
+                    if (parked) {
+                        sep_lab_el1_read_u64(s, parked + 0x10, &name);
+                    }
+                }
+                error_report("SEP pmgr: 2c000 #%u current=0x%" PRIx64
+                             " pc=0x%" PRIx64 " wait=0x%" PRIx64
+                             " parked=0x%" PRIx64 " name=0x%08" PRIx32,
+                             pmgr_2c000_count, cur, pc, wait, parked,
+                             (uint32_t)name);
+                {
+                    /* P1: SEPD registry count (global chain 0x121e78 ->
+                     * ptr -> state+0xf58, byte). */
+                    uint64_t g = 0, st = 0;
+                    uint8_t cnt_direct = 0, cnt_ptr = 0;
+
+                    sep_lab_el1_read_u64(s, 0x4d2489e78ULL, &g);
+                    if (g) {
+                        sep_lab_kernel_rw(s, g + 0xf58, &cnt_direct, 1,
+                                          false);
+                        if (sep_lab_el1_read_u64(s, g, &st) && st) {
+                            sep_lab_kernel_rw(s, st + 0xf58, &cnt_ptr, 1,
+                                              false);
+                        }
+                    }
+                    error_report("SEP p1: reg global=0x%" PRIx64
+                                 " state=0x%" PRIx64 " cnt_direct=0x%x"
+                                 " cnt_ptr=0x%x", g, st, cnt_direct,
+                                 cnt_ptr);
+                }
+                sep_lab_dump_tcbmap(s);
+            }
+        }
     }
     if (pmgr_log_left && (off >= 0x10000 || (off & ~0xfffull) == 0x8000)) {
         pmgr_log_left--;
@@ -297,6 +487,30 @@ static uint64_t sep_trng_read(void *opaque, hwaddr off, unsigned size)
 
     if (off + size > SEP_TRNG_SIZE) {
         return 0;
+    }
+    if (off < 0x10) {
+        /*
+         * SEPD 0x11a550 self-test modes (TRNG +0x70):
+         *   bit 6 (0x40, Case 0 @ 0x11aa70): AES-conditioning test;
+         *     0x11ae00..0x11aef4 unpacks +0x00..+0x0c big-endian against
+         *     libShared 0x7f7ed.
+         *   bit 7 (0x80, Case 1 @ 0x11a590): DRBG test;
+         *     0x11af38..0x11b030 unpacks +0x00..+0x0c big-endian against
+         *     libShared 0x7f920.
+         */
+        static const uint32_t aes_kat[4] = {
+            0x46f2fb34u, 0x2d6f0ab4u, 0x77476fc5u, 0x01242c5fu,
+        };
+        static const uint32_t drbg_kat[4] = {
+            0xf640242du, 0xdd34e9e1u, 0x31e71303u, 0x7b1834b7u,
+        };
+        uint32_t mode = s->trng_regs[0x70 / 4] & 0xc0u;
+        if (mode == 0x40u) {
+            return aes_kat[off / 4];
+        }
+        if (mode == 0x80u) {
+            return drbg_kat[off / 4];
+        }
     }
     return s->trng_regs[off / 4];
 }
@@ -328,6 +542,10 @@ static void sep_trng_write(void *opaque, hwaddr off, uint64_t val,
     AppleSEPLabState *s = opaque;
 
     if (off + size > SEP_TRNG_SIZE) {
+        return;
+    }
+    if (off < 0x10) {
+        /* Input block writes at +0x00..+0x0c do not clobber FIFO output. */
         return;
     }
     if (off == 0x10) {
@@ -364,6 +582,101 @@ static const MemoryRegionOps sep_trng_ops = {
 };
 
 /*
+ * SSEAESAB ('AESS'/'BASE' @ PA 0x2a0b00000, size 0x80):
+ *   +0x00/+0x08 reset sentinels (0xa55ac33c)
+ *   +0x04 STATUS/GO (bit0 go, bit1 busy=0, bits[11:9] err=0)
+ *   +0x08 CMD:
+ *     low byte 0x0b: latch 128/192/256-bit software key from +0x40..+0x5f
+ *     low byte 0x89 (bits[9:8]=0/1/2 for 128/192/256):
+ *       AES_Encrypt(Key, P(+0x50..+0x5f) ^ IV(+0x40..+0x4f)) -> +0x70..+0x7f
+ *     low byte 0x8a (bits[9:8]=0/1/2 for 128/192/256):
+ *       AES_Decrypt(Key, C(+0x40..+0x4f)) ^ IV(+0x50..+0x5f) -> +0x70..+0x7f
+ */
+static void sep_aess_exec(uint32_t *regs, uint8_t *key)
+{
+    uint32_t cmd = regs[0x08 / 4];
+    uint32_t op = cmd & 0xffu;
+    unsigned key_bits = 128u + (((cmd >> 8) & 3u) * 64u);
+    uint8_t *in_lo = (uint8_t *)&regs[0x40 / 4];
+    uint8_t *in_hi = (uint8_t *)&regs[0x50 / 4];
+    uint8_t *out_lo = (uint8_t *)&regs[0x60 / 4];
+    uint8_t *out_hi = (uint8_t *)&regs[0x70 / 4];
+    uint8_t blk[16];
+    AES_KEY aes;
+    unsigned i;
+
+    if (key_bits > 256u) {
+        key_bits = 128u;
+    }
+    if (op == 0x0bu) {
+        memcpy(key, in_lo, 32);
+        return;
+    }
+    if (op == 0x89u) {
+        for (i = 0; i < 16; i++) {
+            blk[i] = in_hi[i] ^ in_lo[i];
+        }
+        AES_set_encrypt_key(key, key_bits, &aes);
+        AES_encrypt(blk, out_hi, &aes);
+        return;
+    }
+    if (op == 0x8au) {
+        AES_set_decrypt_key(key, key_bits, &aes);
+        AES_decrypt(in_lo, blk, &aes);
+        for (i = 0; i < 16; i++) {
+            out_hi[i] = blk[i] ^ in_hi[i];
+        }
+        return;
+    }
+    for (i = 0; i < 16; i++) {
+        blk[i] = in_lo[i] ^ in_hi[i] ^ (uint8_t)(cmd + i * 0x11u + 0x5au);
+    }
+    AES_set_encrypt_key(key, 128, &aes);
+    AES_encrypt(blk, out_hi, &aes);
+    memcpy(out_lo, out_hi, 16);
+    if (op != 0x46u && op != 0x47u) {
+        memcpy(key, out_hi, 16);
+        memcpy(key + 16, out_hi, 16);
+    }
+}
+
+static uint64_t sep_aess_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+
+    if (off + size > SEP_AESS_SIZE) {
+        return 0;
+    }
+    return s->aess_regs[off / 4];
+}
+
+static void sep_aess_write(void *opaque, hwaddr off, uint64_t val,
+                           unsigned size)
+{
+    AppleSEPLabState *s = opaque;
+
+    if (off + size > SEP_AESS_SIZE) {
+        return;
+    }
+    if (off == 0x04) {
+        s->aess_regs[0x04 / 4] = (uint32_t)val & ~0xe02u;
+        if (val & 1) {
+            sep_aess_exec(s->aess_regs, s->aess_key);
+        }
+        return;
+    }
+    s->aess_regs[off / 4] = (uint32_t)val;
+}
+
+static const MemoryRegionOps sep_aess_ops = {
+    .read = sep_aess_read,
+    .write = sep_aess_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/*
  * KEY.FCFG +0x8000 (PA 0x2a0e48000): RPC 0x44ca writes 0xffff and checks
  * state[18:16]==5 (peer Antigravity). Seed 0x40000; on 0xffff -> 0x5ffff.
  */
@@ -371,6 +684,10 @@ static uint64_t sep_key_fcfg_read(void *opaque, hwaddr off, unsigned size)
 {
     AppleSEPLabState *s = opaque;
 
+    (void)size;
+    error_report("SEP key_fcfg: read +0x%" HWADDR_PRIx " -> 0x%x pc=0x%" PRIx64,
+                 off, off == 0 ? s->key_fcfg_8000 : 0,
+                 (uint64_t)s->cpu->env.pc);
     return off == 0 ? s->key_fcfg_8000 : 0;
 }
 
@@ -379,6 +696,7 @@ static void sep_key_fcfg_write(void *opaque, hwaddr off, uint64_t val,
 {
     AppleSEPLabState *s = opaque;
 
+    (void)size;
     if (off != 0) {
         return;
     }
@@ -387,7 +705,39 @@ static void sep_key_fcfg_write(void *opaque, hwaddr off, uint64_t val,
     } else {
         s->key_fcfg_8000 = (uint32_t)val;
     }
+    error_report("SEP key_fcfg: write +0x%" HWADDR_PRIx " = 0x%" PRIx64
+                 " -> 0x%x pc=0x%" PRIx64,
+                 off, val, s->key_fcfg_8000, (uint64_t)s->cpu->env.pc);
 }
+
+static uint64_t sep_io_blk_read(void *opaque, hwaddr off, unsigned size)
+{
+    uint32_t *regs = opaque;
+
+    if (off + 4 > SEP_IO_BLK_SIZE || size != 4) {
+        return 0;
+    }
+    return regs[off / 4];
+}
+
+static void sep_io_blk_write(void *opaque, hwaddr off, uint64_t val,
+                             unsigned size)
+{
+    uint32_t *regs = opaque;
+
+    if (off + 4 > SEP_IO_BLK_SIZE || size != 4) {
+        return;
+    }
+    regs[off / 4] = (uint32_t)val;
+}
+
+static const MemoryRegionOps sep_io_blk_ops = {
+    .read = sep_io_blk_read,
+    .write = sep_io_blk_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
 
 static const MemoryRegionOps sep_key_fcfg_ops = {
     .read = sep_key_fcfg_read,
@@ -695,10 +1045,11 @@ static void sep_lab_seed_handoff(AppleSEPLabState *s)
          */
         /*
          * With sep-stack-fix the memcfg DRAM lo window is backed, so a
-         * larger FMST carve can be populated. 0x10000 keeps PMGR reachable
-         * (0x20000+ skipped PMGR without DRAM lo). Default remains 0x4000.
+         * larger FMST carve can be populated. 0x20000+ skipped PMGR without
+         * DRAM lo. Entitlement's FMST size check (0x115d2c) rejects anything
+         * above 32 KiB, so the stack-fix carve stops at that limit.
          */
-        bpse[0x78 / 4] = s->stack_fix ? 0x10000 : 0x4000;
+        bpse[0x78 / 4] = s->stack_fix ? 0x8000 : 0x4000;
         /*
          * Insecure-RNG seed pair read by the roottask's
          * _liblibc_seed_insecure_rand ("s1 || s2" assert). Fixed,
@@ -771,9 +1122,13 @@ static void sep_lab_seed_handoff(AppleSEPLabState *s)
             mmt[0] = SEP_SENTINEL;
             mmt[2] = SEP_SENTINEL;
         }
-        /* SSEAESAB at 0x2a0b00000 (start of akp_hi). */
+        /* SSEAESAB at 0x2a0b00000 (start of akp_hi, overlaid by aess_mr). */
         hi[0] = SEP_SENTINEL;
         hi[2] = SEP_SENTINEL;
+        memset(s->aess_regs, 0, sizeof(s->aess_regs));
+        memset(s->aess_key, 0, sizeof(s->aess_key));
+        s->aess_regs[0x00 / 4] = SEP_SENTINEL;
+        s->aess_regs[0x08 / 4] = SEP_SENTINEL;
         /*
          * TRNG REGS live in trng_mr (W1C +0x10). Status seeds: +0x7c nibble
          * [27:24]==2 (cookie 0x120c21); +0x78 bits 19|20 (cookie 0x120c2b).
@@ -839,7 +1194,16 @@ static void sep_lab_reset(void *opaque)
     s->stack_fix_fills = 0;
     s->stack_fix_next_pa = 0;
     s->ext_irq_mask = 0xffffffffu;
+    s->ext_irq_edge = 0;
+    s->pmgr28000_latched = false;
+    s->pmgr2c000_latched = false;
     s->trng_pending = false;
+    s->sars_init_notified = false;
+    s->xart_e0_send_active = false;
+    s->e0_receive_active = false;
+    s->e0_receive_pc = 0;
+    s->notify_svc_active = 0;
+    s->notify_svc_pc = 0;
 
     cpu_reset(CPU(s->cpu));
     cpu_set_pc(CPU(s->cpu), s->entry);
@@ -862,6 +1226,752 @@ static void sep_lab_reset(void *opaque)
 
 
 
+static void sep_lab_exclog_dump_ring(AppleSEPLabState *s, const char *why)
+{
+    unsigned i;
+
+    error_report("SEP lab: %s — last SVCs (oldest→newest):", why);
+    for (i = 0; i < 64; i++) {
+        uint64_t *e = s->exclog_ring[(s->exclog_ring_pos + i) % 64];
+
+        if (!e[0]) {
+            continue;
+        }
+        error_report("  svc pc=0x%" PRIx64 " lr=0x%" PRIx64 " x0=0x%" PRIx64
+                     " x1=0x%" PRIx64 " x2=0x%" PRIx64 " x3=0x%" PRIx64
+                     " x4=0x%" PRIx64 " x5=0x%" PRIx64 " x6=0x%" PRIx64
+                     " x7=0x%" PRIx64 " bt=[0x%" PRIx64 ",0x%" PRIx64
+                     ",0x%" PRIx64 ",0x%" PRIx64 "]",
+                     e[0], e[1], e[2], e[3], e[4], e[5],
+                     e[8], e[9], e[10], e[11],
+                     e[12], e[13], e[14], e[15]);
+    }
+}
+
+/* J410 24A437 phase-2 research compatibility: observe the sars init/e0 IPC
+ * without changing guest objects or manufacturing SVC results. */
+#define SEP_SARS_INIT_NOTIFY_OBJ 0xffffffff00574160ULL
+#define SEP_SARS_OWNER_TCB       0xffffffff0059e800ULL
+#define SEP_IPC_E0_OBJ           0xffffffff005700e0ULL
+#define SEP_XART_E0_SEND_PC      0x3981aca38ULL
+
+static uint64_t sep_lab_decode_ipc_object(CPUState *cs, uint64_t slot,
+                                          unsigned expected_type)
+{
+    uint64_t header = 0;
+    uint32_t encoded;
+
+    if (cpu_memory_rw_debug(cs, slot, (uint8_t *)&header,
+                            sizeof(header), false) != 0 ||
+        (header >> 58) != expected_type) {
+        return 0;
+    }
+    encoded = (uint32_t)header << 4;
+    if (!encoded) {
+        return 0;
+    }
+    return (uint64_t)(-(int64_t)encoded);
+}
+
+/* (Translation of kernel VAs is done by sep_lab_kernel_rw; sepOS uses a
+ * 64 KiB TTBR1 granule with T1SZ=32, so a hand-rolled 4 KiB walk reads the
+ * wrong pages. QEMU's own walk handles the geometry.) */
+
+/* The EL0 SVC hook cannot use cpu_memory_rw_debug on kernel (TTBR1-region)
+ * addresses: sepOS sets TCR_EL1.E0PD1 (bit 56), QEMU's debug walk honours
+ * E0PD for user regimes, and every kernel-VA translation faults. Flip the
+ * bit off around the access; the debug walk is a software table walk that
+ * neither consults nor pollutes the TLB, and no guest code runs in between,
+ * so the kernel cannot observe the change. */
+static int sep_lab_kernel_rw(AppleSEPLabState *s, uint64_t va, void *buf,
+                             int len, bool is_write)
+{
+    CPUARMState *env = &s->cpu->env;
+    uint64_t saved_tcr = env->cp15.tcr_el[1];
+    int rc;
+
+    env->cp15.tcr_el[1] = saved_tcr & ~(1ULL << 56);
+    rc = cpu_memory_rw_debug(CPU(s->cpu), va, buf, len, is_write);
+    env->cp15.tcr_el[1] = saved_tcr;
+    return rc;
+}
+
+static bool sep_lab_el1_read_u64(AppleSEPLabState *s, uint64_t va,
+                                 uint64_t *value)
+{
+    return sep_lab_kernel_rw(s, va, value, sizeof(*value), false) == 0;
+}
+
+static bool sep_lab_el1_write_u64(AppleSEPLabState *s, uint64_t va,
+                                  uint64_t value)
+{
+    return sep_lab_kernel_rw(s, va, &value, sizeof(value), true) == 0;
+}
+
+/* P0: post the initial pending bit on the sars init obj_notify through the
+ * E0PD1-flipped debug translation. The earlier attempt went through
+ * cpu_memory_rw_debug from the EL0 SVC hook and never landed. */
+/* One-shot thread map: scan the kernel object region for TCB-shaped
+ * objects (saved pc at +0xf8 in user-VA range, wait state at +0x410)
+ * and report what each is parked on, with the target's service name. */
+static void sep_lab_dump_tcbmap(AppleSEPLabState *s)
+{
+    uint64_t va;
+    unsigned found = 0;
+
+    for (va = 0xffffffff00580000ULL;
+         va < 0xffffffff00700000ULL && found < 80; va += 0x400) {
+        uint64_t pc = 0, wait = 0, parked = 0, name = 0;
+
+        if (!sep_lab_el1_read_u64(s, va + 0xf8, &pc) || pc < 0x10000 ||
+            pc > 0x1000000000000ULL) {
+            continue;
+        }
+        if (!sep_lab_el1_read_u64(s, va + 0x410, &wait) ||
+            (wait & ~0xffffULL) || wait > 0xff) {
+            continue;
+        }
+        sep_lab_el1_read_u64(s, va + 0x3f8, &parked);
+        if (parked >= 0xffffffff00000000ULL &&
+            parked < 0xffffffff01000000ULL) {
+            sep_lab_el1_read_u64(s, parked + 0x10, &name);
+        }
+        error_report("SEP e0 tcb: va=0x%" PRIx64 " pc=0x%" PRIx64
+                     " wait=0x%" PRIx64 " parked=0x%" PRIx64
+                     " name=0x%08" PRIx32, va, pc, wait, parked,
+                     (uint32_t)name);
+        if ((wait & 0xff) == 0x81 && parked) {
+            uint64_t m0 = 0, m1 = 0, m2 = 0, m3 = 0;
+
+            sep_lab_el1_read_u64(s, va + 0x10, &m0);
+            sep_lab_el1_read_u64(s, va + 0x18, &m1);
+            sep_lab_el1_read_u64(s, va + 0x20, &m2);
+            sep_lab_el1_read_u64(s, va + 0x28, &m3);
+            error_report("SEP e0 tcb: msg %#lx %#lx %#lx %#lx",
+                         m0, m1, m2, m3);
+        }
+        found++;
+    }
+    error_report("SEP e0 tcb: scan found %u threads", found);
+    /* IPC object table: endpoints at 0x570000+i*0x20, notifications above.
+     * Print slots with any live word; +0x10 is the 4-char service name. */
+    {
+        uint64_t va;
+
+        for (va = 0xffffffff00570000ULL; va < 0xffffffff00580000ULL;
+             va += 0x20) {
+            uint64_t w0 = 0, w8 = 0, wn = 0;
+
+            sep_lab_el1_read_u64(s, va, &w0);
+            sep_lab_el1_read_u64(s, va + 8, &w8);
+            sep_lab_el1_read_u64(s, va + 0x10, &wn);
+            if (!w0 && !w8 && !wn) {
+                continue;
+            }
+            error_report("SEP e0 obj: %#llx +0=%#llx +8=%#llx name=%#llx",
+                         va, w0, w8, wn);
+        }
+    }
+}
+
+static void sep_lab_sars_dump_walk(AppleSEPLabState *s)
+{
+    static const struct {
+        const char *name;
+        uint64_t va;
+    } probe[] = {
+        { "current", 0xffffffff00020be0ULL },      /* current-thread ptr */
+        { "tcb.pc", 0xffffffff0059e8f8ULL },       /* sars TCB + 0xf8 */
+        { "tcb.wait", 0xffffffff0059ec10ULL },     /* sars TCB + 0x410 */
+        { "tcb.parked_on", 0xffffffff0059ebf8ULL },/* sars TCB + 0x3f8 */
+        { "e0+0", SEP_IPC_E0_OBJ },
+        { "e0+8", SEP_IPC_E0_OBJ + 8 },
+        { "e0+0x10", SEP_IPC_E0_OBJ + 0x10 },
+        { "notify+0", SEP_SARS_INIT_NOTIFY_OBJ },
+        { "notify+8", SEP_SARS_INIT_NOTIFY_OBJ + 8 },
+        { "notify+0x10", SEP_SARS_INIT_NOTIFY_OBJ + 0x10 },
+        { "180+0", 0xffffffff00570180ULL },
+        { "180+8", 0xffffffff00570188ULL },
+        { "180+0x10", 0xffffffff00570190ULL },
+        { "80+0x10", 0xffffffff00570090ULL },      /* name of ep 0x...080 */
+    };
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(probe); i++) {
+        uint64_t val = 0;
+        bool ok = sep_lab_el1_read_u64(s, probe[i].va, &val);
+
+        error_report("SEP e0 probe: %s=0x%" PRIx64 "%s", probe[i].name, val,
+                     ok ? "" : " (unreadable)");
+    }
+    /* Walk one level of the parked chain: whoever is parked on e0 and
+     * whatever the sars TCB is parked on, then that object's name. */
+    {
+        uint64_t head = 0, parked = 0;
+        static const struct {
+            const char *name;
+            uint64_t off;
+        } head_fields[] = {
+            { "e0.waiter.pc", 0xf8 },
+            { "e0.waiter.wait", 0x410 },
+            { "e0.waiter.parked_on", 0x3f8 },
+        };
+        unsigned k;
+
+        if (sep_lab_el1_read_u64(s, SEP_IPC_E0_OBJ, &head) && head) {
+            for (k = 0; k < ARRAY_SIZE(head_fields); k++) {
+                uint64_t val = 0;
+
+                sep_lab_el1_read_u64(s, head + head_fields[k].off, &val);
+                error_report("SEP e0 probe: %s=0x%" PRIx64,
+                             head_fields[k].name, val);
+            }
+        }
+        if (sep_lab_el1_read_u64(s, 0xffffffff0059ebf8ULL, &parked) &&
+            parked) {
+            uint64_t val = 0;
+
+            sep_lab_el1_read_u64(s, parked + 0x10, &val);
+            error_report("SEP e0 probe: sars.parked.name=0x%" PRIx64, val);
+            sep_lab_el1_read_u64(s, parked, &val);
+            error_report("SEP e0 probe: sars.parked.head=0x%" PRIx64, val);
+        }
+    }
+    sep_lab_dump_tcbmap(s);
+}
+
+static void sep_lab_sars_post_notify(AppleSEPLabState *s)
+{
+    uint64_t old = 0, verify = 0;
+
+    if (s->sars_init_notified) {
+        return;
+    }
+    s->sars_init_notified = true;
+
+    if (!sep_lab_el1_read_u64(s, SEP_SARS_INIT_NOTIFY_OBJ, &old)) {
+        error_report("SEP e0: sars notify read failed");
+        return;
+    }
+    if (old >> 58) {
+        /* +0 carries an object type header, not a pending mask. */
+        error_report("SEP e0: sars notify+0 is a header (0x%" PRIx64
+                     "); pending bit not written", old);
+        return;
+    }
+    if (!sep_lab_el1_write_u64(s, SEP_SARS_INIT_NOTIFY_OBJ, old | 1)) {
+        error_report("SEP e0: sars notify write failed");
+        return;
+    }
+    sep_lab_el1_read_u64(s, SEP_SARS_INIT_NOTIFY_OBJ, &verify);
+    error_report("SEP e0: sars notify pending posted old=0x%" PRIx64
+                 " new=0x%" PRIx64 " verify=0x%" PRIx64, old, old | 1,
+                 verify);
+}
+
+static void sep_lab_sars_log_state(AppleSEPLabState *s)
+{
+    static const struct {
+        const char *name;
+        uint64_t addr;
+    } fields[] = {
+        { "e0+0", SEP_IPC_E0_OBJ },
+        { "e0+8", SEP_IPC_E0_OBJ + 8 },
+        { "notify+0", SEP_SARS_INIT_NOTIFY_OBJ },
+        { "notify+8", SEP_SARS_INIT_NOTIFY_OBJ + 8 },
+        { "tcb.saved_pc", SEP_SARS_OWNER_TCB + 0xf8 },
+        { "tcb.wait_state", SEP_SARS_OWNER_TCB + 0x410 },
+    };
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(fields); i++) {
+        uint64_t value = 0;
+
+        if (sep_lab_el1_read_u64(s, fields[i].addr, &value)) {
+            error_report("SEP e0 state: %s=0x%" PRIx64,
+                         fields[i].name, value);
+        } else {
+            error_report("SEP e0 state: %s unreadable", fields[i].name);
+        }
+    }
+}
+
+/*
+ * Synthetic server for the endpoints whose real server thread is itself
+ * parked in a startup connect (skgs, TREx, sks, ARTM, scrd, sbio, sse).
+ * Completes one queued sender exactly as the kernel's receive-match does:
+ * dequeue from the endpoint, clear the wait word, insert into the priority
+ * run queue (kernel 0xd1e4 recipe, w1=0). Off by default; SEP_SYNTH_SERVE=1.
+ */
+static bool sep_lab_synth_serve_one(AppleSEPLabState *s)
+{
+    static const uint64_t eps[] = {
+        0xffffffff00570280ULL, /* skgs */
+        0xffffffff00570120ULL, /* TREx */
+        0xffffffff00570180ULL, /* sks  */
+        0xffffffff00570100ULL, /* ARTM */
+        0xffffffff00570140ULL, /* scrd */
+        0xffffffff005701c0ULL, /* sbio */
+        0xffffffff005701e0ULL, /* sse  */
+        0xffffffff005700e0ULL, /* e0 "sars" (SEP_SYNTH_E0 only) */
+    };
+    static unsigned synth_cands;
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(eps); i++) {
+        uint64_t ep = eps[i];
+        uint64_t head = 0, tailw = 0, wait = 0, next = 0;
+        uint64_t prio_w = 0, qhead = 0, prev = 0, stamp = 0, bmp = 0;
+        uint64_t tcb, qslot, bslot;
+        unsigned np;
+        uint8_t prio;
+
+        if (ep == SEP_IPC_E0_OBJ && !s->synth_e0) {
+            continue;
+        }
+        if (!sep_lab_el1_read_u64(s, ep, &head) || !head) {
+            continue;
+        }
+        if (!sep_lab_el1_read_u64(s, ep + 8, &tailw)) {
+            continue;
+        }
+        if (synth_cands < 24 && !(tailw & 1)) {
+            uint64_t dwait = 0;
+            bool wok = sep_lab_el1_read_u64(s, (head & ~3ULL) + 0x410,
+                                            &dwait);
+            uint8_t dprio = 0;
+            bool pok = sep_lab_kernel_rw(s, (head & ~3ULL) + 0x3e5,
+                                         &dprio, 1, false) == 0;
+
+            synth_cands++;
+            error_report("SEP synth: send-cand ep=0x%" PRIx64
+                         " head=0x%" PRIx64 " tail=0x%" PRIx64
+                         " wait_ok=%d wait=0x%" PRIx64 " prio_ok=%d"
+                         " prio=0x%x", ep, head, tailw, wok, dwait,
+                         pok, dprio);
+        }
+        if (tailw & 1) {
+            continue; /* a real receiver is queued; the kernel will match */
+        }
+        tcb = head & ~3ULL;
+        if (tcb < 0xffffffff00548000ULL || tcb > 0xffffffff00700000ULL) {
+            if (synth_cands < 30) error_report("SEP synth: fail range");
+            continue;
+        }
+        if (!sep_lab_el1_read_u64(s, tcb + 0x410, &wait) ||
+            ((wait & 0xff) != 0x81 && (wait & 0xff) != 0x01 &&
+             (wait & 0xff) != 0x82 && (wait & 0xff) != 0x02)) {
+            if (synth_cands < 30) error_report("SEP synth: fail wait");
+            continue;
+        }
+        /* Read the priority before any guest write. The byte-sized debug
+         * access is unreliable here; read the containing u64 and extract
+         * byte 5 (all these connect senders run at priority 0x64). */
+        {
+            uint64_t wp = 0;
+
+            if (sep_lab_el1_read_u64(s, tcb + 0x3e0, &wp)) {
+                prio = (wp >> 40) & 0xff;
+            }
+            if (!prio) {
+                prio = 0x64;
+            }
+        }
+        /* dequeue the head (kernel 0xf58c semantics) */
+        sep_lab_el1_read_u64(s, tcb + 0x408, &next);
+        sep_lab_el1_write_u64(s, ep, next);
+        if (next) {
+            sep_lab_el1_write_u64(s, next + 0x400, 0);
+        }
+        if ((tailw & ~3ULL) == tcb) {
+            sep_lab_el1_write_u64(s, ep + 8, tailw & 3);
+        }
+        sep_lab_el1_write_u64(s, tcb + 0x400, 0);
+        sep_lab_el1_write_u64(s, tcb + 0x408, 0);
+        sep_lab_el1_write_u64(s, tcb + 0x3f8, 0);
+        sep_lab_el1_write_u64(s, tcb + 0x410, 0);
+        sep_lab_el1_write_u64(s, tcb, 0);
+        if ((wait & 0xff) == 0x82 || (wait & 0xff) == 0x02) {
+            sep_lab_el1_write_u64(s, tcb + 0x10, 0); /* call reply word */
+        }
+        np = (~prio) & 0xff;
+        qslot = 0xffffffff00021040ULL + (uint64_t)np * 8;
+        sep_lab_el1_read_u64(s, qslot, &qhead);
+        if (qhead) {
+            sep_lab_el1_read_u64(s, qhead + 0x3d0, &prev);
+            sep_lab_el1_write_u64(s, prev + 0x3d8, tcb);
+            sep_lab_el1_write_u64(s, tcb + 0x3d0, prev);
+            sep_lab_el1_write_u64(s, tcb + 0x3d8, qhead);
+            sep_lab_el1_write_u64(s, qhead + 0x3d0, tcb);
+        } else {
+            sep_lab_el1_write_u64(s, tcb + 0x3d0, tcb);
+            sep_lab_el1_write_u64(s, tcb + 0x3d8, tcb);
+            sep_lab_el1_write_u64(s, qslot, tcb);
+            bslot = 0xffffffff00021040ULL + (((uint64_t)np >> 3) & 0x18) +
+                    0x808;
+            sep_lab_el1_read_u64(s, bslot, &bmp);
+            sep_lab_el1_write_u64(s, bslot, bmp | (1ULL << (np & 0x3f)));
+        }
+        sep_lab_el1_read_u64(s, 0xffffffff00021870ULL, &stamp);
+        sep_lab_el1_write_u64(s, tcb + 0x3e8, stamp);
+        (void)prio_w;
+        {
+            uint64_t chk = 0, cw = 0;
+
+            sep_lab_el1_read_u64(s, ep, &chk);
+            sep_lab_el1_read_u64(s, ep + 8, &cw);
+            error_report("SEP synth: served ep=0x%" PRIx64 " tcb=0x%" PRIx64
+                         " wait=0x%" PRIx64 " ep_now=0x%" PRIx64
+                         " tail_now=0x%" PRIx64, ep, tcb, wait, chk, cw);
+        }
+        return true;
+    }
+    return false;
+}
+
+/*
+ * P1: kick a parked receiver so its receive re-arms and can match senders
+ * already queued on the same endpoint (the kernel never re-checks a parked
+ * receiver). Env-gated by SEP_WAKE_SEPD=1; one-shot per TCB per boot.
+ */
+static void sep_lab_wake_receiver(AppleSEPLabState *s, uint64_t tcb)
+{
+    uint64_t wait = 0, prio_w = 0, qhead = 0, prev = 0, stamp = 0, bmp = 0;
+    uint64_t qslot, bslot, wp = 0;
+    unsigned np;
+    uint8_t prio = 0;
+
+    if (!sep_lab_el1_read_u64(s, tcb + 0x410, &wait) ||
+        (wait & 0xff) != 0x84) {
+        return;
+    }
+    if (sep_lab_el1_read_u64(s, tcb + 0x3e0, &wp)) {
+        prio = (wp >> 40) & 0xff;
+    }
+    if (!prio) {
+        prio = 0x64;
+    }
+    np = (~prio) & 0xff;
+    qslot = 0xffffffff00021040ULL + (uint64_t)np * 8;
+    sep_lab_el1_read_u64(s, qslot, &qhead);
+    if (qhead) {
+        sep_lab_el1_read_u64(s, qhead + 0x3d0, &prev);
+        sep_lab_el1_write_u64(s, prev + 0x3d8, tcb);
+        sep_lab_el1_write_u64(s, tcb + 0x3d0, prev);
+        sep_lab_el1_write_u64(s, tcb + 0x3d8, qhead);
+        sep_lab_el1_write_u64(s, qhead + 0x3d0, tcb);
+    } else {
+        sep_lab_el1_write_u64(s, tcb + 0x3d0, tcb);
+        sep_lab_el1_write_u64(s, tcb + 0x3d8, tcb);
+        sep_lab_el1_write_u64(s, qslot, tcb);
+        bslot = 0xffffffff00021040ULL + (((uint64_t)np >> 3) & 0x18) + 0x808;
+        sep_lab_el1_read_u64(s, bslot, &bmp);
+        sep_lab_el1_write_u64(s, bslot, bmp | (1ULL << (np & 0x3f)));
+    }
+    sep_lab_el1_read_u64(s, 0xffffffff00021870ULL, &stamp);
+    sep_lab_el1_write_u64(s, tcb + 0x3e8, stamp);
+    sep_lab_el1_write_u64(s, tcb + 0x410, 0);
+    sep_lab_el1_write_u64(s, tcb + 0x3f8, 0);
+    sep_lab_el1_write_u64(s, tcb, 0);
+    (void)prio_w;
+    error_report("SEP p1: woke receiver tcb=0x%" PRIx64 " (was wait=0x%"
+                 PRIx64 ")", tcb, wait);
+}
+
+static void sep_lab_sars_ipc_pre_hook(ARMCPU *cpu, void *opaque)
+{
+    AppleSEPLabState *s = opaque;
+    CPUARMState *env = &cpu->env;
+    CPUState *cs = CPU(cpu);
+    unsigned svc;
+    uint64_t obj;
+
+    if (extract32(env->pstate, 2, 2) != 0 || !env->aarch64 ||
+        cs->exception_index != EXCP_SWI) {
+        return;
+    }
+    svc = (unsigned)(env->exception.syndrome & 0xffff);
+    {
+        static bool sepd_kicked;
+        const char *kick_env = getenv("SEP_WAKE_SEPD");
+
+        if (!sepd_kicked && kick_env && *kick_env && strcmp(kick_env, "0")) {
+            uint64_t w = 0, head = 0, tailw = 0;
+
+            /* Only when the registration senders are queued and no receiver
+             * bit is set: waking the parked receiver then lets its next
+             * receive match them. */
+            if (s->pmgr2c_count >= 60 &&
+                sep_lab_el1_read_u64(s, 0xffffffff0059c000ULL + 0x410, &w) &&
+                (w & 0xff) == 0x84) {
+                sepd_kicked = true;
+                sep_lab_wake_receiver(s, 0xffffffff0059c000ULL);
+            }
+        }
+    }
+    if (s->synth_serve) {
+        static bool synth_seen;
+
+        if (!synth_seen) {
+            synth_seen = true;
+            error_report("SEP synth: hook active");
+        }
+        sep_lab_synth_serve_one(s);
+        /* Kick the shared reply notification: a waiter polling it then sees
+         * pending and proceeds (the mechanism P0 asked for, applied
+         * continuously so reply-waits do not deadlock). */
+        {
+            uint64_t npend = 0;
+
+            if (sep_lab_el1_read_u64(s, SEP_SARS_INIT_NOTIFY_OBJ,
+                                     &npend) && !(npend >> 58) &&
+                !(npend & 1)) {
+                sep_lab_el1_write_u64(s, SEP_SARS_INIT_NOTIFY_OBJ,
+                                      npend | 1);
+            }
+        }
+    }
+    if (svc == 0) {
+        obj = sep_lab_decode_ipc_object(cs, env->xregs[0], 6);
+        if (obj != SEP_IPC_E0_OBJ) {
+            return;
+        }
+        if (env->xregs[1] == 0 && env->pc == SEP_XART_E0_SEND_PC) {
+            s->xart_e0_send_active = true;
+            error_report("SEP e0: xART selector 0x11179 send entered");
+            sep_lab_sars_log_state(s);
+            sep_lab_sars_dump_walk(s);
+            sep_lab_sars_post_notify(s);
+        } else if (env->xregs[1] == 3) {
+            s->e0_receive_active = true;
+            s->e0_receive_pc = env->pc;
+            error_report("SEP e0: receive entered pc=0x%" PRIx64, env->pc);
+        }
+        return;
+    }
+    if (svc < 2 || svc > 4) {
+        return;
+    }
+    obj = sep_lab_decode_ipc_object(cs, env->xregs[0], 6);
+    if (!obj) {
+        obj = sep_lab_decode_ipc_object(cs, env->xregs[0], 8);
+    }
+    if (obj != SEP_IPC_E0_OBJ && obj != SEP_SARS_INIT_NOTIFY_OBJ &&
+        obj != 0xffffffff00570040ULL /* SEPD main ep */ &&
+        obj != 0xffffffff00570080ULL /* dxio ep */ &&
+        obj != 0xffffffff00570280ULL /* skgs ep */ &&
+        obj != 0xffffffff005704c0ULL /* PMGR service ep */) {
+        return;
+    }
+    error_report("SEP ipc: pc=0x%" PRIx64 " svc=%u x0=0x%" PRIx64
+                 " x1=0x%" PRIx64 " x2=0x%" PRIx64 " x3=0x%" PRIx64,
+                 env->pc, svc, env->xregs[0], env->xregs[1],
+                 env->xregs[2], env->xregs[3]);
+    if (obj == SEP_SARS_INIT_NOTIFY_OBJ) {
+        s->notify_svc_active = svc;
+        s->notify_svc_pc = env->pc;
+    }
+    if (svc == 3 && obj == SEP_IPC_E0_OBJ) {
+        s->e0_receive_active = true;
+        s->e0_receive_pc = env->pc;
+        error_report("SEP e0: receive entered pc=0x%" PRIx64, env->pc);
+    }
+}
+
+static void sep_lab_sars_ipc_post_hook(ARMCPU *cpu, void *opaque)
+{
+    AppleSEPLabState *s = opaque;
+    CPUARMState *env = &cpu->env;
+
+    if (extract32(env->pstate, 2, 2) != 0 || !env->aarch64) {
+        return;
+    }
+    if (s->xart_e0_send_active && env->pc == SEP_XART_E0_SEND_PC) {
+        s->xart_e0_send_active = false;
+        error_report("SEP e0: xART selector 0x11179 send returned x0=0x%"
+                     PRIx64, env->xregs[0]);
+    }
+    if (s->notify_svc_active && env->pc == s->notify_svc_pc) {
+        error_report("SEP e0: notify svc=%u returned x0=0x%" PRIx64
+                     " x1=0x%" PRIx64, s->notify_svc_active,
+                     env->xregs[0], env->xregs[1]);
+        s->notify_svc_active = 0;
+        s->notify_svc_pc = 0;
+    }
+    if (s->e0_receive_active && env->pc == s->e0_receive_pc) {
+        s->e0_receive_active = false;
+        error_report("SEP e0: receive returned x0=0x%" PRIx64,
+                     env->xregs[0]);
+    }
+}
+
+static void sep_lab_exclog_hook(ARMCPU *cpu, void *opaque)
+{
+    AppleSEPLabState *s = opaque;
+    CPUARMState *env = &cpu->env;
+    CPUState *cs = CPU(cpu);
+    int el = extract32(env->pstate, 2, 2);
+
+    if (el != 0 || !(env->aarch64)) {
+        return;
+    }
+    if (cs->exception_index == EXCP_SWI) {
+        uint64_t *e;
+        bool hit = false;
+        int r;
+
+        if (env->pc == 0xb3b4 ||
+            ((env->xregs[0] & 0x3fff) == 0 && env->xregs[1] <= 1 &&
+             env->xregs[3] == 1 && env->xregs[2] < 0x80)) {
+            static char conbuf[256];
+            static unsigned conpos;
+            char ch = (char)(env->xregs[2] & 0xff);
+
+            if (env->pc == 0xb3b4 && s->exclog_svc_hits == 0) {
+                s->exclog_svc_hits = 1;
+                sep_lab_exclog_dump_ring(s, "first roottask panic putc");
+            }
+            if (env->xregs[1] == 0 && ch >= 0x20 && ch < 0x7f) {
+                if (conpos < sizeof(conbuf) - 1) {
+                    conbuf[conpos++] = ch;
+                }
+            }
+            if (env->xregs[1] == 1 || ch == '\n' || conpos >= sizeof(conbuf) - 1) {
+                if (conpos > 0) {
+                    conbuf[conpos] = '\0';
+                    error_report("SEP con: %s", conbuf);
+                    conpos = 0;
+                }
+            }
+            return;
+        }
+        if (env->pc < 0x20000) {
+            return;
+        }
+        e = s->exclog_ring[s->exclog_ring_pos];
+        memset(e, 0, 16 * sizeof(uint64_t));
+        e[0] = env->pc; e[1] = env->xregs[30];
+        e[2] = env->xregs[0]; e[3] = env->xregs[1];
+        e[4] = env->xregs[2]; e[5] = env->xregs[3];
+        e[6] = env->xregs[16]; e[7] = env->xregs[27];
+        e[8] = env->xregs[4]; e[9] = env->xregs[5];
+        e[10] = env->xregs[6]; e[11] = env->xregs[7];
+        {
+            uint64_t fp = env->xregs[29];
+            int fi;
+            for (fi = 0; fi < 4 && fp && (fp & 7) == 0; fi++) {
+                uint64_t fr[2] = { 0, 0 };
+                if (cpu_memory_rw_debug(cs, fp, (uint8_t *)fr,
+                                        sizeof(fr), false) != 0) {
+                    break;
+                }
+                e[12 + fi] = fr[1] & 0xffffffffffffULL;
+                if (fr[0] <= fp || fr[0] - fp > 0x10000) {
+                    break;
+                }
+                fp = fr[0];
+            }
+        }
+        s->exclog_ring_pos = (s->exclog_ring_pos + 1) % 64;
+        if ((env->exception.syndrome & 0xffff) < 32 &&
+            (s->exclog_svc_mask & BIT(env->exception.syndrome & 0xffff))) {
+            uint64_t ipc[16] = { 0 };
+
+            if (cpu_memory_rw_debug(cs, env->cp15.tpidrro_el[0],
+                                    (uint8_t *)ipc, sizeof(ipc), false) != 0) {
+                memset(ipc, 0, sizeof(ipc));
+            }
+            error_report("SEP svc%u: pc=0x%" PRIx64 " x0=0x%" PRIx64
+                         " x1=0x%" PRIx64 " x2=0x%" PRIx64 " x3=0x%" PRIx64
+                         " ipc=[0x%" PRIx64 ",0x%" PRIx64 ",0x%" PRIx64
+                         ",0x%" PRIx64 ",0x%" PRIx64 "]",
+                         (unsigned)(env->exception.syndrome & 0xffff), env->pc,
+                         env->xregs[0], env->xregs[1], env->xregs[2],
+                         env->xregs[3], ipc[0], ipc[1], ipc[2], ipc[3], ipc[4]);
+            if ((ipc[3] & 0xffffffff) == 0x42be) {
+                error_report("SEP PMGR payload: [0x%" PRIx64 ",0x%" PRIx64
+                             ",0x%" PRIx64 ",0x%" PRIx64 ",0x%" PRIx64
+                             ",0x%" PRIx64 ",0x%" PRIx64 ",0x%" PRIx64
+                             ",0x%" PRIx64 ",0x%" PRIx64 ",0x%" PRIx64 "]",
+                             ipc[5], ipc[6], ipc[7], ipc[8], ipc[9], ipc[10],
+                             ipc[11], ipc[12], ipc[13], ipc[14], ipc[15]);
+            }
+        }
+        if (s->exclog_max > 32 && (env->pc >> 24) == 0x192) {
+            uint64_t sl = 0x1922fc000ULL;
+            error_report("SEP sks svc: pc=+0x%" PRIx64 " lr=+0x%" PRIx64
+                         " x0=0x%" PRIx64 " x1=0x%" PRIx64 " x2=0x%" PRIx64
+                         " x3=0x%" PRIx64 " bt=[+0x%" PRIx64 ",+0x%" PRIx64
+                         ",+0x%" PRIx64 ",+0x%" PRIx64 "]",
+                         e[0] - sl, e[1] - sl, e[2], e[3], e[4], e[5],
+                         e[12] ? e[12] - sl : 0, e[13] ? e[13] - sl : 0,
+                         e[14] ? e[14] - sl : 0, e[15] ? e[15] - sl : 0);
+        }
+        for (r = 0; r <= 8; r++) {
+            if (env->xregs[r] == 0x7d0) {
+                hit = true;
+            }
+        }
+        if (hit && s->exclog_svc_hits++ < 2) {
+            sep_lab_exclog_dump_ring(s, "SVC with 0x7d0");
+        }
+        return;
+    }
+    if (cs->exception_index == EXCP_IRQ ||
+        cs->exception_index == EXCP_FIQ ||
+        cs->exception_index == EXCP_VIRQ ||
+        cs->exception_index == EXCP_VFIQ) {
+        return;
+    }
+    if (s->exclog_n == 0) {
+        sep_lab_exclog_dump_ring(s, "first EL0 abort/UDF");
+    }
+    if (s->exclog_n++ < s->exclog_max) {
+        error_report("SEP lab: EL0 exc %d syn=0x%" PRIx64 " pc=0x%"
+                     PRIx64 " far=0x%" PRIx64 " sp0=0x%" PRIx64 " lr=0x%"
+                     PRIx64 " x0=0x%" PRIx64 " x1=0x%" PRIx64 " x27=0x%"
+                     PRIx64 " ttbr0=0x%" PRIx64,
+                     cs->exception_index, (uint64_t)env->exception.syndrome,
+                     env->pc, (uint64_t)env->exception.vaddress, env->sp_el[0],
+                     env->xregs[30], env->xregs[0], env->xregs[1],
+                     env->xregs[27], env->cp15.ttbr0_el[1]);
+    }
+}
+
+static void sep_lab_exclog_init(AppleSEPLabState *s)
+{
+    const char *env = getenv("SEP_CORE_EXCLOG");
+    uint64_t n;
+
+    if (getenv("SEP_CORE_EXCLOG_SVC0")) {
+        s->exclog_svc_mask |= BIT(0);
+    }
+    if (getenv("SEP_CORE_EXCLOG_SVC1")) {
+        s->exclog_svc_mask |= BIT(1);
+    }
+    if (getenv("SEP_CORE_EXCLOG_SVC2")) {
+        s->exclog_svc_mask |= BIT(2);
+    }
+    if (getenv("SEP_CORE_EXCLOG_SVC3")) {
+        s->exclog_svc_mask |= BIT(3);
+    }
+    if (getenv("SEP_CORE_EXCLOG_SVC5")) {
+        s->exclog_svc_mask |= BIT(5);
+    }
+    if (!env || !*env || qemu_strtou64(env, NULL, 0, &n) < 0 || !n) {
+        if (s->exclog_svc_mask) {
+            s->exclog_max = 1;
+            arm_register_pre_el_change_hook(s->cpu, sep_lab_exclog_hook, s);
+            error_report("SEP lab: SVC trace mask=%#x", s->exclog_svc_mask);
+        }
+        return;
+    }
+    s->exclog_max = (uint32_t)n;
+    arm_register_pre_el_change_hook(s->cpu, sep_lab_exclog_hook, s);
+    error_report("SEP lab: SEP_CORE_EXCLOG=%u (EL0 exception log; svc mask=%#x)",
+                 s->exclog_max, s->exclog_svc_mask);
+}
+
 /*
  * File offsets inside sepos.j410 image for EPControl (Mach-O @ 0x74000,
  * __TEXT vmaddr 0x110000). Patches the in-kram copy only.
@@ -870,19 +1980,24 @@ static void sep_lab_reset(void *opaque)
 #define SEP_EP_TEXT_VA       0x110000u
 #define SEP_EP_FO(va)        (SEP_EP_FILE + ((va) - SEP_EP_TEXT_VA))
 #define SEP_EP_START_ALL     0x118498u
-#define SEP_EP_START_EXIT    0x118524u   /* b #reply → retab when phase2 */
+#define SEP_EP_START_EXIT    0x118524u   /* b #reply → exit stub when phase2 */
+#define SEP_EP_IPC_REPLY     0x11ff2cu   /* original b target at 0x118524 */
 #define SEP_EP_CREATE_RET    0x118e6cu   /* create-fn retab → b trampoline */
 #define SEP_EP_TRAMP         0x123000u   /* zero cave in __TEXT */
-
 static void sep_lab_apply_phase2(AppleSEPLabState *s, gsize image_size)
 {
     uint8_t *kram;
     uint32_t retab = 0xd65f0fffu;
-    uint32_t b_tramp;
-    uint32_t tramp[6];
+    uint32_t ret_plain = 0xd65f03c0u;
+    uint32_t b_tramp, b_exit;
+    uint32_t tramp[12];
+    size_t tramp_words, tramp_bytes;
+    uint32_t exit_va;
     uint32_t bl_imm;
     int32_t off;
     uint64_t fo;
+    const char *wake_env = getenv("SEP_PHASE2_WAKE");
+    bool wake = wake_env && *wake_env && strcmp(wake_env, "0") != 0;
 
     if (!s->sep_phase2) {
         return;
@@ -894,29 +2009,53 @@ static void sep_lab_apply_phase2(AppleSEPLabState *s, gsize image_size)
     }
     kram = memory_region_get_ram_ptr(&s->kram);
 
-    /* start-all epilogue: reply branch → retab so it is callable */
+    /* trampoline: save LR, bl start-all, [optional: set [0x133fbb]=1], restore, retab */
+    off = (int32_t)SEP_EP_START_ALL - (int32_t)(SEP_EP_TRAMP + 12);
+    bl_imm = 0x94000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
+    tramp[0] = 0xa9bf7bfdu; /* stp x29, x30, [sp, #-0x10]! */
+    tramp[1] = 0x910003fdu; /* mov x29, sp */
+    tramp[2] = 0xaa1f03e0u; /* mov x0, xzr: local start-all call, not IPC */
+    tramp[3] = bl_imm;
+    if (wake) {
+        tramp[4] = 0x90000088u; /* adrp x8, 0x133000 (from PC 0x123010) */
+        tramp[5] = 0x52800029u; /* mov w9, #1 */
+        tramp[6] = 0x393eed09u; /* strb w9, [x8, #0xfbb] */
+        tramp[7] = 0xa8c17bfdu; /* ldp x29, x30, [sp], #0x10 */
+        tramp[8] = retab;
+        tramp_words = 9;
+    } else {
+        tramp[4] = 0xa8c17bfdu; /* ldp x29, x30, [sp], #0x10 */
+        tramp[5] = retab;
+        tramp_words = 6;
+    }
+    /*
+     * Exit stub for 0x118524: when called from trampoline (x0 == 0), plain ret
+     * (AUTIBSP already ran at 0x118514); when called later by sks RPC
+     * (0x64, 0x4047) with msg_ctx x0 != 0, branch to original IPC reply 0x11ff2c.
+     */
+    exit_va = SEP_EP_TRAMP + (uint32_t)(tramp_words * sizeof(uint32_t));
+    tramp[tramp_words + 0] = 0xb4000040u; /* cbz x0, .+8 */
+    off = (int32_t)SEP_EP_IPC_REPLY - (int32_t)(exit_va + 4);
+    tramp[tramp_words + 1] = 0x14000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
+    tramp[tramp_words + 2] = ret_plain;
+    tramp_bytes = (tramp_words + 3) * sizeof(uint32_t);
+
+    fo = SEP_EP_FO(SEP_EP_TRAMP);
+    if (fo + tramp_bytes > image_size) {
+        error_report("SEP lab: sep-phase2 trampoline OOB");
+        return;
+    }
+    memcpy(kram + fo, tramp, tramp_bytes);
+
+    /* start-all epilogue: reply branch → b exit_va */
+    off = (int32_t)exit_va - (int32_t)SEP_EP_START_EXIT;
+    b_exit = 0x14000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
     fo = SEP_EP_FO(SEP_EP_START_EXIT);
     if (fo + 4 > image_size) {
         error_report("SEP lab: sep-phase2 start-all exit OOB");
         return;
     }
-    memcpy(kram + fo, &retab, 4);
-
-    /* trampoline: save LR, bl start-all, restore, retab */
-    off = (int32_t)SEP_EP_START_ALL - (int32_t)(SEP_EP_TRAMP + 12);
-    bl_imm = 0x94000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
-    tramp[0] = 0xa9bf7bfdu; /* stp x29, x30, [sp, #-0x10]! */
-    tramp[1] = 0x910003fdu; /* mov x29, sp */
-    tramp[2] = 0xaa1f03e0u; /* mov x0, xzr */
-    tramp[3] = bl_imm;
-    tramp[4] = 0xa8c17bfdu; /* ldp x29, x30, [sp], #0x10 */
-    tramp[5] = retab;
-    fo = SEP_EP_FO(SEP_EP_TRAMP);
-    if (fo + sizeof(tramp) > image_size) {
-        error_report("SEP lab: sep-phase2 trampoline OOB");
-        return;
-    }
-    memcpy(kram + fo, tramp, sizeof(tramp));
+    memcpy(kram + fo, &b_exit, 4);
 
     /* create-fn retab → b trampoline */
     off = (int32_t)SEP_EP_TRAMP - (int32_t)SEP_EP_CREATE_RET;
@@ -928,7 +2067,8 @@ static void sep_lab_apply_phase2(AppleSEPLabState *s, gsize image_size)
     }
     memcpy(kram + fo, &b_tramp, 4);
 
-    error_report("SEP lab: sep-phase2 on (create→start-all; AKF IRQ 0x80 path)");
+    error_report("SEP lab: sep-phase2 on (create→start-all%s; AKF IRQ 0x80 path)",
+                 wake ? "+wake" : "");
 }
 
 /* Default-off, env-gated in-memory image patcher (SEP_PATCH). Patches ONLY the
@@ -972,6 +2112,40 @@ static void sep_lab_apply_patches(AppleSEPLabState *s, gsize image_size)
             memcpy(kram + off, &word, 4);
             error_report("SEP_PATCH: [0x%" PRIx64 "] = 0x%08x", off, word);
         }
+    }
+}
+
+/* Development-only service initialization compatibility. These two AKF opens
+ * otherwise leave xART and scrd waiting forever for a server that never starts.
+ * Return success without changing any on-disk bytes. */
+static void sep_lab_apply_init_compat(AppleSEPLabState *s, gsize image_size)
+{
+    static const struct {
+        uint64_t off;
+        uint32_t word;
+    } patches[] = {
+        { 0xe94b0u, 0xd28001e0u }, /* scrd: AKF open at runtime 0x1214b0 */
+        { 0xe94d0u, 0xd28001e0u }, /* scrd: EMBX open at runtime 0x1214d0 */
+        { 0xe94f0u, 0xd28001e0u }, /* scrd: GPIO open at runtime 0x1214f0 */
+        { 0xe952cu, 0xd28001e0u }, /* scrd: xART open at runtime 0x12152c */
+        { 0xe9560u, 0xd2800000u }, /* scrd: xART RPC at runtime 0x121560 */
+    };
+    uint8_t *kram;
+    unsigned i;
+
+    if (!getenv("SEP_INIT_COMPAT")) {
+        return;
+    }
+    kram = memory_region_get_ram_ptr(&s->kram);
+    for (i = 0; i < ARRAY_SIZE(patches); i++) {
+        if (patches[i].off + 4 > image_size) {
+            error_report("SEP_INIT_COMPAT: offset 0x%" PRIx64 " out of image",
+                         patches[i].off);
+            continue;
+        }
+        memcpy(kram + patches[i].off, &patches[i].word, 4);
+        error_report("SEP_INIT_COMPAT: [0x%" PRIx64 "] = 0x%08x",
+                     patches[i].off, patches[i].word);
     }
 }
 
@@ -1033,6 +2207,7 @@ static void sep_lab_init(MachineState *machine)
     /* RAM at zero is a lab choice, not a claim about T8140's private map. */
     memory_region_add_subregion(system_memory, 0, machine->ram);
     memory_region_init(&s->private_memory, OBJECT(s), "sep-private", UINT64_MAX);
+    address_space_init(&s->private_as, &s->private_memory, "sep-private-as");
     s->unknown = (SEPLabRegion) {
         .lab = s, .domain = "sep-private", .name = "unimplemented", .base = 0,
     };
@@ -1092,6 +2267,11 @@ static void sep_lab_init(MachineState *machine)
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, 0x2a0b00000ULL,
                                             &s->akp_hi, 0);
+        /* SSEAESAB ('AESS'/'BASE') overlay on top of akp_hi RAM. */
+        memory_region_init_io(&s->aess_mr, NULL, &sep_aess_ops, s,
+                              "sep-aess-regs", SEP_AESS_SIZE);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_AESS_PA,
+                                            &s->aess_mr, 10);
         /* TRNG REGS overlay (W1C +0x10) on top of akp_hi RAM. */
         memory_region_init_io(&s->trng_mr, NULL, &sep_trng_ops, s,
                               "sep-trng-regs", SEP_TRNG_SIZE);
@@ -1107,6 +2287,20 @@ static void sep_lab_init(MachineState *machine)
                                &error_fatal);
         memory_region_add_subregion_overlap(&s->private_memory, 0x2a0d80000ULL,
                                             &s->plat, 0);
+        /*
+         * BASEI2C / BASEGPIO sit just past plat. Latch writes so dxio_async's
+         * command word at GPIO +0xc is visible to the following read.
+         */
+        s->i2c_regs = g_new0(uint32_t, SEP_IO_BLK_SIZE / 4);
+        s->gpio_regs = g_new0(uint32_t, SEP_IO_BLK_SIZE / 4);
+        memory_region_init_io(&s->i2c_mr, NULL, &sep_io_blk_ops, s->i2c_regs,
+                              "sep-i2c", SEP_IO_BLK_SIZE);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_I2C_PA,
+                                            &s->i2c_mr, 10);
+        memory_region_init_io(&s->gpio_mr, NULL, &sep_io_blk_ops, s->gpio_regs,
+                              "sep-gpio", SEP_IO_BLK_SIZE);
+        memory_region_add_subregion_overlap(&s->private_memory, SEP_GPIO_PA,
+                                            &s->gpio_mr, 10);
         /* Loader __phys_range: KIC 0x2a0c40000 / 0x40000 (flags 4). */
         memory_region_init_ram(&s->cfg0c40, NULL, "sep-cfg0c40", 0x40000,
                                &error_fatal);
@@ -1155,6 +2349,7 @@ static void sep_lab_init(MachineState *machine)
         s->entry = SEP_KRAM_BASE;
         sep_lab_apply_patches(s, image_size);
         sep_lab_apply_phase2(s, image_size);
+        sep_lab_apply_init_compat(s, image_size);
         /* Handoff memory region the sep64 region encode points at. The real
          * SEPROM maps SEP DRAM here and writes the tagged record directory the
          * kernel parses at image 0x8f70; back it as RAM so the loader
@@ -1213,6 +2408,19 @@ static void sep_lab_init(MachineState *machine)
     sep_lab_init_trng_irq(s);
     sep_lab_init_inject(s);
     sep_lab_init_stack_fix(s);
+    sep_lab_exclog_init(s);
+    if (s->sep_phase2) {
+        const char *synth_env = getenv("SEP_SYNTH_SERVE");
+
+        s->synth_serve = synth_env && *synth_env && strcmp(synth_env, "0");
+        {
+            const char *e0_env = getenv("SEP_SYNTH_E0");
+
+            s->synth_e0 = e0_env && *e0_env && strcmp(e0_env, "0");
+        }
+        arm_register_pre_el_change_hook(s->cpu, sep_lab_sars_ipc_pre_hook, s);
+        arm_register_el_change_hook(s->cpu, sep_lab_sars_ipc_post_hook, s);
+    }
     qemu_register_reset(sep_lab_reset, s);
     rom_add_blob_fixed("sep-lab.raw-image", image, image_size, 0);
     error_setg(&s->migration_blocker,
@@ -1289,7 +2497,7 @@ static void sep_lab_set_irq(Object *obj, const char *value, Error **errp)
 
 static void sep_lab_update_irq(AppleSEPLabState *s)
 {
-    bool raise = s->t_pending || s->trng_pending ||
+    bool raise = s->t_pending || s->trng_pending || s->ext_irq_edge ||
                  (s->sep_inject && s->mbox_pending);
 
     if (s->sep_irq) {
@@ -1699,6 +2907,9 @@ static void sep_timer_fire(void *opaque)
         error_report("SEP timer: fire #%" PRIu64 " (ctrl=0x%x count=0x%x)",
                      s->t_fires, s->t_ctrl, s->t_count);
     }
+    if (s->t_fires == 1 && s->exclog_max) {
+        sep_lab_exclog_dump_ring(s, "timer fire #1");
+    }
     sep_timer_update_irq(s);
 }
 
@@ -1773,6 +2984,18 @@ static uint64_t sep_kic_read(void *opaque, hwaddr off, unsigned size)
             error_report("SEP TRNG: KIC claim event 0x%x (IRQ 3)",
                          SEP_KIC_TRNG_EVENT);
             return SEP_KIC_TRNG_EVENT;
+        }
+        if (s->ext_irq_edge) {
+            int bit = ctz32(s->ext_irq_edge);
+            uint32_t ev = 0x00010000u | bit;
+
+            s->ext_irq_edge &= ~BIT(bit);
+            sep_lab_update_irq(s);
+            if (s->ext_irq_claims++ < 32) {
+                error_report("SEP ASC: KIC claim ext IRQ %d event 0x%x",
+                             bit, ev);
+            }
+            return ev;
         }
         if (s->sep_inject && s->mbox_pending) {
             s->mbox_pending = false;
@@ -1851,14 +3074,25 @@ static void sep_asc_a00_write(void *opaque, hwaddr off, uint64_t val,
     (void)size;
     if (off == 0x00) {
         s->ext_irq_mask |= (uint32_t)val;
+        s->ext_irq_edge &= ~(uint32_t)val;
         error_report("SEP ASC: ext IRQ MASK_SET |= 0x%x → 0x%x",
                      (uint32_t)val, s->ext_irq_mask);
         sep_lab_eval_trng_irq(s);
+        sep_lab_update_irq(s);
     } else if (off == 0x80) {
+        uint32_t newly = s->ext_irq_mask & (uint32_t)val;
+
         s->ext_irq_mask &= ~(uint32_t)val;
         error_report("SEP ASC: ext IRQ MASK_CLR &= ~0x%x → 0x%x",
                      (uint32_t)val, s->ext_irq_mask);
         sep_lab_eval_trng_irq(s);
+        if (newly & SEP_EXT_IRQ_PMGR28000) {
+            sep_lab_raise_pmgr28000(s);
+        }
+        if (newly & (SEP_EXT_IRQ_PMGR2C000 | SEP_EXT_IRQ_PMGR2C000_IRQ7)) {
+            sep_lab_raise_pmgr2c000(s);
+        }
+        sep_lab_update_irq(s);
     }
 }
 
@@ -1905,6 +3139,9 @@ static void sep_lab_init_trng_irq(AppleSEPLabState *s)
         return;
     }
     s->ext_irq_mask = 0xffffffffu;
+    s->ext_irq_edge = 0;
+    s->pmgr28000_latched = false;
+    s->pmgr2c000_latched = false;
     s->trng_pending = false;
     if (!s->sep_timer && !s->sep_inject) {
         memory_region_init_io(&s->kic_mr, NULL, &sep_kic_ops, s,
@@ -1961,6 +3198,9 @@ static void sep_lab_init_inject(AppleSEPLabState *s)
     memory_region_add_subregion_overlap(&s->private_memory, SEP_ASC_PA + 0x1010,
                                         &s->asc_1010_mr, 25);
     s->ext_irq_mask = 0xffffffffu;
+    s->ext_irq_edge = 0;
+    s->pmgr28000_latched = false;
+    s->pmgr2c000_latched = false;
     s->trng_pending = false;
     sep_inject_reset_state(s);
     if (s->inject_script && s->inject_script[0]) {
@@ -2183,7 +3423,7 @@ static void sep_lab_init_stack_fix(AppleSEPLabState *s)
     arm_register_el_change_hook(s->cpu, sep_lab_stack_fix_hook, s);
     arm_register_pre_el_change_hook(s->cpu, sep_lab_stack_fix_pre_hook, s);
     error_report("SEP lab: sep-stack-fix on (DRAM lo 0x%llx/0x%llx + "
-                 "FMST 64KiB + EL0 SP Trans_L3 filler)",
+                 "FMST 32KiB + EL0 SP Trans_L3 filler)",
                  (unsigned long long)SEP_DRAM_LO_BASE,
                  (unsigned long long)SEP_DRAM_LO_SIZE);
 }
@@ -2441,7 +3681,7 @@ static void sep_lab_class_init(ObjectClass *oc, const void *data)
                                    sep_lab_set_stack_fix);
     object_class_property_set_description(oc, "sep-stack-fix",
         "Lab-only (needs seprom=on, default off): back memcfg DRAM lo "
-        "(0x1e00000000/64MiB), grow FMST carve to 64KiB, and fill missing "
+        "(0x1e00000000/64MiB), grow FMST carve to 32KiB, and fill missing "
         "EL0 SP 16K pages on Trans_L3 (synthetic stack hole after PMGR).");
     object_class_property_add_bool(oc, "sep-inject", sep_lab_get_sep_inject,
                                    sep_lab_set_sep_inject);

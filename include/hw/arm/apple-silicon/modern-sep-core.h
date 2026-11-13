@@ -48,6 +48,8 @@
 /* Loader KIC window 0x2a0c40000/0x40000; ASC KIC claim at mbox+0x818. */
 #define SEP_CORE_KIC_PA         0x2a0c40000ULL
 #define SEP_CORE_KIC_SIZE       0x40000ULL
+#define SEP_CORE_AESS_PA        0x2a0b00000ULL
+#define SEP_CORE_AESS_SIZE      0x80ULL
 #define SEP_CORE_TRNG_PA        0x2a0b80000ULL
 #define SEP_CORE_TRNG_SIZE      0x1000ULL
 #define SEP_CORE_TIMER_PA       0x2a0e40000ULL
@@ -55,6 +57,10 @@
 #define SEP_CORE_KEY_FCFG_PA    0x2a0e48000ULL
 #define SEP_CORE_PLAT_PA        0x2a0d80000ULL
 #define SEP_CORE_PLAT_SIZE      0x100000ULL
+/* dxio_async: BASEI2C / BASEGPIO, just past the plat window. */
+#define SEP_CORE_I2C_PA         0x2a0e80000ULL
+#define SEP_CORE_GPIO_PA        0x2a0ec0000ULL
+#define SEP_CORE_IO_BLK_SIZE    0x4000ULL
 
 /*
  * M3: AP APPLE_A7IOP_V6 at 0x282600000 (+0x8100 AP mailbox) is shared; SEP
@@ -73,6 +79,7 @@
 #define SEP_CORE_EP_FO(va)      (SEP_CORE_EP_FILE + ((va) - SEP_CORE_EP_TEXT_VA))
 #define SEP_CORE_EP_START_ALL   0x118498u
 #define SEP_CORE_EP_START_EXIT  0x118524u
+#define SEP_CORE_EP_IPC_REPLY   0x11ff2cu
 #define SEP_CORE_EP_CREATE_RET  0x118e6cu
 #define SEP_CORE_EP_TRAMP       0x123000u
 
@@ -91,8 +98,11 @@ typedef struct AppleModernSEPCore {
     MemoryRegion akp_sab;
     MemoryRegion akp_mmt;
     MemoryRegion akp_hi;
+    MemoryRegion aess_mr;       /* SSEAESAB ('AESS'/'BASE') @ 0x2a0b00000 */
     MemoryRegion trng_mr;
     MemoryRegion key_fcfg_mr;
+    MemoryRegion i2c_mr;        /* BASEI2C @ 0x2a0e80000 */
+    MemoryRegion gpio_mr;       /* BASEGPIO @ 0x2a0ec0000 */
     MemoryRegion plat;
     MemoryRegion xprt;          /* 0x2e42c0000/0x30000 (MISC+FUSE+UCES) */
     MemoryRegion sepmmio;
@@ -111,11 +121,19 @@ typedef struct AppleModernSEPCore {
     gsize image_size;
     bool seprom_handoff;
 
-    /* PMGR / TRNG / timer / KIC state (lab models). */
+    /* PMGR / AESS / TRNG / timer / KIC state (lab models). */
     uint32_t *pmgr_regs;
+    uint32_t aess_regs[SEP_CORE_AESS_SIZE / 4];
+    uint8_t aess_key[32];
     uint32_t trng_regs[SEP_CORE_TRNG_SIZE / 4];
     uint32_t ext_irq_mask;
+    uint32_t ext_irq_edge;      /* device-asserted ext IRQs, not yet claimed */
+    uint32_t ext_irq_claims;
+    bool pmgr28000_latched;     /* +0x28000 rose to 0xf; deliver IRQ 9 once */
+    bool pmgr2c000_latched;     /* +0x2c000 rose to 0xf; deliver IRQ 5 once */
     uint32_t key_fcfg_8000;
+    uint32_t *i2c_regs;
+    uint32_t *gpio_regs;
     uint32_t t_ctrl;
     uint32_t t_stat;
     uint32_t t_count;

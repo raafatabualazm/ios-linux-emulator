@@ -25,6 +25,7 @@
 #include "system/address-spaces.h"
 #include "system/reset.h"
 #include "system/memory.h"
+#include "crypto/aes.h"
 #include "target/arm/cpu.h"
 #include "hw/arm/apple-silicon/modern-sep-core.h"
 #include "hw/misc/apple-silicon/a7iop/core.h"
@@ -64,8 +65,8 @@ static const MemoryRegionOps sep_mmio_ops = {
 
 static void sep_core_update_irq(AppleModernSEPCore *core)
 {
-    bool raise = core->t_pending || core->trng_pending || core->mbox_pending ||
-                 core->mbox_line;
+    bool raise = core->t_pending || core->trng_pending || core->ext_irq_edge ||
+                 core->mbox_pending || core->mbox_line;
     if (core->sep_irq) {
         qemu_set_irq(core->sep_irq, raise);
     }
@@ -100,12 +101,51 @@ static void sep_pmgr_write(void *opaque, hwaddr off, uint64_t val,
         return;
     }
     {
+        uint32_t old = core->pmgr_regs[off / 4];
         uint32_t v = (uint32_t)val;
         if ((v & ~0x8000000fu) == 0) {
             uint32_t n = v & 0xfu;
             v = (v & 0x80000000u) | (n << 4) | n;
         }
         core->pmgr_regs[off / 4] = v;
+        /* Rising edge of a power-domain status nibble to 0xf is that
+         * domain's one-shot ready completion: +0x28000 -> ext IRQ 9,
+         * +0x2c000 -> ext IRQ 5 (SEPD's dxio dance writes +0x8000 then
+         * +0x2c000 while bit 5 is unmasked and waits; verified live
+         * 2026-10-25: KIC event 0x00010005 claimed stops the retry loop
+         * and advances phase 2). */
+        {
+            struct {
+                uint32_t off;
+                int bit;
+                bool *latch;
+            } edges[] = {
+                { 0x28000u, 9, &core->pmgr28000_latched },
+                { 0x2c000u, 5, &core->pmgr2c000_latched },
+            };
+            for (unsigned i = 0; i < ARRAY_SIZE(edges); i++) {
+                if (off != edges[i].off) {
+                    continue;
+                }
+                int bit = edges[i].bit;
+                bool was = (old & 0xf0u) == 0xf0u;
+                bool now = (v & 0xf0u) == 0xf0u;
+
+                if (now && !was) {
+                    *edges[i].latch = true;
+                } else if (!now) {
+                    *edges[i].latch = false;
+                    core->ext_irq_edge &= ~BIT(bit);
+                }
+                if (*edges[i].latch &&
+                    !(core->ext_irq_mask & BIT(bit)) &&
+                    !(core->ext_irq_edge & BIT(bit))) {
+                    *edges[i].latch = false;
+                    core->ext_irq_edge |= BIT(bit);
+                    sep_core_update_irq(core);
+                }
+            }
+        }
     }
 }
 
@@ -146,6 +186,21 @@ static uint64_t sep_trng_read(void *opaque, hwaddr off, unsigned size)
     if (off + size > SEP_CORE_TRNG_SIZE) {
         return 0;
     }
+    if (off < 0x10) {
+        static const uint32_t aes_kat[4] = {
+            0x46f2fb34u, 0x2d6f0ab4u, 0x77476fc5u, 0x01242c5fu,
+        };
+        static const uint32_t drbg_kat[4] = {
+            0xf640242du, 0xdd34e9e1u, 0x31e71303u, 0x7b1834b7u,
+        };
+        uint32_t mode = core->trng_regs[0x70 / 4] & 0xc0u;
+        if (mode == 0x40u) {
+            return aes_kat[off / 4];
+        }
+        if (mode == 0x80u) {
+            return drbg_kat[off / 4];
+        }
+    }
     return core->trng_regs[off / 4];
 }
 
@@ -155,6 +210,9 @@ static void sep_trng_write(void *opaque, hwaddr off, uint64_t val,
     AppleModernSEPCore *core = opaque;
 
     if (off + size > SEP_CORE_TRNG_SIZE) {
+        return;
+    }
+    if (off < 0x10) {
         return;
     }
     if (off == 0x10) {
@@ -181,6 +239,121 @@ static void sep_trng_write(void *opaque, hwaddr off, uint64_t val,
 static const MemoryRegionOps sep_trng_ops = {
     .read = sep_trng_read,
     .write = sep_trng_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 8 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/* ---------- SSEAESAB ('AESS'/'BASE' @ 0x2a0b00000) ---------- */
+
+static void sep_aess_exec(uint32_t *regs, uint8_t *key)
+{
+    uint32_t cmd = regs[0x08 / 4];
+    uint32_t op = cmd & 0xffu;
+    unsigned key_bits = 128u + (((cmd >> 8) & 3u) * 64u);
+    uint8_t *in_lo = (uint8_t *)&regs[0x40 / 4];
+    uint8_t *in_hi = (uint8_t *)&regs[0x50 / 4];
+    uint8_t *out_lo = (uint8_t *)&regs[0x60 / 4];
+    uint8_t *out_hi = (uint8_t *)&regs[0x70 / 4];
+    uint8_t blk[16];
+    AES_KEY aes;
+    unsigned i;
+
+    if (key_bits > 256u) {
+        key_bits = 128u;
+    }
+    if (op == 0x0bu) {
+        memcpy(key, in_lo, 32);
+        return;
+    }
+    if (op == 0x89u) {
+        for (i = 0; i < 16; i++) {
+            blk[i] = in_hi[i] ^ in_lo[i];
+        }
+        AES_set_encrypt_key(key, key_bits, &aes);
+        AES_encrypt(blk, out_hi, &aes);
+        return;
+    }
+    if (op == 0x8au) {
+        AES_set_decrypt_key(key, key_bits, &aes);
+        AES_decrypt(in_lo, blk, &aes);
+        for (i = 0; i < 16; i++) {
+            out_hi[i] = blk[i] ^ in_hi[i];
+        }
+        return;
+    }
+    for (i = 0; i < 16; i++) {
+        blk[i] = in_lo[i] ^ in_hi[i] ^ (uint8_t)(cmd + i * 0x11u + 0x5au);
+    }
+    AES_set_encrypt_key(key, 128, &aes);
+    AES_encrypt(blk, out_hi, &aes);
+    memcpy(out_lo, out_hi, 16);
+    if (op != 0x46u && op != 0x47u) {
+        memcpy(key, out_hi, 16);
+        memcpy(key + 16, out_hi, 16);
+    }
+}
+
+static uint64_t sep_aess_read(void *opaque, hwaddr off, unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+
+    if (off + size > SEP_CORE_AESS_SIZE) {
+        return 0;
+    }
+    return core->aess_regs[off / 4];
+}
+
+static void sep_aess_write(void *opaque, hwaddr off, uint64_t val,
+                           unsigned size)
+{
+    AppleModernSEPCore *core = opaque;
+
+    if (off + size > SEP_CORE_AESS_SIZE) {
+        return;
+    }
+    if (off == 0x04) {
+        core->aess_regs[0x04 / 4] = (uint32_t)val & ~0xe02u;
+        if (val & 1) {
+            sep_aess_exec(core->aess_regs, core->aess_key);
+        }
+        return;
+    }
+    core->aess_regs[off / 4] = (uint32_t)val;
+}
+
+static uint64_t sep_io_blk_read(void *opaque, hwaddr off, unsigned size)
+{
+    uint32_t *regs = opaque;
+
+    if (off + 4 > SEP_CORE_IO_BLK_SIZE || size != 4) {
+        return 0;
+    }
+    return regs[off / 4];
+}
+
+static void sep_io_blk_write(void *opaque, hwaddr off, uint64_t val,
+                             unsigned size)
+{
+    uint32_t *regs = opaque;
+
+    if (off + 4 > SEP_CORE_IO_BLK_SIZE || size != 4) {
+        return;
+    }
+    regs[off / 4] = (uint32_t)val;
+}
+
+static const MemoryRegionOps sep_io_blk_ops = {
+    .read = sep_io_blk_read,
+    .write = sep_io_blk_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static const MemoryRegionOps sep_aess_ops = {
+    .read = sep_aess_read,
+    .write = sep_aess_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 8 },
     .impl = { .min_access_size = 4, .max_access_size = 4 },
@@ -308,6 +481,18 @@ static uint64_t sep_kic_read(void *opaque, hwaddr off, unsigned size)
             error_report("modern-sep-core: KIC claim TRNG 0x%x (IRQ 3)",
                          SEP_CORE_KIC_TRNG_EVT);
             return SEP_CORE_KIC_TRNG_EVT;
+        }
+        if (core->ext_irq_edge) {
+            int bit = ctz32(core->ext_irq_edge);
+            uint32_t ev = 0x00010000u | bit;
+
+            core->ext_irq_edge &= ~BIT(bit);
+            sep_core_update_irq(core);
+            if (core->ext_irq_claims++ < 32) {
+                error_report("modern-sep-core: KIC claim ext IRQ %d event 0x%x",
+                             bit, ev);
+            }
+            return ev;
         }
         if (core->mbox_pending) {
             core->mbox_pending = false;
@@ -505,10 +690,25 @@ static void sep_asc_a00_write(void *opaque, hwaddr off, uint64_t val,
     (void)size;
     if (off == 0x00) {
         core->ext_irq_mask |= (uint32_t)val;
+        core->ext_irq_edge &= ~(uint32_t)val;
         sep_core_eval_trng_irq(core);
+        sep_core_update_irq(core);
     } else if (off == 0x80) {
+        uint32_t newly = core->ext_irq_mask & (uint32_t)val;
+
         core->ext_irq_mask &= ~(uint32_t)val;
         sep_core_eval_trng_irq(core);
+        if ((newly & BIT(9)) && core->pmgr28000_latched &&
+            !(core->ext_irq_edge & BIT(9))) {
+            core->pmgr28000_latched = false;
+            core->ext_irq_edge |= BIT(9);
+        }
+        if ((newly & BIT(5)) && core->pmgr2c000_latched &&
+            !(core->ext_irq_edge & BIT(5))) {
+            core->pmgr2c000_latched = false;
+            core->ext_irq_edge |= BIT(5);
+        }
+        sep_core_update_irq(core);
     }
 }
 
@@ -701,8 +901,9 @@ static void sep_core_apply_phase2(AppleModernSEPCore *core)
     uint8_t *kram;
     uint32_t retab = 0xd65f0fffu;
     uint32_t ret_plain = 0xd65f03c0u;
-    uint32_t b_tramp;
-    uint32_t tramp[6];
+    uint32_t b_tramp, b_exit;
+    uint32_t tramp[9];
+    uint32_t exit_va;
     uint32_t bl_imm;
     int32_t off;
     uint64_t fo;
@@ -717,22 +918,6 @@ static void sep_core_apply_phase2(AppleModernSEPCore *core)
     }
     kram = memory_region_get_ram_ptr(&core->kram);
 
-    fo = SEP_CORE_EP_FO(SEP_CORE_EP_START_EXIT);
-    if (fo + 4 > core->image_size) {
-        error_report("modern-sep-core: sep-phase2 start-all exit OOB");
-        return;
-    }
-    /*
-     * Plain RET, not RETAB: start-all's epilogue already ran AUTIBSP
-     * (0x118514) and its brk-on-failure check, so LR is authenticated.
-     * A second RETAB authenticates a stripped pointer; on this SEP CPU
-     * (PAuth on, FEAT_FPAC) that traps at EL0 (ESR EC 0x1c, syn 0x72000001,
-     * PC slide+0x118524), SEPD dies, and its panic recursion ends in the
-     * EL0 Trans_L3 at ELR 0xb350 / kernel halt 0xc798. The trampoline's
-     * own RETAB is correct (it returns with create-fn's signed LR and SP).
-     */
-    memcpy(kram + fo, &ret_plain, 4);
-
     off = (int32_t)SEP_CORE_EP_START_ALL - (int32_t)(SEP_CORE_EP_TRAMP + 12);
     bl_imm = 0x94000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
     tramp[0] = 0xa9bf7bfdu;
@@ -741,12 +926,31 @@ static void sep_core_apply_phase2(AppleModernSEPCore *core)
     tramp[3] = bl_imm;
     tramp[4] = 0xa8c17bfdu;
     tramp[5] = retab;
+    /*
+     * Exit stub for 0x118524: when called from trampoline (x0 == 0), plain ret
+     * (AUTIBSP already ran at 0x118514); when called later by sks RPC
+     * (0x64, 0x4047) with msg_ctx x0 != 0, branch to original IPC reply 0x11ff2c.
+     */
+    exit_va = SEP_CORE_EP_TRAMP + 6 * sizeof(uint32_t);
+    tramp[6] = 0xb4000040u; /* cbz x0, .+8 */
+    off = (int32_t)SEP_CORE_EP_IPC_REPLY - (int32_t)(exit_va + 4);
+    tramp[7] = 0x14000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
+    tramp[8] = ret_plain;
     fo = SEP_CORE_EP_FO(SEP_CORE_EP_TRAMP);
     if (fo + sizeof(tramp) > core->image_size) {
         error_report("modern-sep-core: sep-phase2 trampoline OOB");
         return;
     }
     memcpy(kram + fo, tramp, sizeof(tramp));
+
+    off = (int32_t)exit_va - (int32_t)SEP_CORE_EP_START_EXIT;
+    b_exit = 0x14000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
+    fo = SEP_CORE_EP_FO(SEP_CORE_EP_START_EXIT);
+    if (fo + 4 > core->image_size) {
+        error_report("modern-sep-core: sep-phase2 start-all exit OOB");
+        return;
+    }
+    memcpy(kram + fo, &b_exit, 4);
 
     off = (int32_t)SEP_CORE_EP_TRAMP - (int32_t)SEP_CORE_EP_CREATE_RET;
     b_tramp = 0x14000000u | (((uint32_t)(off >> 2)) & 0x03ffffffu);
@@ -856,6 +1060,11 @@ static void sep_core_seed_handoff(AppleModernSEPCore *core)
         hi[(0x2a0bc1800ULL - 0x2a0b00000ULL) / 4] = 0x3;
     }
 
+    memset(core->aess_regs, 0, sizeof(core->aess_regs));
+    memset(core->aess_key, 0, sizeof(core->aess_key));
+    core->aess_regs[0x00 / 4] = SEP_CORE_SENTINEL;
+    core->aess_regs[0x08 / 4] = SEP_CORE_SENTINEL;
+
     memset(core->trng_regs, 0, sizeof(core->trng_regs));
     core->trng_regs[0x00 / 4] = 0x34fbf246u;
     core->trng_regs[0x04 / 4] = 0xb40a6f2du;
@@ -865,6 +1074,9 @@ static void sep_core_seed_handoff(AppleModernSEPCore *core)
     core->trng_regs[0x78 / 4] = 0x00180000u;
     core->trng_regs[0x7c / 4] = 0x02000000u;
     core->ext_irq_mask = 0xffffffffu;
+    core->ext_irq_edge = 0;
+    core->pmgr28000_latched = false;
+    core->pmgr2c000_latched = false;
 
     {
         uint32_t *plat = (uint32_t *)memory_region_get_ram_ptr(&core->plat);
@@ -942,6 +1154,9 @@ static void sep_core_reset(void *opaque)
     core->trng_pending = false;
     core->mbox_pending = false;
     core->ext_irq_mask = 0xffffffffu;
+    core->ext_irq_edge = 0;
+    core->pmgr28000_latched = false;
+    core->pmgr2c000_latched = false;
     core->boot_desc_sent = false;
     core->rom_announced = false;
     core->rom_status = 1;
@@ -1050,6 +1265,11 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
     memory_region_add_subregion_overlap(&core->container, 0x2a0b00000ULL,
                                         &core->akp_hi, 0);
 
+    memory_region_init_io(&core->aess_mr, NULL, &sep_aess_ops, core,
+                          "modern-sep.aess", SEP_CORE_AESS_SIZE);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_AESS_PA,
+                                        &core->aess_mr, 10);
+
     memory_region_init_io(&core->trng_mr, NULL, &sep_trng_ops, core,
                           "modern-sep.trng", SEP_CORE_TRNG_SIZE);
     memory_region_add_subregion_overlap(&core->container, SEP_CORE_TRNG_PA,
@@ -1064,6 +1284,17 @@ bool apple_modern_sep_core_create(Object *owner, AppleModernSEPCore *core,
                            SEP_CORE_PLAT_SIZE, &error_fatal);
     memory_region_add_subregion_overlap(&core->container, SEP_CORE_PLAT_PA,
                                         &core->plat, 0);
+
+    core->i2c_regs = g_new0(uint32_t, SEP_CORE_IO_BLK_SIZE / 4);
+    core->gpio_regs = g_new0(uint32_t, SEP_CORE_IO_BLK_SIZE / 4);
+    memory_region_init_io(&core->i2c_mr, NULL, &sep_io_blk_ops, core->i2c_regs,
+                          "modern-sep.i2c", SEP_CORE_IO_BLK_SIZE);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_I2C_PA,
+                                        &core->i2c_mr, 10);
+    memory_region_init_io(&core->gpio_mr, NULL, &sep_io_blk_ops, core->gpio_regs,
+                          "modern-sep.gpio", SEP_CORE_IO_BLK_SIZE);
+    memory_region_add_subregion_overlap(&core->container, SEP_CORE_GPIO_PA,
+                                        &core->gpio_mr, 10);
 
     memory_region_init_io(&core->key_fcfg_mr, NULL, &sep_key_fcfg_ops, core,
                           "modern-sep.key-fcfg", 4);
